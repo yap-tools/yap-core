@@ -86,7 +86,9 @@ export function registerMcpTools(server: YapServer): void {
       uri: def.uri,
       name: `widget: ${def.name}`,
       description: def.description,
-      mimeType: "text/html",
+      // MCP Apps (SEP-1865) requires this exact profile on a UI resource;
+      // hosts use it to decide a resource is a renderable app.
+      mimeType: "text/html;profile=mcp-app",
       load: async () => ({ text: widgetHtml(def.name, "client") }),
     });
   }
@@ -275,29 +277,16 @@ export function registerMcpTools(server: YapServer): void {
             }),
           );
         }
-        // Result-level widget delivery: per-call _meta pointers travel in the
-        // JSON payload, and each referenced ui:// resource is also attached as
-        // a spec-clean resource_link content item for MCP-Apps-capable hosts.
-        // (fastmcp's result validation rejects a literal result `_meta` key.)
-        const widgetUris = [...new Set(results.flatMap((r) => (r._meta ? [r._meta.widget] : [])))];
-        return {
-          content: [
-            { type: "text" as const, text: asJson({ results }) },
-            ...widgetUris.flatMap((uri) => {
-              const def = WIDGETS[uri.replace(UI_SCHEME_PREFIX, "")];
-              if (!def) return [];
-              return [
-                {
-                  type: "resource_link" as const,
-                  uri,
-                  name: def.name,
-                  mimeType: "text/html",
-                  description: def.description,
-                },
-              ];
-            }),
-          ],
-        };
+        // Widget delivery stays in-band: each per-call _meta pointer (widget
+        // uri + data) travels inside the JSON payload, which the inline widget
+        // JS and the headless flow both read. We deliberately do NOT attach a
+        // resource_link content item — it's an MCP 2025-06-18 content type, and
+        // a client that negotiated an older protocol rejects the entire result
+        // ("not a valid CallToolResult"). fastmcp 4.x doesn't expose the
+        // negotiated version to a tool, so we can't gate it; text-only content
+        // is portable to every client. Capable hosts still render via the
+        // in-band _meta and show_widget's tool-level _meta.ui template.
+        return { content: [{ type: "text" as const, text: asJson({ results }) }] };
       } catch (err) {
         rethrow(err);
       }
@@ -308,7 +297,7 @@ export function registerMcpTools(server: YapServer): void {
 
   mcp.addTool({
     name: "show_widget",
-    description: `Render any registered widget by name. The statically-declared template is a thin shell that reads the named ui:// widget resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. Also the recovery path when a host did not render a widget from call's result metadata.`,
+    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those.`,
     parameters: z.object({
       widget: z.string().describe("Widget name or ui://yap/... URI"),
       params: z.record(z.string(), z.unknown()).optional(),
@@ -321,20 +310,15 @@ export function registerMcpTools(server: YapServer): void {
       if (!def) {
         throw new UserError(`unknown widget ${args.widget} (registered: ${Object.keys(WIDGETS).join(", ")})`);
       }
+      // Two channels, no resource_link (see the note in `call`):
+      //  - text content: the {widget, params} JSON, readable by any client.
+      //  - structuredContent: how an MCP Apps host feeds the rendered shell its
+      //    data (delivered to the iframe as ui/notifications/tool-result). We
+      //    inline the resolved widget HTML so the shell needn't resources/read.
+      const params = args.params ?? {};
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: asJson({ widget: def.uri, params: args.params ?? {} }),
-          },
-          {
-            type: "resource_link" as const,
-            uri: def.uri,
-            name: def.name,
-            mimeType: "text/html",
-            description: def.description,
-          },
-        ],
+        content: [{ type: "text" as const, text: asJson({ widget: def.uri, params }) }],
+        structuredContent: { widget: def.uri, params, html: widgetHtml(def.name, "client") },
       };
     },
   });

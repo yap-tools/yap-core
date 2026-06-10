@@ -148,7 +148,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   upload_request: {
     description:
-      "Initiate the upload lifecycle: reserves a placeholder file record and returns a short-lived single-use upload link (PUT the bytes there), an upload-dropzone widget pointer for human uploads, and an origin-hosted upload page link for hosts that cannot render widgets. Params: name (required), mime_type?, size? (declared, advisory). Finalize with upload_complete.",
+      "Phase 1 of the 3-step upload lifecycle (request → upload bytes → complete). Reserves a placeholder file record and returns, in the result JSON: upload_url (short-lived, single-use — PUT the bytes there, then call upload_complete), origin_upload_url (a momentary signed upload page — give this link to a human to upload from a browser; nothing else needed), file_id, and complete_url. A dropzone widget pointer also rides in the result _meta for widget-capable hosts, but the links above work everywhere. Params: name (required), mime_type?, size? (declared, advisory).",
     capability: "edit_files",
     handler: async (env, params) => {
       const result = await filesCore.requestUpload(env, env.userId, env.bundleId, {

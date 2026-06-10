@@ -2,7 +2,13 @@
  * Single-process server: the MCP surface and the REST API served by one
  * fastmcp instance (REST rides on fastmcp's internal Hono app). Both surfaces
  * are thin transports over the core domain library — no logic lives here.
+ *
+ * fastmcp binds a loopback port; a CORS-correct edge proxy (rest/edge.ts) takes
+ * the public port and forwards to it. See edge.ts for why fastmcp can't front
+ * browser traffic directly (its transport mishandles CORS preflights).
  */
+import type { Server as HttpServer } from "node:http";
+
 import { FastMCP } from "fastmcp";
 
 import type { BlobStore } from "./blob/index.js";
@@ -12,6 +18,7 @@ import { authenticateKey } from "./core/keys.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
 import { registerMcpTools } from "./mcp/tools.js";
+import { createEdgeServer, getFreeLoopbackPort } from "./rest/edge.js";
 import { registerRestRoutes } from "./rest/routes.js";
 
 /** MCP session auth payload: identity only — permissions come from grants. */
@@ -78,6 +85,8 @@ export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: 
     roots: { enabled: false },
   });
 
+  let edge: HttpServer | undefined;
+
   const server: YapServer = {
     mcp,
     config,
@@ -85,12 +94,30 @@ export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: 
     blob,
     logger,
     start: async () => {
+      // fastmcp on loopback; the edge proxy owns the public port.
+      const internalPort = await getFreeLoopbackPort();
       await mcp.start({
         transportType: "httpStream",
-        httpStream: { port: config.port, host: config.host, stateless: true },
+        httpStream: { port: internalPort, host: "127.0.0.1", stateless: true },
+      });
+      edge = createEdgeServer({
+        targetHost: "127.0.0.1",
+        targetPort: internalPort,
+        onError: (err) => logger.error(`edge proxy upstream error: ${err.message}`),
+      });
+      await new Promise<void>((resolve, reject) => {
+        edge!.once("error", reject);
+        edge!.listen(config.port, config.host, () => {
+          edge!.off("error", reject);
+          resolve();
+        });
       });
     },
     stop: async () => {
+      if (edge) {
+        await new Promise<void>((resolve) => edge!.close(() => resolve()));
+        edge = undefined;
+      }
       await mcp.stop();
     },
   };

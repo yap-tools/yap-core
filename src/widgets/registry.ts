@@ -32,7 +32,7 @@ const BRIDGE_JS = `
   var reqId = 1;
   function send(msg) { try { parent.postMessage(msg, "*"); } catch (e) {} }
   function announceHeight() {
-    send({ jsonrpc: "2.0", method: "ui/size-changed", params: { height: document.documentElement.scrollHeight } });
+    send({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight } });
   }
   function emit(event, params) {
     if (MODE === "client") send({ jsonrpc: "2.0", method: "ui/event", params: Object.assign({ event: event }, params || {}) });
@@ -53,14 +53,45 @@ const BRIDGE_JS = `
       if (m.error) p.reject(m.error); else p.resolve(m.result);
       return;
     }
+    // Internal channel: the shell pushes a nested widget's data this way.
     if (m.method === "ui/render-data" || m.method === "ui/notifications/render-data") {
       var d = (m.params && m.params.data) || m.params || {};
       window.__yapOnData && window.__yapOnData(d);
+      return;
+    }
+    // MCP Apps channel: the host delivers the tool result; our data rides in
+    // structuredContent (see show_widget). Some hosts re-deliver tool-result on
+    // reconnect/refresh with no structuredContent — ignore those so an empty
+    // update can't clobber an already-rendered view.
+    if (m.method === "ui/notifications/tool-result") {
+      var sc = m.params && m.params.structuredContent;
+      if (sc && typeof sc === "object" && Object.keys(sc).length > 0) {
+        window.__yapOnData && window.__yapOnData(sc);
+      }
+      return;
+    }
+    // tool-input carries the call's arguments. When a host re-mounts the iframe
+    // it replays these even if it drops our structuredContent — so they're the
+    // recovery path: {widget, params} with no html, which the shell resolves
+    // via resources/read.
+    if (m.method === "ui/notifications/tool-input") {
+      var args = m.params && m.params.arguments;
+      if (args && typeof args === "object" && args.widget) {
+        window.__yapOnData && window.__yapOnData(args);
+      }
+      return;
     }
   });
   function onData(cb) {
     window.__yapOnData = function (d) { cb(d); requestAnimationFrame(announceHeight); };
+    // Origin-hosted: data is baked into the page; no host channel at all.
     if (window.__YAP_DATA__) { window.__yapOnData(window.__YAP_DATA__); return; }
+    // MCP Apps handshake (ui/initialize -> initialized). A non-MCP-Apps parent
+    // (e.g. the shell, when this widget is nested) simply won't answer; we also
+    // emit ui/ready so the shell can push data over the internal channel.
+    request("ui/initialize", { appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] } })
+      .then(function () { send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }); })
+      .catch(function () {});
     send({ jsonrpc: "2.0", method: "ui/ready" });
   }
   // HTML-escape for text and double-quoted-attribute contexts. Widget data
@@ -98,33 +129,52 @@ export const WIDGETS: Record<string, WidgetDef> = {
     originHostable: false,
     style: ".shellframe { border: 0; width: 100%; }",
     render: `
-      onData(function (d) {
-        var root = document.getElementById("root");
-        if (!d || !d.widget) { root.innerHTML = '<div class="card err">shell: no widget named</div>'; return; }
-        request("resources/read", { uri: d.widget }).then(function (r) {
-          var html = r && r.contents && r.contents[0] && r.contents[0].text;
-          if (!html) throw new Error("empty widget resource");
-          var f = document.createElement("iframe");
-          f.className = "shellframe";
-          f.setAttribute("sandbox", "allow-scripts");
-          f.srcdoc = html;
-          f.onload = function () {
-            f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: d.params || {} } }, "*");
-          };
-          // Relay inner-widget messages (height, events, requests) up to the host.
-          window.addEventListener("message", function (e) {
-            if (e.source === f.contentWindow) {
-              if (e.data && e.data.method === "ui/size-changed" && e.data.params) {
-                f.style.height = e.data.params.height + "px";
-              }
-              send(e.data);
-            }
-          });
-          root.innerHTML = "";
-          root.appendChild(f);
-        }).catch(function (err) {
-          root.innerHTML = '<div class="card err">shell: could not load widget (' + (err && err.message || err) + ')</div>';
+      var rendered = false;
+      var fallbackTimer = null;
+      var root = document.getElementById("root");
+      function mount(html, params) {
+        if (!html) { if (!rendered) root.innerHTML = '<div class="card err">shell: empty widget</div>'; return; }
+        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+        var f = document.createElement("iframe");
+        f.className = "shellframe";
+        f.setAttribute("sandbox", "allow-scripts");
+        f.srcdoc = html;
+        f.onload = function () {
+          f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: params || {} } }, "*");
+        };
+        // The nested widget reports its size to us (its parent); resize the
+        // frame and re-announce our own size up to the host.
+        window.addEventListener("message", function (e) {
+          if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
+            f.style.height = e.data.params.height + "px";
+            requestAnimationFrame(announceHeight);
+          }
         });
+        root.innerHTML = "";
+        root.appendChild(f);
+        rendered = true;
+      }
+      onData(function (d) {
+        if (!d || !d.widget) {
+          // A spurious empty update must not replace a widget we already mounted.
+          if (!rendered) root.innerHTML = '<div class="card err">shell: no widget named</div>';
+          return;
+        }
+        // The tool result inlines the widget HTML — render it immediately.
+        if (d.html) { mount(d.html, d.params); return; }
+        // From tool-input args (no html), e.g. after a host re-mount: give a
+        // richer tool-result a beat to arrive, else fetch the widget via the host.
+        if (rendered || fallbackTimer) return;
+        var widgetUri = d.widget, params = d.params;
+        fallbackTimer = setTimeout(function () {
+          fallbackTimer = null;
+          if (rendered) return;
+          request("resources/read", { uri: widgetUri })
+            .then(function (r) { mount(r && r.contents && r.contents[0] && r.contents[0].text, params); })
+            .catch(function (err) {
+              if (!rendered) root.innerHTML = '<div class="card err">shell: could not load widget (' + (err && err.message || err) + ')</div>';
+            });
+        }, 300);
       });
     `,
   },

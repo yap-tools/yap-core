@@ -48,9 +48,13 @@ describeEachAdapter("widgets", (adapter) => {
 
       const card = await aliceMcp.client.readResource({ uri: "ui://yap/media-card" });
       const html = (card.contents[0] as any).text as string;
-      expect((card.contents[0] as any).mimeType).toBe("text/html");
+      // MCP Apps (SEP-1865) profile so hosts treat it as a renderable app.
+      expect((card.contents[0] as any).mimeType).toBe("text/html;profile=mcp-app");
       expect(html).toContain("<!doctype html>");
-      expect(html).toContain("ui/size-changed"); // host bridge inlined
+      // MCP Apps bridge inlined: the initialize handshake + size notification.
+      expect(html).toContain("ui/initialize");
+      expect(html).toContain("ui/notifications/size-changed");
+      expect(html).toContain("ui/notifications/tool-result");
     });
 
     it("widgets are self-contained: no external scripts, styles, or fonts", async () => {
@@ -66,7 +70,7 @@ describeEachAdapter("widgets", (adapter) => {
   });
 
   describe("result-level delivery via call", () => {
-    it("widget-bearing results carry the pointer in-band and as a resource_link", async () => {
+    it("carries the widget pointer in-band, and emits ONLY text content (portable to every client)", async () => {
       const raw: any = await aliceMcp.callRaw("call", {
         space_id: spaceId,
         calls: [{ bundle_id: bundleId, tool: "upload_request", params: { name: "x.txt" } }],
@@ -79,10 +83,9 @@ describeEachAdapter("widgets", (adapter) => {
       // The widget needs complete_url to finalize after the PUT — omitting it
       // strands every in-client upload in 'reserved'.
       expect(parsed.results[0]._meta.data.complete_url).toContain("/complete?token=");
-      const link = raw.content.find((c: any) => c.type === "resource_link");
-      expect(link).toBeTruthy();
-      expect(link.uri).toBe("ui://yap/upload-dropzone");
-      expect(link.mimeType).toBe("text/html");
+      // No resource_link (or any non-text) content item: it's an MCP 2025-06-18
+      // type that older clients reject, invalidating the whole CallToolResult.
+      expect(raw.content.every((c: any) => c.type === "text")).toBe(true);
     });
 
     it("an in-client widget upload finalizes using the widget data alone", async () => {
@@ -112,22 +115,74 @@ describeEachAdapter("widgets", (adapter) => {
       expect((showWidget._meta as any)?.ui?.resourceUri).toBe("ui://yap/shell");
     });
 
-    it("renders any registered widget by name with params", async () => {
+    it("renders any registered widget by name: text content + structuredContent for MCP Apps", async () => {
       const raw: any = await aliceMcp.callRaw("show_widget", {
         widget: "media-card",
         params: { kind: "image", url: "https://example.com/x.png" },
       });
+      // Portable text content (no resource_link) for any client.
       const text = JSON.parse(raw.content.find((c: any) => c.type === "text").text);
       expect(text.widget).toBe("ui://yap/media-card");
       expect(text.params.kind).toBe("image");
-      const link = raw.content.find((c: any) => c.type === "resource_link");
-      expect(link.uri).toBe("ui://yap/media-card");
+      expect(raw.content.every((c: any) => c.type === "text")).toBe(true);
+      // MCP Apps render channel: the host forwards structuredContent to the
+      // shell iframe as ui/notifications/tool-result. It carries the target
+      // widget, its params, and the inlined HTML (so no resources/read needed).
+      expect(raw.structuredContent.widget).toBe("ui://yap/media-card");
+      expect(raw.structuredContent.params.kind).toBe("image");
+      expect(raw.structuredContent.html).toContain("<!doctype html>");
+      expect(raw.structuredContent.html).toContain("media-card");
     });
 
     it("rejects unknown widgets with the registry listed", async () => {
       await expect(aliceMcp.call("show_widget", { widget: "nope" })).rejects.toThrow(/shell|upload-dropzone/);
     });
   });
+
+  describe("CORS at the edge (cross-origin widget upload)", () => {
+    it("answers a null-origin preflight and lets the dropzone PUT/finalize cross-origin", async () => {
+      const requested = (
+        await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "cors.txt" })
+      ).body;
+
+      // A sandboxed widget iframe sends Origin: null and preflights the PUT.
+      // The edge must answer it (fastmcp's transport crashes on a null origin).
+      const preflight = await fetch(requested.upload_url, {
+        method: "OPTIONS",
+        headers: {
+          origin: "null",
+          "access-control-request-method": "PUT",
+          "access-control-request-headers": "content-type",
+        },
+      });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+      expect(preflight.headers.get("access-control-allow-methods")).toContain("PUT");
+
+      // Both the PUT and the finalize carry allow-origin so the browser accepts them.
+      const put = await fetch(requested.upload_url, {
+        method: "PUT",
+        headers: { origin: "null", "content-type": "text/plain" },
+        body: "cors bytes",
+      });
+      expect(put.status).toBe(200);
+      expect(put.headers.get("access-control-allow-origin")).toBe("*");
+      const complete = await fetch(requested.complete_url, {
+        method: "POST",
+        headers: { origin: "null", "content-type": "application/json" },
+        body: JSON.stringify({ name: "cors.txt", mime_type: "text/plain" }),
+      });
+      expect(complete.status).toBe(200);
+      expect(complete.headers.get("access-control-allow-origin")).toBe("*");
+      expect(((await complete.json()) as any).status).toBe("finalized");
+    });
+
+    it("preserves the MCP path through the edge (tools still work)", async () => {
+      const loaded = await aliceMcp.call("load", {});
+      expect(Array.isArray(loaded.spaces)).toBe(true);
+    });
+  });
+
 
   describe("origin-hosted pages", () => {
     it("serves the upload page at a signed URL and the embedded flow finalizes the file", async () => {
