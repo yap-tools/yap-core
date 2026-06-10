@@ -36,6 +36,18 @@ YAP_MASTER_KEY="$(openssl rand -base64 32)" \
 npm start
 ```
 
+Or keep the vars in a file — the server loads a local `.env` automatically on
+startup (Node's built-in parser, no dependency):
+
+```sh
+cp .env.example .env       # then fill in YAP_MASTER_KEY etc.
+npm run dev                # or: npm start
+```
+
+Real environment variables override `.env` entries, so a deployment can inject
+secrets via the environment and leave `.env` for local dev. Point at a
+different file with `YAP_ENV_FILE=path/to/file`.
+
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
 
