@@ -195,6 +195,7 @@ export function registerMcpTools(server: YapServer): void {
                   name: p.name,
                   datatype: p.datatype,
                   required: p.required === 1,
+                  multi: p.multi === 1,
                 })),
               })),
               files: await listFilesUnchecked(db, bundleId),
@@ -362,9 +363,9 @@ Input format:
 - name: bundle name (required)
 - description: one-line summary used for discovery
 - docs: the bundle's operating instructions (agents must follow these)
-- item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required? }] }
+- item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required?, multi? }] }
 
-Items are validated against these schemas on every write; properties can be renamed/added/removed later without touching stored data.`,
+A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. Items are validated against these schemas on every write; properties can be renamed/added/removed later without touching stored data.`,
     parameters: z.object({
       space_id: z.string(),
       name: z.string(),
@@ -379,6 +380,7 @@ Items are validated against these schemas on every write; properties can be rena
                 name: z.string(),
                 datatype: z.enum(DATATYPES),
                 required: z.boolean().optional(),
+                multi: z.boolean().optional(),
               }),
             ),
           }),

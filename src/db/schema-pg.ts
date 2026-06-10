@@ -85,6 +85,7 @@ export const properties = pgTable("properties", {
   name: text("name").notNull(),
   datatype: text("datatype").notNull(), // 'text' | 'number' | 'boolean' | 'date'
   required: integer("required").notNull().default(0),
+  multi: integer("multi").notNull().default(0), // holds an ordered list of values
   sortOrder: integer("sort_order").notNull().default(0),
 });
 
@@ -111,6 +112,7 @@ export const itemValues = pgTable(
       .notNull()
       .references(() => properties.id, { onDelete: "cascade" }),
     value: text("value").notNull(),
+    position: integer("position").notNull().default(0), // element order for multi-valued properties
   },
   (t) => [
     index("item_values_prop_value_idx").on(t.propertyId, t.value),

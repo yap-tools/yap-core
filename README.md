@@ -110,6 +110,23 @@ the authoring MCP deliberately doesn't expose — user/key administration,
 role grants, item-type/property CRUD, and **hook authoring** (REST-only;
 agents may fire hooks but never see or define their transport).
 
+## Items & schemas
+
+Items conform to per-bundle **item-types** — a set of typed **properties**.
+Datatypes: `text`, `number`, `boolean`, `date` (validated on write, cast on
+read). A property may be **multi-valued** (`multi: true`), holding an ordered
+list of its datatype; such fields are read and written as arrays
+(`{"tags": ["a", "b"]}`). Schemas are freely mutable after items exist (it's
+EAV): renaming a property touches no values, adding one leaves existing items
+without it, removing one drops its values.
+
+Query filters AND-combine and are datatype-aware. Comparison ops — `eq`,
+`neq`, `contains`, `gt`, `gte`, `lt`, `lte`, `in` — take an optional
+`quantifier` for multi fields: `any` (default; some element matches), `all`
+(every element matches), `none`. Set operators match a multi field's whole
+set: `has` (contains a value), `has_any` / `has_all` / `has_none` (against an
+array). Example: `{"property": "tags", "op": "has_all", "value": ["x", "y"]}`.
+
 ## Permissions
 
 Capability-based. Access keys authenticate identity only; **roles** (sets of

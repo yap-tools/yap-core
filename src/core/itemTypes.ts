@@ -5,7 +5,7 @@
  * cascade-delete immediately). Schema authoring is REST-first and gated by
  * edit_bundles — edit_items does not imply schema-editing rights.
  */
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
 import {
@@ -26,6 +26,7 @@ export interface Property {
   name: string;
   datatype: string;
   required: number;
+  multi: number;
   sortOrder: number;
 }
 
@@ -98,6 +99,7 @@ export async function createItemType(
         name: prop.name.trim(),
         datatype: prop.datatype,
         required: prop.required ? 1 : 0,
+        multi: prop.multi ? 1 : 0,
         sortOrder: order,
       })),
     );
@@ -153,7 +155,7 @@ export async function addProperty(
   db: Db,
   userId: string,
   itemTypeId: string,
-  input: { name: string; datatype: Datatype; required?: boolean },
+  input: { name: string; datatype: Datatype; required?: boolean; multi?: boolean },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
@@ -169,6 +171,7 @@ export async function addProperty(
     name,
     datatype: input.datatype,
     required: input.required ? 1 : 0,
+    multi: input.multi ? 1 : 0,
     sortOrder: siblings.reduce((max, p) => Math.max(max, p.sortOrder), -1) + 1,
   };
   await db.client.insert(properties).values(row);
@@ -181,16 +184,17 @@ export async function updateProperty(
   userId: string,
   itemTypeId: string,
   propertyId: string,
-  patch: { name?: string; required?: boolean; sortOrder?: number },
+  patch: { name?: string; required?: boolean; multi?: boolean; sortOrder?: number },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
-  const { properties } = db.tables;
+  const { properties, itemValues } = db.tables;
   const rows = await db.client
     .select()
     .from(properties)
     .where(and(eq(properties.id, propertyId), eq(properties.itemTypeId, itemTypeId)));
   if (rows.length === 0) throw notFound("property", propertyId);
+  const current = rows[0]!;
   if (patch.name !== undefined) {
     const name = patch.name.trim();
     if (!name) throw invalid("property name cannot be empty");
@@ -199,11 +203,30 @@ export async function updateProperty(
       throw invalid(`property "${name}" already exists on this item-type`);
     }
   }
+  // single→multi is free (existing scalar reads back as a one-element list);
+  // multi→single is rejected when any item holds more than one value, rather
+  // than silently dropping data.
+  if (patch.multi !== undefined && !patch.multi && current.multi === 1) {
+    const offending = await db.client
+      .select({ itemId: itemValues.itemId })
+      .from(itemValues)
+      .where(eq(itemValues.propertyId, propertyId))
+      .groupBy(itemValues.itemId)
+      .having(sql`count(*) > 1`)
+      .limit(1);
+    if (offending.length > 0) {
+      throw invalid(
+        `cannot convert "${current.name}" to single-valued: at least one item has multiple values; ` +
+          `reduce those items to one value first`,
+      );
+    }
+  }
   await db.client
     .update(properties)
     .set({
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.required !== undefined ? { required: patch.required ? 1 : 0 } : {}),
+      ...(patch.multi !== undefined ? { multi: patch.multi ? 1 : 0 } : {}),
       ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
     })
     .where(eq(properties.id, propertyId));

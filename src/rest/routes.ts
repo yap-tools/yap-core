@@ -324,6 +324,7 @@ export function registerRestRoutes(server: YapServer): void {
     name: z.string(),
     datatype: z.enum(bundlesCore.DATATYPES),
     required: z.boolean().optional(),
+    multi: z.boolean().optional(),
   });
 
   const bundleCreateSchema = z.object({
@@ -458,7 +459,12 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
       const body = parseBody(
-        z.object({ name: z.string().optional(), required: z.boolean().optional(), sortOrder: z.number().int().optional() }),
+        z.object({
+          name: z.string().optional(),
+          required: z.boolean().optional(),
+          multi: z.boolean().optional(),
+          sortOrder: z.number().int().optional(),
+        }),
         await jsonBody(c),
       );
       return c.json(await itemTypesCore.updateProperty(db, userId, param(c, "id"), param(c, "propId"), body));
@@ -480,6 +486,7 @@ export function registerRestRoutes(server: YapServer): void {
     property: z.string(),
     op: z.enum(itemsCore.FILTER_OPS),
     value: z.unknown(),
+    quantifier: z.enum(itemsCore.QUANTIFIERS).optional(),
   });
 
   app.post(

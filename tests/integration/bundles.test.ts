@@ -172,6 +172,42 @@ describeEachAdapter("bundles over REST", (adapter) => {
       expect(notJson.status).toBe(400);
     });
 
+    it("round-trips multi-valued fields and set operators over REST", async () => {
+      const mb = (
+        await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+          name: "multi-rest",
+          itemTypes: [
+            {
+              name: "article",
+              properties: [
+                { name: "title", datatype: "text", required: true },
+                { name: "tags", datatype: "text", multi: true },
+              ],
+            },
+          ],
+        })
+      ).body.id;
+      // load_bundle-style read over REST exposes the multi flag.
+      const got = await alice.get(`/v1/bundles/${mb}`);
+      const tagsProp = got.body.itemTypes[0].properties.find((p: any) => p.name === "tags");
+      expect(tagsProp.multi).toBe(1);
+
+      await alice.post(`/v1/bundles/${mb}/items`, {
+        itemType: "article",
+        items: [
+          { title: "One", tags: ["red", "urgent"] },
+          { title: "Two", tags: ["blue"] },
+        ],
+      });
+      const f = (filters: unknown) => encodeURIComponent(JSON.stringify(filters));
+      const hasRed = await alice.get(`/v1/bundles/${mb}/items?itemType=article&filters=${f([{ property: "tags", op: "has", value: "red" }])}`);
+      expect(hasRed.body.data.map((i: any) => i.values.title)).toEqual(["One"]);
+      expect(hasRed.body.data[0].values.tags).toEqual(["red", "urgent"]); // array round-trip
+
+      const hasAny = await alice.get(`/v1/bundles/${mb}/items?itemType=article&filters=${f([{ property: "tags", op: "has_any", value: ["blue", "green"] }])}`);
+      expect(hasAny.body.data.map((i: any) => i.values.title)).toEqual(["Two"]);
+    });
+
     it("manages item-types and properties over REST", async () => {
       const typeRes = await alice.post(`/v1/bundles/${bundleId}/item-types`, {
         name: "note",

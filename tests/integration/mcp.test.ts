@@ -114,8 +114,8 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(bundle.docs).toContain("Always set it");
       expect(bundle.item_types[0].name).toBe("todo");
       expect(bundle.item_types[0].properties).toEqual([
-        { name: "title", datatype: "text", required: true },
-        { name: "status", datatype: "text", required: true },
+        { name: "title", datatype: "text", required: true, multi: false },
+        { name: "status", datatype: "text", required: true, multi: false },
       ]);
       expect(bundle.files).toEqual([]);
       expect(bundle.hooks).toEqual([]);

@@ -16,7 +16,10 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 - **Docs** — a bundle's operating instructions. They are binding: read them
   via load_bundle and follow them while working in that bundle.
 - **Item / item-type** — structured records conforming to per-bundle schemas.
-  Properties are typed (text, number, boolean, date); writes are validated.
+  Properties are typed (text, number, boolean, date) and may be multi-valued
+  (an ordered list of that datatype); writes are validated. Query multi fields
+  with the set operators has/has_any/has_all/has_none, or apply a comparison op
+  with a quantifier (any/all/none).
 - **Hook** — a named outbound HTTP call owned by a bundle. You see only the
   hook's name, description, and declared parameters — never its URL, headers,
   or secrets. Firing requires the fire_hooks capability. Hooks are authored

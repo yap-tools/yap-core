@@ -25,13 +25,24 @@ import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
 
-export const FILTER_OPS = ["eq", "neq", "contains", "gt", "gte", "lt", "lte", "in"] as const;
+/** Element-wise comparison operators. On a multi-valued property they apply
+ *  per element, scoped by the filter's quantifier (any/all/none). */
+export const COMPARISON_OPS = ["eq", "neq", "contains", "gt", "gte", "lt", "lte", "in"] as const;
+/** Set operators for multi-valued properties (membership against the set). */
+export const SET_OPS = ["has", "has_any", "has_all", "has_none"] as const;
+export const FILTER_OPS = [...COMPARISON_OPS, ...SET_OPS] as const;
 export type FilterOp = (typeof FILTER_OPS)[number];
+
+/** How a comparison op quantifies over a multi-valued property's elements. */
+export const QUANTIFIERS = ["any", "all", "none"] as const;
+export type Quantifier = (typeof QUANTIFIERS)[number];
 
 export interface ItemFilter {
   property: string;
   op: FilterOp;
   value: unknown;
+  /** Default "any". Ignored for single-valued properties and set operators. */
+  quantifier?: Quantifier;
 }
 
 export interface ItemSort {
@@ -99,6 +110,28 @@ export function castValue(property: Pick<Property, "datatype">, stored: string):
   }
 }
 
+/**
+ * Normalizes a property input value into ordered stored-value rows. A
+ * single-valued property yields 0 rows (null/undefined) or 1; a multi-valued
+ * property yields 0..n, one per element with a `position`. Multi accepts an
+ * array, or a bare scalar (coerced to a one-element list) for ergonomics; a
+ * single-valued property rejects arrays. Throws on per-element type errors.
+ */
+export function normalizeProperty(
+  property: Pick<Property, "name" | "datatype" | "multi">,
+  value: unknown,
+): { value: string; position: number }[] {
+  if (property.multi) {
+    const list = value === null || value === undefined ? [] : Array.isArray(value) ? value : [value];
+    return list.map((element, position) => ({ value: normalizeValue(property, element), position }));
+  }
+  if (Array.isArray(value)) {
+    throw invalid(`property "${property.name}" is single-valued; pass a scalar, not an array`);
+  }
+  if (value === null || value === undefined) return [];
+  return [{ value: normalizeValue(property, value), position: 0 }];
+}
+
 // ---- Filter SQL -------------------------------------------------------------
 
 function escapeLike(value: string): string {
@@ -132,7 +165,10 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
   return value;
 }
 
-function filterValueCondition(property: Property, op: FilterOp, value: unknown): SQL {
+type ComparisonOp = (typeof COMPARISON_OPS)[number];
+
+/** Builds the per-value-row SQL condition (over alias `iv`) for a comparison op. */
+function filterValueCondition(property: Property, op: ComparisonOp, value: unknown): SQL {
   const expr = storedValueExpr(property);
   switch (op) {
     case "eq":
@@ -163,8 +199,55 @@ function filterValueCondition(property: Property, op: FilterOp, value: unknown):
         sql.raw(", "),
       )})`;
     }
-    default:
-      throw invalid(`unknown filter op ${JSON.stringify(op)} (expected one of: ${FILTER_OPS.join(", ")})`);
+  }
+}
+
+/**
+ * Builds the full item-level predicate for one filter, handling the explicit
+ * multi-value semantics: comparison ops are scoped by a quantifier
+ * (any/all/none) and the set operators (has/has_any/has_all/has_none) match
+ * against the property's value set. All forms stay within the SQLite∩Postgres
+ * subset (correlated EXISTS / NOT EXISTS / COUNT DISTINCT).
+ */
+function buildFilterPredicate(itemId: SQL, property: Property, filter: ItemFilter): SQL {
+  const pid = property.id;
+  const exists = (cond: SQL): SQL =>
+    sql`EXISTS (SELECT 1 FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${cond})`;
+  const notExists = (cond: SQL): SQL =>
+    sql`NOT EXISTS (SELECT 1 FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${cond})`;
+
+  switch (filter.op) {
+    case "has":
+      return exists(filterValueCondition(property, "eq", filter.value));
+    case "has_any":
+      return exists(filterValueCondition(property, "in", filter.value));
+    case "has_none":
+      return notExists(filterValueCondition(property, "in", filter.value));
+    case "has_all": {
+      if (!Array.isArray(filter.value) || filter.value.length === 0) {
+        throw invalid(`has_all on "${property.name}" expects a non-empty array`);
+      }
+      // Stored values are canonical text, so exact text equality is correct
+      // membership; dedupe operands so the count target matches.
+      const operands = [...new Set(filter.value.map((v) => normalizeValue(property, v)))];
+      const inList = sql.join(
+        operands.map((o) => sql`${o}`),
+        sql.raw(", "),
+      );
+      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND iv.value IN (${inList})) = ${operands.length}`;
+    }
+    default: {
+      const cond = filterValueCondition(property, filter.op, filter.value);
+      switch (filter.quantifier ?? "any") {
+        case "any":
+          return exists(cond);
+        case "none":
+          return notExists(cond);
+        case "all":
+          // Non-empty AND no element violates the condition.
+          return sql`(EXISTS (SELECT 1 FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid}) AND ${notExists(sql`NOT (${cond})`)})`;
+      }
+    }
   }
 }
 
@@ -199,12 +282,15 @@ async function materialize(
     .select()
     .from(itemValues)
     .where(inArray(itemValues.itemId, itemRows.map((r) => r.id)));
-  const propsById = new Map(props.map((p) => [p.id, p]));
   return itemRows.map((row) => {
     const values: Record<string, unknown> = {};
-    for (const v of valueRows.filter((v) => v.itemId === row.id)) {
-      const prop = propsById.get(v.propertyId);
-      if (prop) values[prop.name] = castValue(prop, v.value);
+    const itemVals = valueRows.filter((v) => v.itemId === row.id);
+    for (const prop of props) {
+      const own = itemVals.filter((v) => v.propertyId === prop.id).sort((a, b) => a.position - b.position);
+      if (own.length === 0) continue;
+      values[prop.name] = prop.multi
+        ? own.map((v) => castValue(prop, v.value))
+        : castValue(prop, own[0]!.value);
     }
     return { id: row.id, itemType: itemTypeName, createdAt: row.createdAt, updatedAt: row.updatedAt, values };
   });
@@ -236,27 +322,30 @@ export async function createItems(
 
   // Validate the whole batch before writing anything (never partially applied).
   const errors: string[] = [];
-  const normalized: { propertyId: string; value: string }[][] = [];
+  const normalized: { propertyId: string; value: string; position: number }[][] = [];
   for (const [i, itemInput] of input.items.entries()) {
-    const rows: { propertyId: string; value: string }[] = [];
+    const rows: { propertyId: string; value: string; position: number }[] = [];
     if (typeof itemInput !== "object" || itemInput === null || Array.isArray(itemInput)) {
       errors.push(`items[${i}]: must be an object of property values`);
       normalized.push(rows);
       continue;
     }
+    const populated = new Set<string>();
     for (const [name, value] of Object.entries(itemInput)) {
       try {
         const prop = propertyByName(props, name);
-        if (value === null || value === undefined) continue; // absent
-        rows.push({ propertyId: prop.id, value: normalizeValue(prop, value) });
+        const elements = normalizeProperty(prop, value);
+        if (elements.length > 0) populated.add(prop.id);
+        for (const el of elements) rows.push({ propertyId: prop.id, value: el.value, position: el.position });
       } catch (err) {
         errors.push(`items[${i}]: ${(err as Error).message}`);
       }
     }
     for (const prop of props.filter((p) => p.required)) {
-      const provided = itemInput[prop.name];
-      if (provided === null || provided === undefined) {
-        errors.push(`items[${i}]: required property "${prop.name}" is missing`);
+      if (!populated.has(prop.id)) {
+        errors.push(
+          `items[${i}]: required property "${prop.name}" is missing${prop.multi ? " (needs at least one value)" : ""}`,
+        );
       }
     }
     normalized.push(rows);
@@ -271,7 +360,7 @@ export async function createItems(
     await db.client.insert(items).values(item);
     if (rows.length > 0) {
       await db.client.insert(itemValues).values(
-        rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value })),
+        rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value, position: r.position })),
       );
     }
     created.push(item);
@@ -326,9 +415,11 @@ export async function updateItems(
     propsByType.set(typeId, await loadProperties(db, typeId));
   }
 
-  // Validate everything first.
+  // Validate everything first. Each set property is a whole-value replacement:
+  // its existing rows are deleted and the new ones inserted (works uniformly
+  // for single- and multi-valued properties). An empty/null value clears it.
   const errors: string[] = [];
-  const plans: { itemId: string; sets: { prop: Property; value: string }[]; clears: Property[] }[] = [];
+  const plans: { itemId: string; ops: { prop: Property; rows: { value: string; position: number }[] }[] }[] = [];
   for (const [i, update] of updates.entries()) {
     const item = byId.get(update.id);
     if (!item) {
@@ -340,18 +431,15 @@ export async function updateItems(
       continue;
     }
     const props = propsByType.get(item.itemTypeId)!;
-    const plan = { itemId: item.id, sets: [] as { prop: Property; value: string }[], clears: [] as Property[] };
+    const plan = { itemId: item.id, ops: [] as { prop: Property; rows: { value: string; position: number }[] }[] };
     for (const [name, value] of Object.entries(update.set)) {
       try {
         const prop = propertyByName(props, name);
-        if (value === null) {
-          if (prop.required) {
-            errors.push(`updates[${i}]: required property "${prop.name}" cannot be cleared`);
-          } else {
-            plan.clears.push(prop);
-          }
+        const rows = normalizeProperty(prop, value);
+        if (rows.length === 0 && prop.required) {
+          errors.push(`updates[${i}]: required property "${prop.name}" cannot be cleared`);
         } else {
-          plan.sets.push({ prop, value: normalizeValue(prop, value) });
+          plan.ops.push({ prop, rows });
         }
       } catch (err) {
         errors.push(`updates[${i}]: ${(err as Error).message}`);
@@ -363,20 +451,20 @@ export async function updateItems(
 
   const now = nowIso();
   for (const plan of plans) {
-    for (const clear of plan.clears) {
+    for (const op of plan.ops) {
       await db.client
         .delete(itemValues)
-        .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, clear.id)));
-    }
-    for (const { prop, value } of plan.sets) {
-      const existing = await db.client
-        .select({ id: itemValues.id })
-        .from(itemValues)
-        .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, prop.id)));
-      if (existing.length > 0) {
-        await db.client.update(itemValues).set({ value }).where(eq(itemValues.id, existing[0]!.id));
-      } else {
-        await db.client.insert(itemValues).values({ id: newId(), itemId: plan.itemId, propertyId: prop.id, value });
+        .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, op.prop.id)));
+      if (op.rows.length > 0) {
+        await db.client.insert(itemValues).values(
+          op.rows.map((r) => ({
+            id: newId(),
+            itemId: plan.itemId,
+            propertyId: op.prop.id,
+            value: r.value,
+            position: r.position,
+          })),
+        );
       }
     }
     await db.client.update(items).set({ updatedAt: now }).where(eq(items.id, plan.itemId));
@@ -431,14 +519,18 @@ export async function queryItemsUnchecked(db: Db, ctx: BundleContext, query: Ite
   const props = await loadProperties(db, itemType.id);
   const { items } = db.tables;
 
+  const itemIdRef = sql`${items.id}`;
   const conditions: SQL[] = [];
   for (const filter of query.filters ?? []) {
     if (!filter || typeof filter.property !== "string") throw invalid("each filter needs a property name");
+    if (!FILTER_OPS.includes(filter.op)) {
+      throw invalid(`unknown filter op ${JSON.stringify(filter.op)} (expected one of: ${FILTER_OPS.join(", ")})`);
+    }
+    if (filter.quantifier !== undefined && !QUANTIFIERS.includes(filter.quantifier)) {
+      throw invalid(`quantifier must be one of: ${QUANTIFIERS.join(", ")}`);
+    }
     const prop = propertyByName(props, filter.property);
-    const condition = filterValueCondition(prop, filter.op, filter.value);
-    conditions.push(
-      sql`EXISTS (SELECT 1 FROM item_values iv WHERE iv.item_id = ${items.id} AND iv.property_id = ${prop.id} AND ${condition})`,
-    );
+    conditions.push(buildFilterPredicate(itemIdRef, prop, filter));
   }
 
   const limit = clampLimit(query.limit);
@@ -449,7 +541,8 @@ export async function queryItemsUnchecked(db: Db, ctx: BundleContext, query: Ite
     const direction = query.sort.direction ?? "asc";
     if (direction !== "asc" && direction !== "desc") throw invalid(`sort direction must be "asc" or "desc"`);
     const sortProp = propertyByName(props, query.sort.property);
-    const sub = sql`(SELECT ${storedValueExpr(sortProp)} FROM item_values iv WHERE iv.item_id = ${items.id} AND iv.property_id = ${sortProp.id} LIMIT 1)`;
+    // For a multi-valued property, sort by its first element (lowest position).
+    const sub = sql`(SELECT ${storedValueExpr(sortProp)} FROM item_values iv WHERE iv.item_id = ${items.id} AND iv.property_id = ${sortProp.id} ORDER BY iv.position ASC LIMIT 1)`;
     // Missing values sort last in both directions, on both dialects.
     orderings.push(sql`${sub} IS NULL`);
     orderings.push(direction === "desc" ? sql`${sub} DESC` : sql`${sub} ASC`);

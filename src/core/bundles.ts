@@ -22,6 +22,8 @@ export interface PropertyInput {
   name: string;
   datatype: Datatype;
   required?: boolean;
+  /** When true the property holds an ordered list of values of `datatype`. */
+  multi?: boolean;
 }
 
 export interface ItemTypeInput {
@@ -122,6 +124,7 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
           name: prop.name.trim(),
           datatype: prop.datatype,
           required: prop.required ? 1 : 0,
+          multi: prop.multi ? 1 : 0,
           sortOrder: order,
         })),
       );
