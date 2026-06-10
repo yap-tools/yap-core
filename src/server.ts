@@ -10,6 +10,7 @@ import { constantTimeEqual } from "./crypto.js";
 import { authenticateKey } from "./core/keys.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
+import { registerMcpTools } from "./mcp/tools.js";
 import { registerRestRoutes } from "./rest/routes.js";
 
 /** MCP session auth payload: identity only — permissions come from grants. */
@@ -92,6 +93,7 @@ export function buildServer(config: YapConfig, db: Db, logger: YapLogger = creat
   };
 
   registerRestRoutes(server);
+  registerMcpTools(server);
 
   return server;
 }

@@ -8,7 +8,7 @@
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { KNOWN_CAPABILITIES, requireCapability, type SpaceRef } from "./capabilities.js";
+import { KNOWN_CAPABILITIES, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
@@ -105,6 +105,30 @@ export async function getSpaceRow(db: Db, spaceId: string): Promise<Space> {
 
 export function toSpaceRef(space: Space): SpaceRef {
   return { id: space.id, ownerId: space.ownerId, personal: space.personal };
+}
+
+/**
+ * Space reachability: owner, any effective space-level capability, or any
+ * allow grant on a bundle inside the space (a bundle-only member must still
+ * be able to address the space to reach their bundle).
+ */
+export async function canReachSpace(db: Db, userId: string, space: Space): Promise<boolean> {
+  if (space.ownerId === userId) return true;
+  if (await hasAnyCapability(db, userId, { space: toSpaceRef(space) })) return true;
+  const { grants, bundles } = db.tables;
+  const rows = await db.client
+    .select({ id: grants.id })
+    .from(grants)
+    .innerJoin(bundles, eq(grants.resourceId, bundles.id))
+    .where(
+      and(
+        eq(grants.userId, userId),
+        eq(grants.resourceType, "bundle"),
+        eq(bundles.spaceId, space.id),
+        eq(grants.effect, "allow"),
+      ),
+    );
+  return rows.length > 0;
 }
 
 export async function updateSpace(

@@ -13,7 +13,6 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
 import * as bundlesCore from "../core/bundles.js";
-import { hasAnyCapability } from "../core/capabilities.js";
 import * as docsCore from "../core/docs.js";
 import { YapError, invalid } from "../core/errors.js";
 import * as grantsCore from "../core/grants.js";
@@ -21,6 +20,7 @@ import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
 import * as spacesCore from "../core/spaces.js";
+import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
 import type { YapServer } from "../server.js";
 import { requireSysadmin, requireUser } from "./auth.js";
@@ -204,8 +204,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
       const space = await spacesCore.getSpaceRow(db, param(c, "id"));
-      // Reachability: ownership or any effective capability on the space.
-      if (space.ownerId !== userId && !(await hasAnyCapability(db, userId, { space: spacesCore.toSpaceRef(space) }))) {
+      if (!(await spacesCore.canReachSpace(db, userId, space))) {
         throw new YapError("not_found", `space ${space.id} not found`);
       }
       return c.json(space);
@@ -543,6 +542,57 @@ export function registerRestRoutes(server: YapServer): void {
       const itemId = param(c, "id");
       const bundleId = await itemBundleId(c, itemId);
       await itemsCore.deleteItems(db, userId, bundleId, [itemId]);
+      return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- User docs ----------------------------------------------------------------
+
+  app.post(
+    "/v1/user-docs",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await userDocsCore.createUserDoc(db, userId, body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/user-docs",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json({ data: await userDocsCore.listUserDocs(db, userId) });
+    }),
+  );
+
+  app.get(
+    "/v1/user-docs/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json(await userDocsCore.getUserDoc(db, userId, param(c, "id")));
+    }),
+  );
+
+  app.patch(
+    "/v1/user-docs/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await userDocsCore.updateUserDoc(db, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/user-docs/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      await userDocsCore.deleteUserDoc(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
   );
