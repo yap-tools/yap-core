@@ -6,8 +6,11 @@
 import { FastMCP } from "fastmcp";
 
 import type { YapConfig } from "./config.js";
+import { constantTimeEqual } from "./crypto.js";
+import { authenticateKey } from "./core/keys.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
+import { registerRestRoutes } from "./rest/routes.js";
 
 /** MCP session auth payload: identity only — permissions come from grants. */
 export interface SessionAuth extends Record<string, unknown> {
@@ -23,6 +26,42 @@ export interface YapServer {
   stop(): Promise<void>;
 }
 
+/**
+ * MCP authentication: bearer access key preferred, with a ?key= query
+ * fallback for URL-only clients. The sysadmin key never authenticates MCP.
+ */
+async function authenticateMcp(
+  request: { headers: Record<string, string | string[] | undefined>; url?: string },
+  db: Db,
+  config: YapConfig,
+): Promise<SessionAuth> {
+  const deny = (message: string): never => {
+    throw new Response(JSON.stringify({ error: { code: "unauthorized", message } }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  let key: string | null = null;
+  const header = request.headers["authorization"];
+  const headerValue = Array.isArray(header) ? header[0] : header;
+  if (headerValue) {
+    const match = /^Bearer\s+(.+)$/i.exec(headerValue.trim());
+    if (match) key = match[1]!.trim();
+  }
+  if (!key && request.url) {
+    const url = new URL(request.url, "http://internal");
+    key = url.searchParams.get("key");
+  }
+  if (!key) return deny("access key required (Authorization: Bearer or ?key= fallback)");
+  if (constantTimeEqual(key, config.sysadminKey)) {
+    return deny("the sysadmin key cannot be used over MCP");
+  }
+  const userId = await authenticateKey(db, key);
+  if (!userId) return deny("invalid or revoked access key");
+  return { userId };
+}
+
 export function buildServer(config: YapConfig, db: Db, logger: YapLogger = createLogger()): YapServer {
   const mcp = new FastMCP<SessionAuth>({
     name: "yap",
@@ -30,12 +69,13 @@ export function buildServer(config: YapConfig, db: Db, logger: YapLogger = creat
     instructions:
       "Yap serves navigable context. Discover with load → load_space → load_bundle, then execute with call.",
     logger,
+    authenticate: (request) => authenticateMcp(request, db, config),
     health: { enabled: true, path: "/health", message: "ok" },
     ping: { enabled: false },
     roots: { enabled: false },
   });
 
-  return {
+  const server: YapServer = {
     mcp,
     config,
     db,
@@ -50,4 +90,8 @@ export function buildServer(config: YapConfig, db: Db, logger: YapLogger = creat
       await mcp.stop();
     },
   };
+
+  registerRestRoutes(server);
+
+  return server;
 }
