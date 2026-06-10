@@ -7,6 +7,7 @@
  */
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
+import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
 import { KNOWN_CAPABILITIES, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
@@ -155,15 +156,18 @@ export async function updateSpace(
   return getSpaceRow(db, spaceId);
 }
 
-export async function deleteSpace(db: Db, userId: string, spaceId: string): Promise<void> {
+export async function deleteSpace(db: Db, userId: string, spaceId: string, blob: BlobStore): Promise<void> {
   const space = await getSpaceRow(db, spaceId);
   if (space.personal) throw invalid("the personal space cannot be deleted");
   await requireCapability(db, userId, "manage_space", { space: toSpaceRef(space) });
-  const { spaces, grants, bundles } = db.tables;
+  const { spaces, grants, bundles, files } = db.tables;
   // Grant rows reference resources by id without FK (resource may be a space
   // or a bundle), so clean up explicitly — including rows on cascaded bundles.
   const bundleRows = await db.client.select({ id: bundles.id }).from(bundles).where(eq(bundles.spaceId, spaceId));
+  // Capture blob keys before the file rows cascade away.
+  const fileRows = await db.client.select({ storageKey: files.storageKey }).from(files).where(eq(files.spaceId, spaceId));
   await db.client.delete(spaces).where(eq(spaces.id, spaceId));
+  for (const row of fileRows) await blob.delete(row.storageKey);
   await db.client
     .delete(grants)
     .where(and(eq(grants.resourceType, "space"), eq(grants.resourceId, spaceId)));

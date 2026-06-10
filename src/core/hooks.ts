@@ -264,7 +264,21 @@ export async function fireHook(
   // Decrypted transport exists only in memory, only here.
   const transport = JSON.parse(decryptSecret(hook.transportEncrypted, config.masterKey)) as HookTransport;
   const url = substitute(transport.url, values, true);
-  await assertPublicDestination(url, config.hookAllowHosts, env.resolver); // DNS can change: re-check at fire time
+  // DNS can change, so re-check at fire time. The detailed message names the
+  // host/IP — fine for the REST authoring path (an operator), but the firing
+  // agent must never learn the hidden transport, so collapse any guard
+  // failure to a generic policy error here.
+  // (Residual: fetch resolves DNS again independently, so a rebinding attacker
+  // could still flip a name between this check and the socket. Closing that
+  // fully requires an IP-pinning dispatcher; the guard re-check bounds it.)
+  try {
+    await assertPublicDestination(url, config.hookAllowHosts, env.resolver);
+  } catch {
+    throw new YapError(
+      "forbidden",
+      "hook destination is blocked by the SSRF guard; ask an operator to review this hook's configuration",
+    );
+  }
 
   const headers: Record<string, string> = {};
   for (const [name, headerValue] of Object.entries(transport.headers ?? {})) {
@@ -294,7 +308,9 @@ export async function fireHook(
         `hook timed out after ${config.hookTimeoutMs}ms (no automatic retries — retrying is the caller's decision)`,
       );
     }
-    throw invalid(`hook request failed: ${(err as Error).message}`);
+    // The underlying fetch error can embed the hidden host (e.g.
+    // "ENOTFOUND internal.corp"); keep it out of the agent-facing message.
+    throw new YapError("internal", "hook request failed to reach its destination");
   } finally {
     clearTimeout(timer);
   }

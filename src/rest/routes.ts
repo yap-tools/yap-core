@@ -23,6 +23,7 @@ import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
+import { headerSafeFilename } from "../core/util.js";
 import * as usersCore from "../core/users.js";
 import { verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
@@ -128,7 +129,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/users/:id",
     handle(async (c) => {
       requireSysadmin(c, config);
-      await usersCore.deleteUser(db, param(c, "id"));
+      await usersCore.deleteUser(db, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
   );
@@ -229,7 +230,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/spaces/:id",
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
-      await spacesCore.deleteSpace(db, userId, param(c, "id"));
+      await spacesCore.deleteSpace(db, userId, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
   );
@@ -378,7 +379,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/bundles/:id",
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
-      await bundlesCore.deleteBundle(db, userId, param(c, "id"));
+      await bundlesCore.deleteBundle(db, userId, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
   );
@@ -512,7 +513,7 @@ export function registerRestRoutes(server: YapServer): void {
         } catch {
           throw invalid("filters must be a JSON array");
         }
-        filters = z.array(filterSchema).parse(parsed) as itemsCore.ItemFilter[];
+        filters = parseBody(z.array(filterSchema), parsed) as itemsCore.ItemFilter[];
       }
       const sortProp = c.req.query("sort");
       const direction = (c.req.query("direction") as "asc" | "desc" | undefined) ?? "asc";
@@ -649,7 +650,7 @@ export function registerRestRoutes(server: YapServer): void {
       const { stream, name, mimeType, size } = await filesCore.openDownloadStream(fileEnv, fileId);
       c.header("content-type", mimeType || "application/octet-stream");
       c.header("content-length", String(size));
-      c.header("content-disposition", `inline; filename="${name.replace(/"/g, "")}"`);
+      c.header("content-disposition", `inline; filename="${headerSafeFilename(name)}"`);
       return c.body(Readable.toWeb(stream) as ReadableStream);
     }),
   );

@@ -137,6 +137,9 @@ export const secondTier: Record<string, SecondTierTool> = {
           data: {
             file_id: result.file_id,
             upload_url: result.upload_url,
+            // The in-client dropzone finalizes by POSTing here after the PUT;
+            // omitting it leaves every widget upload stuck in 'reserved'.
+            complete_url: result.complete_url,
             origin_upload_url: result.origin_upload_url,
           },
         },

@@ -76,10 +76,32 @@ describeEachAdapter("widgets", (adapter) => {
       const parsed = JSON.parse(text);
       expect(parsed.results[0]._meta.widget).toBe("ui://yap/upload-dropzone");
       expect(parsed.results[0]._meta.data.upload_url).toContain("/upload?token=");
+      // The widget needs complete_url to finalize after the PUT — omitting it
+      // strands every in-client upload in 'reserved'.
+      expect(parsed.results[0]._meta.data.complete_url).toContain("/complete?token=");
       const link = raw.content.find((c: any) => c.type === "resource_link");
       expect(link).toBeTruthy();
       expect(link.uri).toBe("ui://yap/upload-dropzone");
       expect(link.mimeType).toBe("text/html");
+    });
+
+    it("an in-client widget upload finalizes using the widget data alone", async () => {
+      // Replays exactly what the upload-dropzone's inline JS does with _meta.data.
+      const raw: any = await aliceMcp.callRaw("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: bundleId, tool: "upload_request", params: { name: "widget.txt" } }],
+      });
+      const data = JSON.parse(raw.content.find((c: any) => c.type === "text").text).results[0]._meta.data;
+      const put = await fetch(data.upload_url, { method: "PUT", body: "from the widget" });
+      expect(put.status).toBe(200);
+      const complete = await fetch(data.complete_url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "widget.txt", mime_type: "text/plain" }),
+      });
+      expect(complete.status).toBe(200);
+      const finalized: any = await complete.json();
+      expect(finalized.status).toBe("finalized");
     });
   });
 

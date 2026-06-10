@@ -21,6 +21,7 @@ import { YapError } from "../core/errors.js";
 import { listFilesUnchecked } from "../core/files.js";
 import { listHooksUnchecked } from "../core/hooks.js";
 import { listItemTypesUnchecked } from "../core/itemTypes.js";
+import type { Page } from "../core/pagination.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import type { SessionAuth, YapServer } from "../server.js";
@@ -43,6 +44,27 @@ function rethrow(err: unknown): never {
 function sessionUser(session: SessionAuth | undefined): string {
   if (!session?.userId) throw new UserError("unauthorized: no authenticated user on this session");
   return session.userId;
+}
+
+/**
+ * Drains a cursor-paginated list into a single array for discovery, so the
+ * MCP surface never silently hides spaces/bundles past one page. Bounded by a
+ * safety cap; `truncated` flags the (unusual) overflow so the agent knows to
+ * fall back to the paginated REST surface rather than assuming completeness.
+ */
+async function drainPages<T>(
+  fetchPage: (cursor: string | undefined) => Promise<Page<T>>,
+  cap = 1000,
+): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await fetchPage(cursor);
+    items.push(...page.data);
+    cursor = page.nextCursor ?? undefined;
+    if (items.length >= cap) return { items: items.slice(0, cap), truncated: cursor !== undefined };
+  } while (cursor);
+  return { items, truncated: false };
 }
 
 const SECOND_TIER_SPECS = Object.fromEntries(
@@ -78,9 +100,11 @@ export function registerMcpTools(server: YapServer): void {
     execute: async (_args, ctx) => {
       try {
         const userId = sessionUser(ctx.session);
-        const page = await listSpacesForUser(db, userId, { limit: 200 });
+        const { items: reachable, truncated } = await drainPages((cursor) =>
+          listSpacesForUser(db, userId, { cursor, limit: 200 }),
+        );
         const spaces = [];
-        for (const space of page.data) {
+        for (const space of reachable) {
           spaces.push({
             id: space.id,
             name: space.name,
@@ -93,6 +117,7 @@ export function registerMcpTools(server: YapServer): void {
         const autoloaded = await userDocsCore.autoloadedUserDocs(db, userId);
         const allDocs = await userDocsCore.listUserDocs(db, userId);
         return asJson({
+          ...(truncated ? { truncated: "more spaces exist than shown; use the REST API to page through all" } : {}),
           spaces,
           user_docs: {
             autoloaded,
@@ -125,13 +150,16 @@ export function registerMcpTools(server: YapServer): void {
         if (!(await canReachSpace(db, userId, space))) {
           throw new YapError("not_found", `space ${args.space_id} not found`);
         }
-        const bundles = await listBundles(db, userId, space.id, { limit: 200 });
+        const { items: bundles, truncated } = await drainPages((cursor) =>
+          listBundles(db, userId, space.id, { cursor, limit: 200 }),
+        );
         return asJson({
           id: space.id,
           name: space.name,
           context: space.context,
           role: await effectiveCapabilities(db, userId, { space: ref }),
-          bundles: bundles.data.map((b) => ({ id: b.id, name: b.name, description: b.description })),
+          ...(truncated ? { truncated: "more bundles exist than shown; use the REST API to page through all" } : {}),
+          bundles: bundles.map((b) => ({ id: b.id, name: b.name, description: b.description })),
         });
       } catch (err) {
         rethrow(err);

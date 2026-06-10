@@ -161,6 +161,17 @@ describeEachAdapter("bundles over REST", (adapter) => {
       expect(remaining.body.data.map((i: any) => i.values.title)).toEqual(["Two"]);
     });
 
+    it("returns 400 (not 500) for a malformed filters value", async () => {
+      // Valid JSON, wrong shape — a client mistake, must be invalid_request.
+      const badShape = encodeURIComponent(JSON.stringify([{ property: 1 }]));
+      const res = await alice.get(`/v1/bundles/${bundleId}/items?itemType=todo&filters=${badShape}`);
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("invalid_request");
+      // Not even JSON.
+      const notJson = await alice.get(`/v1/bundles/${bundleId}/items?itemType=todo&filters=notjson`);
+      expect(notJson.status).toBe(400);
+    });
+
     it("manages item-types and properties over REST", async () => {
       const typeRes = await alice.post(`/v1/bundles/${bundleId}/item-types`, {
         name: "note",

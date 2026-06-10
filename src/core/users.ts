@@ -3,8 +3,9 @@
  * personal space at provisioning — undeletable, unrenamable, unshareable —
  * and an initial access key whose secret is returned exactly once.
  */
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 
+import type { BlobStore } from "../blob/index.js";
 import { generateAccessKey, hashKey } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { invalid, notFound } from "./errors.js";
@@ -80,13 +81,38 @@ export async function getUser(db: Db, userId: string): Promise<User> {
 }
 
 /**
- * Deletes the user; FK cascades remove their keys, grants, user docs, owned
- * spaces and everything inside them. (Blob bytes belonging to cascaded file
- * records are not swept here — operator-level cleanup; the brief's immediate
- * blob deletion applies to the file-delete operation.)
+ * Deletes the user. FK cascades remove their keys, user docs, the grant rows
+ * where they are the grantee, and their owned spaces/bundles/items/files. Two
+ * things the cascade does NOT cover and that this function handles explicitly:
+ * (1) the blob bytes behind cascaded file records (no FK reaches storage), and
+ * (2) grant rows OTHER users hold on the deleted user's spaces/bundles
+ * (grants.resourceId has no FK), which would otherwise dangle.
  */
-export async function deleteUser(db: Db, userId: string): Promise<void> {
-  const { users } = db.tables;
+export async function deleteUser(db: Db, userId: string, blob: BlobStore): Promise<void> {
+  const { users, spaces, bundles, files, grants } = db.tables;
   await getUser(db, userId);
-  await db.client.delete(users).where(eq(users.id, userId));
+
+  const ownedSpaces = await db.client.select({ id: spaces.id }).from(spaces).where(eq(spaces.ownerId, userId));
+  const spaceIds = ownedSpaces.map((s) => s.id);
+  let bundleIds: string[] = [];
+  let storageKeys: string[] = [];
+  if (spaceIds.length > 0) {
+    const ownedBundles = await db.client.select({ id: bundles.id }).from(bundles).where(inArray(bundles.spaceId, spaceIds));
+    bundleIds = ownedBundles.map((b) => b.id);
+    if (bundleIds.length > 0) {
+      const fileRows = await db.client
+        .select({ storageKey: files.storageKey })
+        .from(files)
+        .where(inArray(files.bundleId, bundleIds));
+      storageKeys = fileRows.map((f) => f.storageKey);
+    }
+  }
+
+  await db.client.delete(users).where(eq(users.id, userId)); // cascades spaces, bundles, files, grantee grants
+
+  const resourceIds = [...spaceIds, ...bundleIds];
+  if (resourceIds.length > 0) {
+    await db.client.delete(grants).where(inArray(grants.resourceId, resourceIds));
+  }
+  for (const key of storageKeys) await blob.delete(key);
 }

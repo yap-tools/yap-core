@@ -14,6 +14,7 @@ import type { Readable } from "node:stream";
 import { Disk } from "flydrive";
 
 import type { YapConfig } from "../config.js";
+import { headerSafeFilename } from "../core/util.js";
 import { signToken } from "../crypto.js";
 
 export interface BlobStat {
@@ -100,7 +101,7 @@ export async function createBlobStore(config: YapConfig): Promise<BlobStore> {
       disk.getSignedUrl(key, {
         expiresIn: ttlSeconds,
         contentType: opts.mimeType || undefined,
-        contentDisposition: opts.name ? `attachment; filename="${opts.name.replace(/"/g, "")}"` : undefined,
+        contentDisposition: opts.name ? `attachment; filename="${headerSafeFilename(opts.name)}"` : undefined,
       }),
   };
 }

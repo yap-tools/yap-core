@@ -6,6 +6,7 @@
  */
 import { and, asc, eq, inArray } from "drizzle-orm";
 
+import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
 import { hasAnyCapability, requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
@@ -215,12 +216,17 @@ export async function updateBundle(
   return getBundleRow(db, bundleId);
 }
 
-export async function deleteBundle(db: Db, userId: string, bundleId: string): Promise<void> {
+export async function deleteBundle(db: Db, userId: string, bundleId: string, blob: BlobStore): Promise<void> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleReadAccess(db, userId, ctx);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
-  const { bundles, grants } = db.tables;
+  const { bundles, grants, files } = db.tables;
+  // Capture blob keys before the file rows cascade away (FK), then delete the
+  // bytes — "deleting a file record deletes the underlying blob immediately"
+  // applies to cascade deletions too, not just the single-file path.
+  const fileRows = await db.client.select({ storageKey: files.storageKey }).from(files).where(eq(files.bundleId, bundleId));
   await db.client.delete(bundles).where(eq(bundles.id, bundleId));
+  for (const row of fileRows) await blob.delete(row.storageKey);
   // Grant rows have no FK to resources; clean up bundle-level rows explicitly.
   await db.client
     .delete(grants)

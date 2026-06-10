@@ -153,6 +153,22 @@ describeEachAdapter("spaces & grants", (adapter) => {
       expect(rows.some((g: any) => g.id === grantId)).toBe(false);
     });
 
+    it("authorizes grant deletion before checking existence (no existence oracle)", async () => {
+      const grant = await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        userId: bobId,
+        capability: "read_files",
+        effect: "allow",
+      });
+      const realGrantId = grant.body.data[0].id;
+      // Bob has no manage_roles here: he must get 403 for BOTH an existing and
+      // a nonexistent grant id, so the response can't be used to probe ids.
+      expect((await bob.delete(`/v1/spaces/${spaceId}/grants/${realGrantId}`)).status).toBe(403);
+      expect((await bob.delete(`/v1/spaces/${spaceId}/grants/does-not-exist`)).status).toBe(403);
+      // The grant is untouched.
+      const rows = (await alice.get(`/v1/spaces/${spaceId}/grants`)).body.data;
+      expect(rows.some((g: any) => g.id === realGrantId)).toBe(true);
+    });
+
     it("validates capability names and effect", async () => {
       const bad = await alice.post(`/v1/spaces/${spaceId}/grants`, {
         userId: bobId,

@@ -161,24 +161,69 @@ describeEachAdapter("files", (adapter) => {
     expect((await fetch(link.url)).status).toBe(404); // even unexpired links die with the record
   });
 
-  it("sweeps never-completed reserved placeholders past the age cutoff", async () => {
-    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "orphan.txt" }))
-      .body;
-    await fetch(requested.upload_url, { method: "PUT", body: "stranded bytes" });
+  it("deleting a bundle deletes its files' blobs too (not just the records)", async () => {
+    const tempBundle = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "ephemeral-assets" })).body.id;
+    const f = (await alice.post(`/v1/bundles/${tempBundle}/files/upload-request`, { name: "doc.txt" })).body;
+    await fetch(f.upload_url, { method: "PUT", body: "bundle-scoped bytes" });
+    await alice.post(`/v1/files/${f.file_id}/complete`, {});
+    const storageKey = (
+      await app.db.client.select().from(app.db.tables.files).where(eq(app.db.tables.files.id, f.file_id))
+    )[0]!.storageKey;
+    expect(await app.blob.stat(storageKey)).not.toBeNull();
+
+    expect((await alice.delete(`/v1/bundles/${tempBundle}`)).status).toBe(200);
+    // Record cascaded away AND the blob bytes were removed (no orphan).
+    const rows = await app.db.client
+      .select()
+      .from(app.db.tables.files)
+      .where(eq(app.db.tables.files.id, f.file_id));
+    expect(rows).toEqual([]);
+    expect(await app.blob.stat(storageKey)).toBeNull();
+  });
+
+  it("rejects file names with control characters (CR/LF header-injection vector)", async () => {
+    const bad = await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, {
+      name: "a\r\nSet-Cookie: x=1.txt",
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.message).toMatch(/control characters/);
+  });
+
+  it("sweeps never-uploaded reserved placeholders past the age cutoff", async () => {
+    // A reserved record whose upload never landed (no PUT).
+    const orphan = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "orphan.txt" })).body;
     const { files } = app.db.tables;
-    // Age the record artificially.
     const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    await app.db.client.update(files).set({ createdAt: old }).where(eq(files.id, requested.file_id));
+    await app.db.client.update(files).set({ createdAt: old }).where(eq(files.id, orphan.file_id));
 
     const swept = await sweepOrphans({ db: app.db, blob: app.blob, config: app.config }, 30 * 60 * 1000);
     expect(swept).toBe(1);
-    const rows = await app.db.client.select().from(files).where(eq(files.id, requested.file_id));
+    const rows = await app.db.client.select().from(files).where(eq(files.id, orphan.file_id));
     expect(rows).toEqual([]);
     // Finalized files are never swept.
-    const sweptAgain = await sweepOrphans({ db: app.db, blob: app.blob, config: app.config }, 0);
+    await sweepOrphans({ db: app.db, blob: app.blob, config: app.config }, 0);
     const remaining = await app.db.client.select().from(files).where(eq(files.status, "finalized"));
     expect(remaining.length).toBeGreaterThan(0);
-    void sweptAgain;
+  });
+
+  it("never sweeps a reserved record whose bytes were already uploaded (awaiting finalize)", async () => {
+    const uploaded = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "pending.txt" }))
+      .body;
+    await fetch(uploaded.upload_url, { method: "PUT", body: "successfully uploaded, finalize delayed" });
+    const { files } = app.db.tables;
+    // Age it well past the cutoff: it still must survive — destroying it would
+    // silently lose a file the user successfully uploaded.
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await app.db.client.update(files).set({ createdAt: old }).where(eq(files.id, uploaded.file_id));
+
+    const swept = await sweepOrphans({ db: app.db, blob: app.blob, config: app.config }, 1);
+    expect(swept).toBe(0);
+    const rows = await app.db.client.select().from(files).where(eq(files.id, uploaded.file_id));
+    expect(rows).toHaveLength(1);
+    // And a delayed finalize still works, returning the uploaded bytes' size.
+    const completed = await alice.post(`/v1/files/${uploaded.file_id}/complete`, {});
+    expect(completed.status).toBe(200);
+    expect(completed.body.size).toBe(39);
   });
 
   it("show_file passes direct URLs through without minting", async () => {

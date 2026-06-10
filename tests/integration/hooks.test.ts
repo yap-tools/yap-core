@@ -274,7 +274,10 @@ describeEachAdapter("hooks", (adapter) => {
       });
       const result = await fireViaMcp(aliceMcp, bundleId, { hook: "rebound" });
       expect(result.ok).toBe(false);
-      expect(result.error.message).toMatch(/denied by default/);
+      expect(result.error.message).toMatch(/blocked by the SSRF guard/);
+      // The hidden destination (host/IP) must never reach the firing agent.
+      expect(JSON.stringify(result.error)).not.toContain("192.168.0.1");
+      expect(JSON.stringify(result.error)).not.toContain("internal");
     });
 
     it("requires fire_hooks; discovery needs only read access", async () => {

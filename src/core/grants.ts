@@ -84,13 +84,15 @@ export async function listGrants(db: Db, actorId: string, target: GrantTarget): 
 }
 
 export async function deleteGrant(db: Db, actorId: string, target: GrantTarget, grantId: string): Promise<void> {
+  // Authorize first — otherwise the 404-vs-403 split lets an unauthorized
+  // caller probe which grant ids exist.
+  await requireManageRoles(db, actorId, target);
   const { grants } = db.tables;
   const rows = await db.client
-    .select()
+    .select({ id: grants.id })
     .from(grants)
     .where(and(eq(grants.id, grantId), eq(grants.resourceType, target.type), eq(grants.resourceId, target.id)));
   if (rows.length === 0) throw notFound("grant", grantId);
-  await requireManageRoles(db, actorId, target);
   await db.client.delete(grants).where(eq(grants.id, grantId));
 }
 

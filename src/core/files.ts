@@ -67,6 +67,20 @@ export function mimeAllowed(config: YapConfig, mimeType: string): boolean {
   );
 }
 
+/**
+ * Validates a file name and returns the trimmed value. Rejects control
+ * characters (incl. CR/LF, which would inject into the Content-Disposition
+ * header when the file is downloaded) and path separators.
+ */
+export function cleanFileName(raw: string | undefined): string {
+  const name = (raw ?? "").trim();
+  if (!name) throw invalid("file name is required");
+  if (/[\u0000-\u001f\u007f]/.test(name)) throw invalid("file name must not contain control characters");
+  if (name.includes("/") || name.includes("\\")) throw invalid("file name must not contain path separators");
+  if (name.length > 255) throw invalid("file name is too long (max 255 characters)");
+  return name;
+}
+
 export interface UploadRequestResult {
   file_id: string;
   /** Short-lived, single-use direct-to-storage upload link. */
@@ -89,8 +103,7 @@ export async function requestUpload(
   const ctx = await getBundleContext(db, bundleId);
   await requireCapability(db, userId, "edit_files", bundleCapabilityCtx(ctx));
 
-  const name = input.name?.trim();
-  if (!name) throw invalid("file name is required");
+  const name = cleanFileName(input.name);
   const declaredMime = input.mime_type ?? "";
   if (declaredMime && !mimeAllowed(config, declaredMime)) {
     throw invalid(`MIME type ${declaredMime} is not allowed`, { allowed: config.mimeAllowlist });
@@ -192,11 +205,12 @@ async function finalizeUpload(
   }
 
   const { files } = db.tables;
+  const finalName = patch.name !== undefined ? cleanFileName(patch.name) : file.name;
   await db.client
     .update(files)
     .set({
       status: "finalized",
-      name: patch.name?.trim() || file.name,
+      name: finalName,
       mimeType,
       size: stat.size,
       finalizedAt: nowIso(),
@@ -353,15 +367,28 @@ export async function storeUploadedBytes(
   bytes: Uint8Array,
 ): Promise<{ size: number }> {
   const { db, blob, config } = env;
-  const file = await getFileRow(db, fileId);
-  if (file.status !== "reserved") throw new YapError("conflict", "this upload is no longer open");
-  if (file.uploadConsumed) throw new YapError("conflict", "this upload link was already used (single-use)");
   if (bytes.byteLength > config.maxFileSizeBytes) {
     throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
   }
-  await blob.put(file.storageKey, bytes);
+  const file = await getFileRow(db, fileId);
   const { files } = db.tables;
-  await db.client.update(files).set({ uploadConsumed: 1 }).where(eq(files.id, fileId));
+  // Atomically claim the single-use slot before writing bytes: a conditional
+  // UPDATE that only one concurrent request can win. (returning() is portable
+  // across both adapters and lets us count the affected row.)
+  const claimed = await db.client
+    .update(files)
+    .set({ uploadConsumed: 1 })
+    .where(and(eq(files.id, fileId), eq(files.status, "reserved"), eq(files.uploadConsumed, 0)))
+    .returning({ id: files.id });
+  if (claimed.length === 0) {
+    throw new YapError(
+      "conflict",
+      file.status !== "reserved"
+        ? "this upload is no longer open"
+        : "this upload link was already used (single-use)",
+    );
+  }
+  await blob.put(file.storageKey, bytes);
   return { size: bytes.byteLength };
 }
 
@@ -382,19 +409,27 @@ export async function openDownloadStream(
 
 /**
  * Removes reserved placeholder records older than the cutoff whose upload
- * never completed — along with any bytes that did land.
+ * never landed. A reserved record that already has bytes — flagged by
+ * uploadConsumed (local-disk path) or detectable via blob.stat (direct-to-
+ * storage adapters that bypass storeUploadedBytes) — is awaiting finalize,
+ * not an orphan, and is never destroyed: doing so would silently delete a
+ * successfully-uploaded file.
  */
 export async function sweepOrphans(env: FileEnv, olderThanMs: number, nowMs: number = Date.now()): Promise<number> {
   const { db, blob } = env;
   const { files } = db.tables;
   const cutoff = new Date(nowMs - olderThanMs).toISOString();
-  const orphans = await db.client
+  const candidates = await db.client
     .select()
     .from(files)
     .where(and(eq(files.status, "reserved"), lt(files.createdAt, cutoff)));
-  for (const orphan of orphans) {
+  let removed = 0;
+  for (const orphan of candidates) {
+    if (orphan.uploadConsumed) continue; // bytes uploaded, finalize still pending
+    if (await blob.stat(orphan.storageKey)) continue; // bytes present via a direct upload
     await blob.delete(orphan.storageKey); // FlyDrive delete ignores missing keys
     await db.client.delete(files).where(eq(files.id, orphan.id));
+    removed++;
   }
-  return orphans.length;
+  return removed;
 }

@@ -36,10 +36,37 @@ describe("isPrivateAddress", () => {
     }
   });
 
+  it("flags hex-form IPv4-mapped private addresses (regression: dotted-only check was bypassable)", () => {
+    for (const ip of [
+      "::ffff:7f00:1", // 127.0.0.1
+      "::ffff:a9fe:a9fe", // 169.254.169.254 (cloud metadata)
+      "::ffff:a00:1", // 10.0.0.1
+      "::ffff:c0a8:1", // 192.168.0.1
+      "::127.0.0.1", // IPv4-compatible (deprecated) loopback
+      "64:ff9b::7f00:1", // NAT64 of 127.0.0.1
+      "64:ff9b::a9fe:a9fe", // NAT64 of metadata
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
   it("passes public v6 addresses", () => {
-    for (const ip of ["2606:4700:4700::1111", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
+    for (const ip of [
+      "2606:4700:4700::1111",
+      "2001:4860:4860::8888",
+      "::ffff:8.8.8.8",
+      "::ffff:808:808", // 8.8.8.8 in hex
+      "64:ff9b::808:808", // NAT64 of 8.8.8.8
+    ]) {
       expect(isPrivateAddress(ip), ip).toBe(false);
     }
+  });
+
+  it("denies bracketed hex-mapped loopback as a hook destination", async () => {
+    await expect(assertPublicDestination("http://[::ffff:7f00:1]/x", [])).rejects.toThrow(YapError);
+    await expect(assertPublicDestination("http://[::ffff:a9fe:a9fe]/latest/meta-data/", [])).rejects.toThrow(
+      YapError,
+    );
   });
 });
 

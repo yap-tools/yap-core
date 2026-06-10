@@ -38,18 +38,59 @@ export function isPrivateAddress(ip: string): boolean {
     return PRIVATE_V4_RANGES.some(([base, bits]) => inV4Cidr(ip, base, bits));
   }
   if (version === 6) {
-    const lower = ip.toLowerCase();
-    // IPv4-mapped (::ffff:a.b.c.d) — check the embedded v4.
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-    if (mapped) return isPrivateAddress(mapped[1]!);
-    if (lower === "::" || lower === "::1") return true;
-    const firstWord = lower.split(":")[0] || "0";
-    const first = parseInt(firstWord.padEnd(4, "0").slice(0, 4), 16);
-    if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
-    if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    const h = ipv6Hextets(ip);
+    if (!h) return true; // unparseable address → treat as unsafe (deny)
+    // ::1 (loopback) and :: (unspecified).
+    if (h.slice(0, 7).every((x) => x === 0) && (h[7] === 0 || h[7] === 1)) return true;
+    // IPv4-mapped (::ffff:0:0/96), IPv4-compatible (::/96), and NAT64
+    // (64:ff9b::/96) all embed a v4 address in the last two hextets — check
+    // it against the v4 ranges regardless of dotted-vs-hex spelling.
+    const firstFiveZero = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0;
+    const isMapped = firstFiveZero && (h[5] === 0xffff || h[5] === 0);
+    const isNat64 = h[0] === 0x64 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0;
+    if (isMapped || isNat64) {
+      const v4 = `${(h[6]! >> 8) & 0xff}.${h[6]! & 0xff}.${(h[7]! >> 8) & 0xff}.${h[7]! & 0xff}`;
+      return isPrivateAddress(v4);
+    }
+    if ((h[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+    if ((h[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
     return false;
   }
   return false;
+}
+
+/** Expands any IPv6 literal (with `::` compression and/or an embedded
+ * dotted-quad) to its 8 hextets, or null if malformed. */
+function ipv6Hextets(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  const zone = s.indexOf("%");
+  if (zone >= 0) s = s.slice(0, zone);
+  // Rewrite a trailing embedded IPv4 dotted-quad into two hex groups.
+  const lastColon = s.lastIndexOf(":");
+  const lastPart = s.slice(lastColon + 1);
+  if (lastPart.includes(".")) {
+    const v4 = lastPart.split(".").map((n) => Number(n));
+    if (v4.length !== 4 || v4.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    const hi = ((v4[0]! << 8) | v4[1]!).toString(16);
+    const lo = ((v4[2]! << 8) | v4[3]!).toString(16);
+    s = `${s.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  let groups: string[];
+  if (halves.length === 2) {
+    const tail = halves[1] ? halves[1].split(":") : [];
+    const missing = 8 - head.length - tail.length;
+    if (missing < 0) return null;
+    groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+  const hextets = groups.map((g) => parseInt(g || "0", 16));
+  if (hextets.some((x) => Number.isNaN(x) || x < 0 || x > 0xffff)) return null;
+  return hextets;
 }
 
 export type Resolver = (hostname: string) => Promise<string[]>;

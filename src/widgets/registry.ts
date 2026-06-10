@@ -63,6 +63,19 @@ const BRIDGE_JS = `
     if (window.__YAP_DATA__) { window.__yapOnData(window.__YAP_DATA__); return; }
     send({ jsonrpc: "2.0", method: "ui/ready" });
   }
+  // HTML-escape for text and double-quoted-attribute contexts. Widget data
+  // (file names, mime types) is user-controlled and must never be trusted in
+  // an innerHTML sink.
+  function esc(v) {
+    return String(v == null ? "" : v)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  // Allow only http(s) URLs into href/src; reject javascript:, data:, etc.
+  function safeUrl(v) {
+    var s = String(v == null ? "" : v);
+    return /^https?:\\/\\//i.test(s) ? esc(s) : "#";
+  }
 `;
 
 const BASE_STYLE = `
@@ -187,17 +200,20 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
-        var name = d.name || "file";
-        var sizeNote = d.size ? '<span class="muted"> \\u00b7 ' + d.size + " bytes</span>" : "";
+        var name = esc(d.name || "file");
+        var url = safeUrl(d.url);
+        var size = Number(d.size) || 0;
+        var sizeNote = size ? '<span class="muted"> \\u00b7 ' + size + " bytes</span>" : "";
         var inner;
-        if (d.kind === "image") inner = '<img src="' + d.url + '" alt="' + name + '">';
-        else if (d.kind === "audio") inner = '<audio controls src="' + d.url + '"></audio>';
-        else if (d.kind === "video") inner = '<video controls src="' + d.url + '"></video>';
+        if (d.kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
+        else if (d.kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
+        else if (d.kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
-          '</div><div class="muted">' + (d.mime_type || "") + '</div></div>' +
-          '<a class="dl" href="' + d.url + '" download><button>Download</button></a></div>';
+          '</div><div class="muted">' + esc(d.mime_type || "") + '</div></div>' +
+          '<a class="dl" href="' + url + '" download><button>Download</button></a></div>';
+        var expires = Number(d.expires_in) || 0;
         root.innerHTML = '<div class="card">' + inner +
-          (d.expires_in ? '<p class="muted">Link expires in ' + d.expires_in + 's</p>' : "") + "</div>";
+          (expires ? '<p class="muted">Link expires in ' + expires + 's</p>' : "") + "</div>";
         var media = root.querySelector("img,video,audio");
         if (media) media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", announceHeight);
       });
