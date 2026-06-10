@@ -6,13 +6,11 @@
  * { error: { code, message, details? } }.
  */
 import type { ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 
-import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
-
-import { Readable } from "node:stream";
 
 import * as bundlesCore from "../core/bundles.js";
 import * as docsCore from "../core/docs.js";
@@ -536,7 +534,7 @@ export function registerRestRoutes(server: YapServer): void {
       const userId = await requireUser(c, db, config);
       const body = parseBody(z.object({ set: z.record(z.string(), z.unknown()) }), await jsonBody(c));
       const itemId = param(c, "id");
-      const bundleId = await itemBundleId(c, itemId);
+      const bundleId = await itemsCore.getItemBundleId(db, itemId);
       const updated = await itemsCore.updateItems(db, userId, bundleId, [{ id: itemId, set: body.set }]);
       return c.json(updated[0]);
     }),
@@ -547,7 +545,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
       const itemId = param(c, "id");
-      const bundleId = await itemBundleId(c, itemId);
+      const bundleId = await itemsCore.getItemBundleId(db, itemId);
       await itemsCore.deleteItems(db, userId, bundleId, [itemId]);
       return c.json({ deleted: true });
     }),
@@ -621,34 +619,25 @@ export function registerRestRoutes(server: YapServer): void {
   // ---- Local-disk signed-token endpoints (the fs adapter's "presigning") ----------
   // Public routes gated solely by HMAC tokens minted after permission checks.
 
+  function requireFileToken(c: Context, scope: string, fileId: string): void {
+    const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
+    if (!payload || payload.scope !== scope || payload.fileId !== fileId) {
+      throw new YapError("unauthorized", `invalid or expired ${scope} token`);
+    }
+  }
+
   app.put(
     "/v1/files/:id/upload",
     handle(async (c) => {
       const fileId = param(c, "id");
-      const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
-      if (!payload || payload.scope !== "upload" || payload.fileId !== fileId) {
-        throw new YapError("unauthorized", "invalid or expired upload token");
-      }
-      const { files } = db.tables;
-      const rows = await db.client.select().from(files).where(eq(files.id, fileId));
-      const file = rows[0];
-      if (!file || file.status !== "reserved") {
-        throw new YapError("conflict", "this upload is no longer open");
-      }
-      if (file.uploadConsumed) {
-        throw new YapError("conflict", "this upload link was already used (single-use)");
-      }
+      requireFileToken(c, "upload", fileId);
       const declared = Number(c.req.header("content-length") ?? "0");
       if (declared > config.maxFileSizeBytes) {
         throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
       }
       const bytes = new Uint8Array(await c.req.arrayBuffer());
-      if (bytes.byteLength > config.maxFileSizeBytes) {
-        throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
-      }
-      await blob.put(file.storageKey, bytes);
-      await db.client.update(files).set({ uploadConsumed: 1 }).where(eq(files.id, fileId));
-      return c.json({ uploaded: true, size: bytes.byteLength });
+      const { size } = await filesCore.storeUploadedBytes(fileEnv, fileId, bytes);
+      return c.json({ uploaded: true, size });
     }),
   );
 
@@ -656,20 +645,11 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/files/:id/download",
     handle(async (c) => {
       const fileId = param(c, "id");
-      const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
-      if (!payload || payload.scope !== "download" || payload.fileId !== fileId) {
-        throw new YapError("unauthorized", "invalid or expired download token");
-      }
-      const { files } = db.tables;
-      const rows = await db.client.select().from(files).where(eq(files.id, fileId));
-      const file = rows[0];
-      if (!file || file.status !== "finalized") {
-        throw new YapError("not_found", `file ${fileId} not found`);
-      }
-      const stream = await blob.getStream(file.storageKey);
-      c.header("content-type", file.mimeType || "application/octet-stream");
-      c.header("content-length", String(file.size));
-      c.header("content-disposition", `inline; filename="${file.name.replace(/"/g, "")}"`);
+      requireFileToken(c, "download", fileId);
+      const { stream, name, mimeType, size } = await filesCore.openDownloadStream(fileEnv, fileId);
+      c.header("content-type", mimeType || "application/octet-stream");
+      c.header("content-length", String(size));
+      c.header("content-disposition", `inline; filename="${name.replace(/"/g, "")}"`);
       return c.body(Readable.toWeb(stream) as ReadableStream);
     }),
   );
@@ -757,12 +737,8 @@ export function registerRestRoutes(server: YapServer): void {
       }
       const body = parseBody(z.object({ params: z.record(z.string(), z.unknown()).optional() }), rawBody);
       const hookId = param(c, "id");
-      const { hooks } = db.tables;
-      const rows = await db.client.select({ bundleId: hooks.bundleId }).from(hooks).where(eq(hooks.id, hookId));
-      if (rows.length === 0) throw new YapError("not_found", `hook ${hookId} not found`);
-      return c.json(
-        await hooksCore.fireHook(hookEnv, userId, rows[0]!.bundleId, { hook: hookId, params: body.params }),
-      );
+      const bundleId = await hooksCore.getHookBundleId(db, hookId);
+      return c.json(await hooksCore.fireHook(hookEnv, userId, bundleId, { hook: hookId, params: body.params }));
     }),
   );
 
@@ -831,10 +807,4 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  async function itemBundleId(_c: Context, itemId: string): Promise<string> {
-    const { items } = db.tables;
-    const rows = await db.client.select({ bundleId: items.bundleId }).from(items).where(eq(items.id, itemId));
-    if (rows.length === 0) throw new YapError("not_found", `item ${itemId} not found`);
-    return rows[0]!.bundleId;
-  }
 }

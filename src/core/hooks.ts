@@ -142,6 +142,11 @@ export async function createHook(
   return { id, name, description: input.description ?? "", params };
 }
 
+/** Resolves a hook id to its owning bundle (transport helper for /v1/hooks/:id/fire). */
+export async function getHookBundleId(db: Db, hookId: string): Promise<string> {
+  return (await getHookRow(db, hookId)).bundleId;
+}
+
 async function getHookRow(db: Db, hookId: string) {
   const { hooks } = db.tables;
   const rows = await db.client.select().from(hooks).where(eq(hooks.id, hookId));

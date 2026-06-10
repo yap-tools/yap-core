@@ -212,6 +212,14 @@ async function materialize(
 
 // ---- CRUD -------------------------------------------------------------------
 
+/** Resolves an item id to its owning bundle (transport helper for /v1/items/:id). */
+export async function getItemBundleId(db: Db, itemId: string): Promise<string> {
+  const { items } = db.tables;
+  const rows = await db.client.select({ bundleId: items.bundleId }).from(items).where(eq(items.id, itemId));
+  if (rows.length === 0) throw notFound("item", itemId);
+  return rows[0]!.bundleId;
+}
+
 export async function createItems(
   db: Db,
   userId: string,

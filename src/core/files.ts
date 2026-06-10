@@ -303,6 +303,83 @@ export async function showFile(env: FileEnv, userId: string, ref: string): Promi
   throw invalid(`show_file expects a file://{uuid} reference or an http(s) URL, got ${JSON.stringify(ref)}`);
 }
 
+/** Data builders for origin-hosted widget pages (token-authorized; the
+ * transport verifies the signed token, these enforce the state rules). */
+export async function uploadPageData(
+  env: FileEnv,
+  fileId: string,
+): Promise<{ file_id: string; name: string; upload_url: string; complete_url: string }> {
+  const { db, blob, config } = env;
+  const file = await getFileRow(db, fileId);
+  if (file.status !== "reserved" || file.uploadConsumed) {
+    throw new YapError("conflict", "this upload is no longer open");
+  }
+  const uploadUrl = await blob.uploadUrl(file.storageKey, fileId, config.uploadTtlSeconds);
+  const completeToken = signToken({ scope: "upload-complete", fileId }, config.masterKey, config.uploadTtlSeconds);
+  return {
+    file_id: fileId,
+    name: file.name,
+    upload_url: uploadUrl,
+    complete_url: `${config.baseUrl}/v1/files/${fileId}/complete?token=${completeToken}`,
+  };
+}
+
+export async function viewPageData(env: FileEnv, fileId: string): Promise<ShowFileResult> {
+  const { db, blob, config } = env;
+  const file = await getFileRow(db, fileId);
+  if (file.status !== "finalized") throw notFound("file", fileId);
+  const url = await blob.downloadUrl(file.storageKey, config.downloadTtlSeconds, {
+    fileId: file.id,
+    name: file.name,
+    mimeType: file.mimeType,
+  });
+  return {
+    kind: fileKind(file.mimeType),
+    url,
+    name: file.name,
+    mime_type: file.mimeType,
+    size: file.size,
+    expires_in: config.downloadTtlSeconds,
+  };
+}
+
+/**
+ * Token-side byte handling for the local-disk adapter's app-served endpoints.
+ * Token verification is the transport's job; the state rules live here.
+ */
+export async function storeUploadedBytes(
+  env: FileEnv,
+  fileId: string,
+  bytes: Uint8Array,
+): Promise<{ size: number }> {
+  const { db, blob, config } = env;
+  const file = await getFileRow(db, fileId);
+  if (file.status !== "reserved") throw new YapError("conflict", "this upload is no longer open");
+  if (file.uploadConsumed) throw new YapError("conflict", "this upload link was already used (single-use)");
+  if (bytes.byteLength > config.maxFileSizeBytes) {
+    throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+  }
+  await blob.put(file.storageKey, bytes);
+  const { files } = db.tables;
+  await db.client.update(files).set({ uploadConsumed: 1 }).where(eq(files.id, fileId));
+  return { size: bytes.byteLength };
+}
+
+export async function openDownloadStream(
+  env: FileEnv,
+  fileId: string,
+): Promise<{ stream: Awaited<ReturnType<BlobStore["getStream"]>>; name: string; mimeType: string; size: number }> {
+  const { db, blob } = env;
+  const file = await getFileRow(db, fileId);
+  if (file.status !== "finalized") throw notFound("file", fileId);
+  return {
+    stream: await blob.getStream(file.storageKey),
+    name: file.name,
+    mimeType: file.mimeType,
+    size: file.size,
+  };
+}
+
 /**
  * Removes reserved placeholder records older than the cutoff whose upload
  * never completed — along with any bytes that did land.
