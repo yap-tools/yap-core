@@ -16,6 +16,7 @@
  * and returns the raw status + body.
  */
 import { and, asc, eq } from "drizzle-orm";
+import { Agent, fetch as undiciFetch } from "undici";
 
 import type { YapConfig } from "../config.js";
 import { decryptSecret, encryptSecret } from "../crypto.js";
@@ -23,7 +24,7 @@ import type { Db } from "../db/index.js";
 import { bundleCapabilityCtx, getBundleContext, requireBundleReadAccess } from "./bundles.js";
 import { requireCapability } from "./capabilities.js";
 import { YapError, invalid, notFound } from "./errors.js";
-import { assertPublicDestination, type Resolver } from "./ssrf.js";
+import { assertPublicDestination, createPinningLookup, SSRF_PIN_ERROR_CODE, type Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
 export interface HookParamSpec {
@@ -264,13 +265,14 @@ export async function fireHook(
   // Decrypted transport exists only in memory, only here.
   const transport = JSON.parse(decryptSecret(hook.transportEncrypted, config.masterKey)) as HookTransport;
   const url = substitute(transport.url, values, true);
-  // DNS can change, so re-check at fire time. The detailed message names the
-  // host/IP — fine for the REST authoring path (an operator), but the firing
-  // agent must never learn the hidden transport, so collapse any guard
-  // failure to a generic policy error here.
-  // (Residual: fetch resolves DNS again independently, so a rebinding attacker
-  // could still flip a name between this check and the socket. Closing that
-  // fully requires an IP-pinning dispatcher; the guard re-check bounds it.)
+  // Pre-flight re-check at fire time (DNS can change since authoring). This
+  // gives a fast rejection and covers IP-literal destinations, for which undici
+  // does not invoke the pinning lookup below. The detailed guard message names
+  // the host/IP — fine for the REST authoring path (an operator), but the
+  // firing agent must never learn the hidden transport, so collapse any guard
+  // failure to a generic policy error here. The connect-time pinning lookup
+  // (see the dispatcher below) closes the rebinding window between this check
+  // and the actual socket connection.
   try {
     await assertPublicDestination(url, config.hookAllowHosts, env.resolver);
   } catch {
@@ -289,17 +291,30 @@ export async function fireHook(
       ? substitute(transport.body_template, values, false)
       : undefined;
 
-  const fetchImpl = env.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.hookTimeoutMs);
+  // Pin DNS to validated addresses: undici's connect.lookup runs the SSRF
+  // check on the exact address the socket uses, so a name that resolved public
+  // for the pre-flight check above cannot rebind to a private address for the
+  // actual connection. Skipped when a fetch is injected (tests).
+  const agent = env.fetchImpl ? undefined : new Agent({ connect: { lookup: createPinningLookup(config.hookAllowHosts) } });
   try {
-    const response = await fetchImpl(url, {
-      method: transport.method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-      signal: controller.signal,
-      redirect: "manual", // redirects could bounce to private targets
-    });
+    const response: { status: number; text(): Promise<string> } = env.fetchImpl
+      ? await env.fetchImpl(url, {
+          method: transport.method,
+          headers,
+          ...(body !== undefined ? { body } : {}),
+          signal: controller.signal,
+          redirect: "manual",
+        })
+      : await undiciFetch(url, {
+          method: transport.method,
+          headers,
+          ...(body !== undefined ? { body } : {}),
+          signal: controller.signal,
+          redirect: "manual", // redirects could bounce to private targets
+          dispatcher: agent,
+        });
     return { status: response.status, body: await response.text() };
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -308,10 +323,20 @@ export async function fireHook(
         `hook timed out after ${config.hookTimeoutMs}ms (no automatic retries — retrying is the caller's decision)`,
       );
     }
+    // The connect-time pinning lookup rejects rebound/private addresses; surface
+    // it as the same generic SSRF error as the pre-flight check.
+    const cause = (err as { cause?: { code?: string } }).cause;
+    if (cause?.code === SSRF_PIN_ERROR_CODE || (err as { code?: string }).code === SSRF_PIN_ERROR_CODE) {
+      throw new YapError(
+        "forbidden",
+        "hook destination is blocked by the SSRF guard; ask an operator to review this hook's configuration",
+      );
+    }
     // The underlying fetch error can embed the hidden host (e.g.
     // "ENOTFOUND internal.corp"); keep it out of the agent-facing message.
     throw new YapError("internal", "hook request failed to reach its destination");
   } finally {
     clearTimeout(timer);
+    if (agent) await agent.destroy();
   }
 }

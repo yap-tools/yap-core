@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { YapError } from "../../src/core/errors.js";
-import { assertPublicDestination, isPrivateAddress } from "../../src/core/ssrf.js";
+import {
+  assertPublicDestination,
+  createPinningLookup,
+  isPrivateAddress,
+  SSRF_PIN_ERROR_CODE,
+  type AllAddressLookup,
+} from "../../src/core/ssrf.js";
 
 describe("isPrivateAddress", () => {
   it("flags loopback, private, link-local, CGNAT, and special v4 ranges", () => {
@@ -118,5 +124,69 @@ describe("assertPublicDestination", () => {
         throw new Error("ENOTFOUND");
       }),
     ).rejects.toThrow(/could not be resolved/);
+  });
+});
+
+describe("createPinningLookup (connect-time validation that closes DNS rebinding)", () => {
+  const dnsReturning =
+    (addresses: { address: string; family: number }[], err?: Error): AllAddressLookup =>
+    (_hostname, _options, callback) =>
+      callback((err ?? null) as NodeJS.ErrnoException | null, err ? [] : addresses);
+
+  function run(
+    lookup: ReturnType<typeof createPinningLookup>,
+    hostname: string,
+    options: { all?: boolean } = {},
+  ): { err: unknown; args: unknown[] } {
+    let captured: { err: unknown; args: unknown[] } = { err: undefined, args: [] };
+    lookup(hostname, options as never, (err: unknown, ...args: unknown[]) => {
+      captured = { err, args };
+    });
+    return captured;
+  }
+
+  it("blocks when the resolved address is private", () => {
+    const lookup = createPinningLookup([], dnsReturning([{ address: "127.0.0.1", family: 4 }]));
+    const { err } = run(lookup, "evil.example", { all: true });
+    expect((err as { code?: string }).code).toBe(SSRF_PIN_ERROR_CODE);
+  });
+
+  it("blocks when ANY resolved address is private (rebinding mix)", () => {
+    const lookup = createPinningLookup(
+      [],
+      dnsReturning([
+        { address: "93.184.216.34", family: 4 },
+        { address: "169.254.169.254", family: 4 },
+      ]),
+    );
+    const { err } = run(lookup, "evil.example", { all: true });
+    expect((err as { code?: string }).code).toBe(SSRF_PIN_ERROR_CODE);
+  });
+
+  it("passes public addresses in the all-array form", () => {
+    const addrs = [{ address: "93.184.216.34", family: 4 }];
+    const lookup = createPinningLookup([], dnsReturning(addrs));
+    const { err, args } = run(lookup, "ok.example", { all: true });
+    expect(err).toBeNull();
+    expect(args[0]).toEqual(addrs);
+  });
+
+  it("returns the first address + family in the single (non-all) form", () => {
+    const lookup = createPinningLookup([], dnsReturning([{ address: "93.184.216.34", family: 4 }]));
+    const { err, args } = run(lookup, "ok.example", {});
+    expect(err).toBeNull();
+    expect(args).toEqual(["93.184.216.34", 4]);
+  });
+
+  it("an allowlisted resolved IP is permitted even though it is private", () => {
+    const lookup = createPinningLookup(["10.0.0.5"], dnsReturning([{ address: "10.0.0.5", family: 4 }]));
+    const { err } = run(lookup, "internal.corp", { all: true });
+    expect(err).toBeNull();
+  });
+
+  it("propagates resolution failures", () => {
+    const lookup = createPinningLookup([], dnsReturning([], new Error("ENOTFOUND")));
+    const { err } = run(lookup, "nope.invalid", { all: true });
+    expect(err).toBeInstanceOf(Error);
   });
 });

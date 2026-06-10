@@ -6,8 +6,9 @@
  * creation AND re-checked at fire time, since DNS can change — with an
  * operator-overridable allowlist for legitimate internal targets.
  */
-import { isIP } from "node:net";
+import type { LookupOptions } from "node:dns";
 import dns from "node:dns/promises";
+import { isIP, type LookupFunction } from "node:net";
 
 import { invalid } from "./errors.js";
 
@@ -106,6 +107,17 @@ function hostAllowed(hostname: string, allowHosts: string[]): boolean {
 }
 
 /**
+ * Given a hostname and the addresses it resolved to, returns the subset that
+ * is blocked (private/link-local/loopback and not allowlisted). An allowlisted
+ * host short-circuits to "nothing blocked". Shared by the pre-flight guard and
+ * the connect-time pinning lookup so both apply identical policy.
+ */
+export function blockedAddresses(hostname: string, addresses: string[], allowHosts: string[]): string[] {
+  if (hostAllowed(hostname, allowHosts)) return [];
+  return addresses.filter((addr) => isPrivateAddress(addr) && !hostAllowed(addr, allowHosts));
+}
+
+/**
  * Throws unless every address the destination resolves to is public — or the
  * host is explicitly allowlisted in configuration.
  */
@@ -127,7 +139,7 @@ export async function assertPublicDestination(
   if (hostAllowed(hostname, allowHosts)) return;
 
   const addresses = isIP(hostname) ? [hostname] : await resolveOrFail(hostname, resolver);
-  const blocked = addresses.filter((addr) => isPrivateAddress(addr) && !hostAllowed(addr, allowHosts));
+  const blocked = blockedAddresses(hostname, addresses, allowHosts);
   if (blocked.length > 0) {
     throw invalid(
       `hook destination ${hostname} resolves to a private, link-local, or localhost address (${blocked.join(", ")}); ` +
@@ -144,4 +156,64 @@ async function resolveOrFail(hostname: string, resolver: Resolver): Promise<stri
   } catch {
     throw invalid(`hook destination ${hostname} could not be resolved`);
   }
+}
+
+/** Error raised by the pinning lookup when a resolved address is blocked. */
+export const SSRF_PIN_ERROR_CODE = "EYAPSSRF";
+
+/** dns.lookup-compatible function returning all addresses (used internally and
+ * injectable in tests). */
+export type AllAddressLookup = (
+  hostname: string,
+  options: { family?: number; hints?: number },
+  callback: (err: NodeJS.ErrnoException | null, addresses: { address: string; family: number }[]) => void,
+) => void;
+
+const defaultAllLookup: AllAddressLookup = (hostname, options, callback) => {
+  dns
+    .lookup(hostname, { ...options, all: true, verbatim: true })
+    .then((records) => callback(null, records))
+    .catch((err) => callback(err as NodeJS.ErrnoException, []));
+};
+
+/**
+ * Builds a Node `net`/`tls` `lookup` function that resolves a hostname and
+ * fails the whole resolution if ANY returned address is blocked. Wired into
+ * undici's `connect.lookup`, the address it returns is the exact one the
+ * socket connects to — so there is no second, unvalidated DNS resolution and
+ * the rebinding TOCTOU between the pre-flight guard and the connect is closed.
+ * (`host: hostname` is still passed to the socket, so TLS SNI / certificate
+ * validation continue to use the real hostname.)
+ */
+export function createPinningLookup(
+  allowHosts: string[],
+  dnsImpl: AllAddressLookup = defaultAllLookup,
+): LookupFunction {
+  const lookup = (hostname: string, options: LookupOptions, callback: (...args: unknown[]) => void): void => {
+    const family = options.family === "IPv4" ? 4 : options.family === "IPv6" ? 6 : options.family ?? 0;
+    dnsImpl(hostname, { family, hints: options.hints }, (err, addresses) => {
+      if (err) {
+        callback(err, []);
+        return;
+      }
+      if (addresses.length === 0) {
+        callback(Object.assign(new Error(`no addresses for ${hostname}`), { code: "ENOTFOUND" }), []);
+        return;
+      }
+      const blocked = blockedAddresses(hostname, addresses.map((a) => a.address), allowHosts);
+      if (blocked.length > 0) {
+        callback(
+          Object.assign(new Error(`SSRF guard blocked ${hostname} → ${blocked.join(", ")}`), {
+            code: SSRF_PIN_ERROR_CODE,
+          }),
+          [],
+        );
+        return;
+      }
+      // undici/net uses the all-array form (autoSelectFamily); honor both.
+      if (options.all) callback(null, addresses);
+      else callback(null, addresses[0]!.address, addresses[0]!.family);
+    });
+  };
+  return lookup as LookupFunction;
 }

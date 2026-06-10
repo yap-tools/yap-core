@@ -121,8 +121,9 @@ capabilities.
 - **Hooks** are pre-configured outbound HTTP calls: the agent sees a name,
   description, and declared parameters; the transport (URL, method, headers,
   secrets) stays encrypted at rest and is never returned by any surface.
-  Private/link-local destinations are denied by default, checked at creation
-  and again at fire time.
+  Private/link-local destinations are denied by default, checked at creation,
+  again at fire time, and pinned at connect time (the request connects only to
+  the validated address, closing DNS-rebinding).
 - **Widgets** (MCP Apps / SEP-1865) are self-contained `ui://` resources
   rendered three ways: result pointers on `call`, the generic `show_widget`
   shell, or origin-hosted pages at signed expiring URLs for hosts that can't
