@@ -39,10 +39,19 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 3. **load_bundle(bundle_ids)** — required before calling into a bundle:
    returns docs (follow them), item-type schemas, files, and hooks.
 4. **call(space_id, calls)** — execute. Batch related operations in one
-   round trip; each call succeeds or fails independently. Second-tier tools:
+   round trip; each call succeeds or fails independently. A call targets a
+   bundle (provide bundle_id) or the space (omit bundle_id). Second-tier tools:
    items (query/get/create/update/delete), docs (read/update), files
    (list_files, show_file, upload_request, upload_complete, delete_file),
-   hooks (fire_hook).
+   hooks (fire_hook), and management — gated by the matching capability:
+   spaces (update_space/delete_space, manage_space), roles
+   (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
+   (update_bundle/delete_bundle, create/update/delete_item_type,
+   add/update/delete_property, edit_bundles).
+
+Hook *authoring* is the one management action not available over MCP — defining
+a hook's destination and secrets is REST-only by design; agents only fire
+hooks (fire_hooks).
 
 Run the discovery chain silently — do not narrate loading steps.
 

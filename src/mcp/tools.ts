@@ -70,7 +70,7 @@ async function drainPages<T>(
 const SECOND_TIER_SPECS = Object.fromEntries(
   Object.entries(secondTier).map(([name, tool]) => [
     name,
-    { description: tool.description, capability: tool.capability },
+    { description: tool.description, capability: tool.capability, targets: tool.targets ?? ["bundle"] },
   ]),
 );
 
@@ -235,7 +235,9 @@ export function registerMcpTools(server: YapServer): void {
     calls: z
       .array(
         z.object({
-          bundle_id: z.string(),
+          // Present for bundle-scoped tools; omitted for space-scoped tools,
+          // which operate on space_id (e.g. update_space, space-level grants).
+          bundle_id: z.string().optional(),
           tool: z.string(),
           params: z.record(z.string(), z.unknown()).optional(),
         }),
@@ -246,7 +248,7 @@ export function registerMcpTools(server: YapServer): void {
   mcp.addTool({
     name: "call",
     description:
-      `The single execution verb: a batch of second-tier operations in one round trip. Each call names a bundle, a tool, and params; calls succeed or fail independently (no cross-call rollback). Load the bundle first (load_bundle). Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
+      `The single execution verb: a batch of second-tier operations in one round trip. Each call names a tool, its params, and a target — a bundle (provide bundle_id; load it first with load_bundle) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
     parameters: callSchema,
     execute: async (args, ctx) => {
       try {

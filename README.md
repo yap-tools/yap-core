@@ -97,18 +97,27 @@ metadata and descending only into the relevant branch:
 - **`load_space`** → the space's instructions and bundles
 - **`load_bundle`** → binding docs, item-type schemas, files, hooks
   (required before calling into a bundle)
-- **`call`** → the single execution verb: a batch of second-tier operations
-  (`query_items`, `get_items`, `create_items`, `update_items`,
-  `delete_items`, `read_docs`, `update_docs`, `list_files`, `show_file`,
-  `upload_request`, `upload_complete`, `delete_file`, `fire_hook`), each
-  succeeding or failing independently
+- **`call`** → the single execution verb: a batch of second-tier operations,
+  each targeting a bundle (`bundle_id`) or the call's space (omit it) and
+  succeeding/failing independently. Data & content: `query_items`, `get_items`,
+  `create_items`, `update_items`, `delete_items`, `read_docs`, `update_docs`,
+  `list_files`, `show_file`, `upload_request`, `upload_complete`, `delete_file`,
+  `fire_hook`. Management (gated by the matching capability): `update_space` /
+  `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
+  `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
+  `delete_item_type`, `add_property` / `update_property` / `delete_property`.
 - **`help`**, **`show_widget`**, **`space_create`**, **`bundle_create`**, and
   five user-doc tools (`list/load/create/update/delete_user_doc`)
 
-The REST API under `/v1` is the management plane: everything MCP can do plus
-the authoring MCP deliberately doesn't expose — user/key administration,
-role grants, item-type/property CRUD, and **hook authoring** (REST-only;
-agents may fire hooks but never see or define their transport).
+**Surface parity:** every per-resource role capability — content and container
+(`manage_space`, `manage_roles`, `edit_bundles`, …) — is exercisable from
+either surface; REST and MCP are two transports over one capability-checked
+core. Two things stay REST-only by design: **hook authoring** (defining a
+hook's destination and secrets is too sensitive for an agent-driven surface —
+agents may fire hooks but never define them) and **operator/account actions**
+that aren't role capabilities (user provisioning via the sysadmin key, and
+access-key management). The REST API under `/v1` also remains the full
+management plane.
 
 ## Items & schemas
 
