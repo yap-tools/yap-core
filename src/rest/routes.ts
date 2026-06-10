@@ -12,9 +12,12 @@ import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
+import { Readable } from "node:stream";
+
 import * as bundlesCore from "../core/bundles.js";
 import * as docsCore from "../core/docs.js";
 import { YapError, invalid } from "../core/errors.js";
+import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
@@ -22,6 +25,7 @@ import * as keysCore from "../core/keys.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
+import { verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
 import { requireSysadmin, requireUser } from "./auth.js";
 
@@ -69,7 +73,8 @@ function sendDirect404(c: Context, body: unknown): Response | null {
 
 export function registerRestRoutes(server: YapServer): void {
   const app = server.mcp.getApp();
-  const { db, config, logger } = server;
+  const { db, config, logger, blob } = server;
+  const fileEnv: filesCore.FileEnv = { db, blob, config };
 
   const handle =
     (fn: Handler) =>
@@ -543,6 +548,116 @@ export function registerRestRoutes(server: YapServer): void {
       const bundleId = await itemBundleId(c, itemId);
       await itemsCore.deleteItems(db, userId, bundleId, [itemId]);
       return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- Files ----------------------------------------------------------------------
+
+  app.get(
+    "/v1/bundles/:id/files",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json({ data: await filesCore.listFiles(fileEnv, userId, param(c, "id")) });
+    }),
+  );
+
+  app.post(
+    "/v1/bundles/:id/files/upload-request",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({ name: z.string(), mime_type: z.string().optional(), size: z.number().int().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await filesCore.requestUpload(fileEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.post(
+    "/v1/files/:id/complete",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const raw = c.req.header("content-length") === "0" || c.req.header("content-length") === undefined
+        ? {}
+        : await jsonBody(c);
+      const body = parseBody(
+        z.object({ name: z.string().optional(), mime_type: z.string().optional() }),
+        raw ?? {},
+      );
+      return c.json(await filesCore.completeUpload(fileEnv, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.get(
+    "/v1/files/:id/link",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json(await filesCore.mintDownloadLink(fileEnv, userId, param(c, "id")));
+    }),
+  );
+
+  app.delete(
+    "/v1/files/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      await filesCore.deleteFile(fileEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- Local-disk signed-token endpoints (the fs adapter's "presigning") ----------
+  // Public routes gated solely by HMAC tokens minted after permission checks.
+
+  app.put(
+    "/v1/files/:id/upload",
+    handle(async (c) => {
+      const fileId = param(c, "id");
+      const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
+      if (!payload || payload.scope !== "upload" || payload.fileId !== fileId) {
+        throw new YapError("unauthorized", "invalid or expired upload token");
+      }
+      const { files } = db.tables;
+      const rows = await db.client.select().from(files).where(eq(files.id, fileId));
+      const file = rows[0];
+      if (!file || file.status !== "reserved") {
+        throw new YapError("conflict", "this upload is no longer open");
+      }
+      if (file.uploadConsumed) {
+        throw new YapError("conflict", "this upload link was already used (single-use)");
+      }
+      const declared = Number(c.req.header("content-length") ?? "0");
+      if (declared > config.maxFileSizeBytes) {
+        throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+      }
+      const bytes = new Uint8Array(await c.req.arrayBuffer());
+      if (bytes.byteLength > config.maxFileSizeBytes) {
+        throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+      }
+      await blob.put(file.storageKey, bytes);
+      await db.client.update(files).set({ uploadConsumed: 1 }).where(eq(files.id, fileId));
+      return c.json({ uploaded: true, size: bytes.byteLength });
+    }),
+  );
+
+  app.get(
+    "/v1/files/:id/download",
+    handle(async (c) => {
+      const fileId = param(c, "id");
+      const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
+      if (!payload || payload.scope !== "download" || payload.fileId !== fileId) {
+        throw new YapError("unauthorized", "invalid or expired download token");
+      }
+      const { files } = db.tables;
+      const rows = await db.client.select().from(files).where(eq(files.id, fileId));
+      const file = rows[0];
+      if (!file || file.status !== "finalized") {
+        throw new YapError("not_found", `file ${fileId} not found`);
+      }
+      const stream = await blob.getStream(file.storageKey);
+      c.header("content-type", file.mimeType || "application/octet-stream");
+      c.header("content-length", String(file.size));
+      c.header("content-disposition", `inline; filename="${file.name.replace(/"/g, "")}"`);
+      return c.body(Readable.toWeb(stream) as ReadableStream);
     }),
   );
 

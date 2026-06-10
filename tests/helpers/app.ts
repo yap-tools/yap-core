@@ -8,6 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createBlobStore, type BlobStore } from "../../src/blob/index.js";
 import { loadConfig, type YapConfig } from "../../src/config.js";
 import { createDb, type Db } from "../../src/db/index.js";
 import { createLogger } from "../../src/logger.js";
@@ -45,6 +46,7 @@ export interface TestApp {
   server: YapServer;
   config: YapConfig;
   db: Db;
+  blob: BlobStore;
   baseUrl: string;
   stop(): Promise<void>;
 }
@@ -61,13 +63,15 @@ export async function bootTestApp(envOverrides: Record<string, string> = {}, db?
   );
   const database = db ?? (await createDb(config.db));
   if (!db) await database.migrate();
+  const blob = await createBlobStore(config);
   const quiet = createLogger({ debug() {}, info() {}, log() {}, warn() {}, error: console.error.bind(console) });
-  const server = buildServer(config, database, quiet);
+  const server = buildServer(config, database, blob, quiet);
   await server.start();
   return {
     server,
     config,
     db: database,
+    blob,
     baseUrl: config.baseUrl,
     stop: async () => {
       await server.stop();

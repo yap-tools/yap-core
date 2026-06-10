@@ -17,6 +17,8 @@
     "db:generate": "drizzle-kit generate --config drizzle-sqlite.config.ts && drizzle-kit generate --config drizzle-pg.config.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1065.0",
+    "@aws-sdk/s3-request-presigner": "^3.1065.0",
     "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
     "fastmcp": "^4.1.0",

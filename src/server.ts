@@ -5,6 +5,7 @@
  */
 import { FastMCP } from "fastmcp";
 
+import type { BlobStore } from "./blob/index.js";
 import type { YapConfig } from "./config.js";
 import { constantTimeEqual } from "./crypto.js";
 import { authenticateKey } from "./core/keys.js";
@@ -22,6 +23,7 @@ export interface YapServer {
   mcp: FastMCP<SessionAuth>;
   config: YapConfig;
   db: Db;
+  blob: BlobStore;
   logger: YapLogger;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -63,7 +65,7 @@ async function authenticateMcp(
   return { userId };
 }
 
-export function buildServer(config: YapConfig, db: Db, logger: YapLogger = createLogger()): YapServer {
+export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: YapLogger = createLogger()): YapServer {
   const mcp = new FastMCP<SessionAuth>({
     name: "yap",
     version: "0.1.0",
@@ -80,6 +82,7 @@ export function buildServer(config: YapConfig, db: Db, logger: YapLogger = creat
     mcp,
     config,
     db,
+    blob,
     logger,
     start: async () => {
       await mcp.start({

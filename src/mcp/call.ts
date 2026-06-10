@@ -4,15 +4,18 @@
  * table also carries the metadata `load` and `load_bundle` use to advertise
  * the catalog. File and hook tools register here in their milestones.
  */
+import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import * as docsCore from "../core/docs.js";
+import * as filesCore from "../core/files.js";
 import * as itemsCore from "../core/items.js";
 import { YapError } from "../core/errors.js";
 
 export interface CallEnv {
   db: Db;
   config: YapConfig;
+  blob: BlobStore;
   userId: string;
   bundleId: string;
   baseUrl: string;
@@ -96,6 +99,67 @@ export const secondTier: Record<string, SecondTierTool> = {
     handler: async (env, params) => ({
       result: await docsCore.updateDocs(env.db, env.userId, env.bundleId, String(params.docs ?? "")),
     }),
+  },
+  list_files: {
+    description: "List the bundle's file records (finalized files: id, name, mime type, size). No params.",
+    capability: "read_files",
+    handler: async (env) => ({
+      result: { data: await filesCore.listFiles(env, env.userId, env.bundleId) },
+    }),
+  },
+  show_file: {
+    description:
+      "Display a stored file or URL. Params: ref — a file://{uuid} reference or a direct http(s) URL. Returns a fresh expiring link plus a media-card widget pointer; share the link, never a durable location.",
+    capability: "read_files",
+    handler: async (env, params) => {
+      const result = await filesCore.showFile(env, env.userId, String(params.ref ?? ""));
+      return {
+        result,
+        _meta: { widget: "ui://yap/media-card", data: { ...result } },
+      };
+    },
+  },
+  upload_request: {
+    description:
+      "Initiate the upload lifecycle: reserves a placeholder file record and returns a short-lived single-use upload link (PUT the bytes there), an upload-dropzone widget pointer for human uploads, and an origin-hosted upload page link for hosts that cannot render widgets. Params: name (required), mime_type?, size? (declared, advisory). Finalize with upload_complete.",
+    capability: "edit_files",
+    handler: async (env, params) => {
+      const result = await filesCore.requestUpload(env, env.userId, env.bundleId, {
+        name: String(params.name ?? ""),
+        mime_type: params.mime_type as string | undefined,
+        size: params.size as number | undefined,
+      });
+      return {
+        result,
+        _meta: {
+          widget: "ui://yap/upload-dropzone",
+          data: {
+            file_id: result.file_id,
+            upload_url: result.upload_url,
+            origin_upload_url: result.origin_upload_url,
+          },
+        },
+      };
+    },
+  },
+  upload_complete: {
+    description:
+      "Headless finalize step after bytes are uploaded: reads the size authoritatively from storage and turns the placeholder into a finalized file. Params: file_id, name?, mime_type?. (Widget-driven uploads finalize via the widget.)",
+    capability: "edit_files",
+    handler: async (env, params) => ({
+      result: await filesCore.completeUpload(env, env.userId, String(params.file_id ?? ""), {
+        name: params.name as string | undefined,
+        mime_type: params.mime_type as string | undefined,
+      }),
+    }),
+  },
+  delete_file: {
+    description: "Delete a file record and its stored bytes immediately. Params: file_id.",
+    capability: "edit_files",
+    handler: async (env, params) => {
+      await filesCore.deleteFile(env, env.userId, String(params.file_id ?? ""));
+      return { result: { deleted: true } };
+    },
   },
 };
 

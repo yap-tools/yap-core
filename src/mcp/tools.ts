@@ -52,8 +52,8 @@ const SECOND_TIER_SPECS = Object.fromEntries(
 );
 
 export function registerMcpTools(server: YapServer): void {
-  const { mcp, db, config } = server;
-  const env = { db, config, baseUrl: config.baseUrl };
+  const { mcp, db, config, blob } = server;
+  const env = { db, config, blob, baseUrl: config.baseUrl };
 
   // ---- Discovery & context ---------------------------------------------------
 
