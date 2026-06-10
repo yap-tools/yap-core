@@ -122,12 +122,29 @@ management plane.
 ## Items & schemas
 
 Items conform to per-bundle **item-types** — a set of typed **properties**.
-Datatypes: `text`, `number`, `boolean`, `date` (validated on write, cast on
-read). A property may be **multi-valued** (`multi: true`), holding an ordered
-list of its datatype; such fields are read and written as arrays
-(`{"tags": ["a", "b"]}`). Schemas are freely mutable after items exist (it's
-EAV): renaming a property touches no values, adding one leaves existing items
-without it, removing one drops its values.
+Datatypes: `text`, `number`, `boolean`, `date`, plus two references —
+`item` (another item in the same bundle, stored as `item://<id>`) and `file`
+(a finalized file, `file://<id>`). Values are validated on write and cast on
+read; a reference is checked to exist in the bundle at write time (a later
+delete leaves a dangling reference that resolves to `not_found`, matching the
+loose EAV model). A property may be **multi-valued** (`multi: true`), holding an
+ordered list of its datatype; such fields are read and written as arrays
+(`{"tags": ["a", "b"]}`).
+
+A property may declare a **`config`** of constraints, enforced at the core
+(so REST and MCP can't drift):
+
+| Datatype | `config` | Effect |
+|---|---|---|
+| `text` | `{ pattern }` | value must match the regex (`RegExp.test`; anchor with `^…$` for a full match) |
+| `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
+| `item` | `{ itemType }` | the referent must be of this item-type |
+| any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
+
+Schemas are freely mutable after items exist (it's EAV): renaming a property
+touches no values, adding one leaves existing items without it, removing one
+drops its values, and tightening a `config` does not retroactively invalidate
+stored values (same as the `required` flag).
 
 Query filters AND-combine and are datatype-aware. Comparison ops — `eq`,
 `neq`, `contains`, `gt`, `gte`, `lt`, `lte`, `in` — take an optional

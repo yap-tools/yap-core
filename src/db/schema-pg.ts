@@ -83,9 +83,10 @@ export const properties = pgTable("properties", {
     .notNull()
     .references(() => itemTypes.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
-  datatype: text("datatype").notNull(), // 'text' | 'number' | 'boolean' | 'date'
+  datatype: text("datatype").notNull(), // 'text' | 'number' | 'boolean' | 'date' | 'item' | 'file'
   required: integer("required").notNull().default(0),
   multi: integer("multi").notNull().default(0), // holds an ordered list of values
+  config: text("config").notNull().default(""), // JSON: per-datatype constraints ("" = none)
   sortOrder: integer("sort_order").notNull().default(0),
 });
 

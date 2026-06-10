@@ -219,6 +219,48 @@ describeEachAdapter("MCP management parity", (adapter) => {
     }
   });
 
+  it("load_bundle surfaces property ids so delete_property is usable end-to-end over MCP", async () => {
+    await setup();
+    try {
+      // Author a schema, then discover the property id purely from load_bundle.
+      await one(alice, spaceId, {
+        bundle_id: bundleId,
+        tool: "create_item_type",
+        params: {
+          name: "loan",
+          properties: [
+            { name: "book_title", datatype: "text", required: true },
+            { name: "borrowed_by", datatype: "text", required: true },
+          ],
+        },
+      });
+
+      const loaded = await alice.call("load_bundle", { bundle_ids: [bundleId] });
+      const type = loaded.bundles[0].item_types.find((t: any) => t.name === "loan");
+      const target = type.properties.find((p: any) => p.name === "borrowed_by");
+      expect(target.id).toEqual(expect.any(String));
+
+      // Delete it using only the id from load_bundle.
+      const del = await one(alice, spaceId, {
+        bundle_id: bundleId,
+        tool: "delete_property",
+        params: { item_type_id: type.id, property_id: target.id },
+      });
+      expect(del.ok).toBe(true);
+
+      // It no longer appears on reload.
+      const reloaded = await alice.call("load_bundle", { bundle_ids: [bundleId] });
+      const names = reloaded.bundles[0].item_types
+        .find((t: any) => t.name === "loan")
+        .properties.map((p: any) => p.name);
+      expect(names).toEqual(["book_title"]);
+    } finally {
+      await alice.close();
+      await bob.close();
+      await app.stop();
+    }
+  });
+
   it("hook authoring is NOT exposed over MCP (the documented exception)", async () => {
     await setup();
     try {

@@ -12,10 +12,13 @@ import { hasAnyCapability, requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import type { GrantTarget } from "./grants.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
+import { serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
 import { getSpaceRow, toSpaceRef, type Space } from "./spaces.js";
 import { newId, nowIso } from "./util.js";
 
-export const DATATYPES = ["text", "number", "boolean", "date"] as const;
+// item → reference to another item in the same bundle (item://<id>);
+// file → reference to a finalized file in the same bundle (file://<id>).
+export const DATATYPES = ["text", "number", "boolean", "date", "item", "file"] as const;
 export type Datatype = (typeof DATATYPES)[number];
 
 export interface PropertyInput {
@@ -24,6 +27,8 @@ export interface PropertyInput {
   required?: boolean;
   /** When true the property holds an ordered list of values of `datatype`. */
   multi?: boolean;
+  /** Per-datatype constraints (regex, number bounds/decimals, item bounds, …). */
+  config?: PropertyConfig;
 }
 
 export interface ItemTypeInput {
@@ -81,6 +86,10 @@ export function validateBundleInput(input: BundleInput): string[] {
         errors.push(
           `${propWhere}: invalid datatype ${JSON.stringify(prop.datatype)} (expected one of: ${DATATYPES.join(", ")})`,
         );
+      } else {
+        for (const err of validatePropertyConfig(prop.datatype, !!prop.multi, prop.config ?? {})) {
+          errors.push(`${propWhere}: ${err}`);
+        }
       }
     }
   }
@@ -125,6 +134,7 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
           datatype: prop.datatype,
           required: prop.required ? 1 : 0,
           multi: prop.multi ? 1 : 0,
+          config: serializeConfig(prop.config),
           sortOrder: order,
         })),
       );

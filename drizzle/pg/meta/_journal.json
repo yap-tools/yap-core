@@ -15,6 +15,13 @@
       "when": 1781115979272,
       "tag": "0001_high_dreadnoughts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781119249120,
+      "tag": "0002_dizzy_vertigo",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE `properties` ADD `config` text DEFAULT '' NOT NULL;

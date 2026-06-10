@@ -23,6 +23,7 @@ import { requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
+import { countDecimals, NUMBER_DEFAULT_DECIMALS, parseConfig, type PropertyConfig } from "./propertyConfig.js";
 import { newId, nowIso } from "./util.js";
 
 /** Element-wise comparison operators. On a multi-valued property they apply
@@ -68,17 +69,67 @@ export interface MaterializedItem {
 
 // ---- Datatype handling ------------------------------------------------------
 
-/** Validates a write value against the property datatype; returns the stored text. */
-export function normalizeValue(property: Pick<Property, "name" | "datatype">, value: unknown): string {
+/** A stored reference's scheme — item://<id> or file://<id>. */
+const REF_SCHEMES = { item: "item://", file: "file://" } as const;
+
+/** Validates/canonicalizes a reference value to `<scheme>://<id>`. Accepts a
+ *  bare id or the full URI; the id's existence in-bundle is checked separately
+ *  (validateReferences) since that needs the database. */
+function normalizeRef(scheme: "item" | "file", name: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw invalid(`property "${name}" expects an ${scheme} reference (${scheme}://<id> or a bare id)`);
+  }
+  const prefix = REF_SCHEMES[scheme];
+  let id = value.trim();
+  if (id.startsWith(prefix)) id = id.slice(prefix.length);
+  if (id === "" || id.includes("://")) {
+    throw invalid(`property "${name}" expects an ${scheme} reference, got ${JSON.stringify(value)}`);
+  }
+  return `${prefix}${id}`;
+}
+
+/** The bare id inside a canonical reference value. */
+export function refId(value: string): string {
+  const i = value.indexOf("://");
+  return i === -1 ? value : value.slice(i + 3);
+}
+
+/**
+ * Validates a write value against the property datatype; returns the stored
+ * text. When `config` is supplied (the write path) the declared constraints are
+ * enforced too — regex for text, bounds/decimals for number. It is omitted on
+ * the filter path, where operands are only type-checked and canonicalized.
+ */
+export function normalizeValue(
+  property: Pick<Property, "name" | "datatype">,
+  value: unknown,
+  config?: PropertyConfig,
+): string {
   switch (property.datatype) {
-    case "text":
+    case "text": {
       if (typeof value !== "string") {
         throw invalid(`property "${property.name}" expects text, got ${typeof value}`);
       }
+      if (config?.pattern !== undefined && !new RegExp(config.pattern).test(value)) {
+        throw invalid(`property "${property.name}" must match ${config.pattern}`);
+      }
       return value;
+    }
     case "number": {
       if (typeof value !== "number" || !Number.isFinite(value)) {
         throw invalid(`property "${property.name}" expects a finite number`);
+      }
+      if (config) {
+        const decimals = config.decimals ?? NUMBER_DEFAULT_DECIMALS;
+        if (countDecimals(value) > decimals) {
+          throw invalid(`property "${property.name}" allows at most ${decimals} decimal place(s)`);
+        }
+        if (config.min !== undefined && value < config.min) {
+          throw invalid(`property "${property.name}" must be >= ${config.min}`);
+        }
+        if (config.max !== undefined && value > config.max) {
+          throw invalid(`property "${property.name}" must be <= ${config.max}`);
+        }
       }
       return String(value);
     }
@@ -93,6 +144,10 @@ export function normalizeValue(property: Pick<Property, "name" | "datatype">, va
       }
       return new Date(value).toISOString();
     }
+    case "item":
+      return normalizeRef("item", property.name, value);
+    case "file":
+      return normalizeRef("file", property.name, value);
     default:
       throw invalid(`property "${property.name}" has unknown datatype ${property.datatype}`);
   }
@@ -118,18 +173,29 @@ export function castValue(property: Pick<Property, "datatype">, stored: string):
  * single-valued property rejects arrays. Throws on per-element type errors.
  */
 export function normalizeProperty(
-  property: Pick<Property, "name" | "datatype" | "multi">,
+  property: Pick<Property, "name" | "datatype" | "multi" | "config">,
   value: unknown,
 ): { value: string; position: number }[] {
+  const config = parseConfig(property.config);
   if (property.multi) {
     const list = value === null || value === undefined ? [] : Array.isArray(value) ? value : [value];
-    return list.map((element, position) => ({ value: normalizeValue(property, element), position }));
+    // minItems/maxItems bound a *populated* property; an empty list defers to
+    // the required check (clearing an optional property stays legal).
+    if (list.length > 0) {
+      if (config.minItems !== undefined && list.length < config.minItems) {
+        throw invalid(`property "${property.name}" requires at least ${config.minItems} value(s)`);
+      }
+      if (config.maxItems !== undefined && list.length > config.maxItems) {
+        throw invalid(`property "${property.name}" allows at most ${config.maxItems} value(s)`);
+      }
+    }
+    return list.map((element, position) => ({ value: normalizeValue(property, element, config), position }));
   }
   if (Array.isArray(value)) {
     throw invalid(`property "${property.name}" is single-valued; pass a scalar, not an array`);
   }
   if (value === null || value === undefined) return [];
-  return [{ value: normalizeValue(property, value), position: 0 }];
+  return [{ value: normalizeValue(property, value, config), position: 0 }];
 }
 
 // ---- Filter SQL -------------------------------------------------------------
@@ -160,6 +226,10 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
       throw invalid(`filter on "${property.name}" expects an ISO-8601 date string`);
     }
     return new Date(value).toISOString();
+  }
+  if (property.datatype === "item" || property.datatype === "file") {
+    // Canonicalize so a filter operand matches stored "<scheme>://<id>".
+    return normalizeValue(property, value);
   }
   if (typeof value !== "string") throw invalid(`filter on "${property.name}" expects text`);
   return value;
@@ -296,6 +366,82 @@ async function materialize(
   });
 }
 
+// ---- Reference integrity ----------------------------------------------------
+
+interface RefEntry {
+  label: string;
+  prop: Property;
+  value: string;
+}
+
+/**
+ * Validates that item/file reference values point at something real in this
+ * bundle — an existing item (optionally of the type a property's
+ * config.itemType pins) or a finalized file. Needs the database, so it runs
+ * as a batched pass alongside the synchronous datatype validation rather than
+ * inside normalizeValue. Returns label-prefixed error strings.
+ */
+async function validateReferences(db: Db, bundleId: string, refs: RefEntry[]): Promise<string[]> {
+  if (refs.length === 0) return [];
+  const { items, files } = db.tables;
+  const errors: string[] = [];
+
+  const itemRefs = refs.filter((r) => r.prop.datatype === "item");
+  if (itemRefs.length > 0) {
+    const ids = [...new Set(itemRefs.map((r) => refId(r.value)))];
+    const rows = await db.client
+      .select({ id: items.id, bundleId: items.bundleId, itemTypeId: items.itemTypeId })
+      .from(items)
+      .where(inArray(items.id, ids));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const typeIdCache = new Map<string, string | null>();
+    const resolveTargetTypeId = async (ref: string): Promise<string | null> => {
+      if (typeIdCache.has(ref)) return typeIdCache.get(ref)!;
+      let id: string | null = null;
+      try {
+        id = (await resolveItemType(db, bundleId, ref)).id;
+      } catch {
+        id = null;
+      }
+      typeIdCache.set(ref, id);
+      return id;
+    };
+    for (const ref of itemRefs) {
+      const row = byId.get(refId(ref.value));
+      if (!row || row.bundleId !== bundleId) {
+        errors.push(`${ref.label}: property "${ref.prop.name}" references ${ref.value}, which is not an item in this bundle`);
+        continue;
+      }
+      const target = parseConfig(ref.prop.config).itemType;
+      if (target !== undefined) {
+        const wantId = await resolveTargetTypeId(target);
+        if (wantId === null || row.itemTypeId !== wantId) {
+          errors.push(`${ref.label}: property "${ref.prop.name}" must reference an item of type "${target}"`);
+        }
+      }
+    }
+  }
+
+  const fileRefs = refs.filter((r) => r.prop.datatype === "file");
+  if (fileRefs.length > 0) {
+    const ids = [...new Set(fileRefs.map((r) => refId(r.value)))];
+    const rows = await db.client
+      .select({ id: files.id, bundleId: files.bundleId, status: files.status })
+      .from(files)
+      .where(inArray(files.id, ids));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const ref of fileRefs) {
+      const row = byId.get(refId(ref.value));
+      if (!row || row.bundleId !== bundleId || row.status !== "finalized") {
+        errors.push(
+          `${ref.label}: property "${ref.prop.name}" references ${ref.value}, which is not a finalized file in this bundle`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
 // ---- CRUD -------------------------------------------------------------------
 
 /** Resolves an item id to its owning bundle (transport helper for /v1/items/:id). */
@@ -322,6 +468,7 @@ export async function createItems(
 
   // Validate the whole batch before writing anything (never partially applied).
   const errors: string[] = [];
+  const refs: RefEntry[] = [];
   const normalized: { propertyId: string; value: string; position: number }[][] = [];
   for (const [i, itemInput] of input.items.entries()) {
     const rows: { propertyId: string; value: string; position: number }[] = [];
@@ -336,7 +483,12 @@ export async function createItems(
         const prop = propertyByName(props, name);
         const elements = normalizeProperty(prop, value);
         if (elements.length > 0) populated.add(prop.id);
-        for (const el of elements) rows.push({ propertyId: prop.id, value: el.value, position: el.position });
+        for (const el of elements) {
+          rows.push({ propertyId: prop.id, value: el.value, position: el.position });
+          if (prop.datatype === "item" || prop.datatype === "file") {
+            refs.push({ label: `items[${i}]`, prop, value: el.value });
+          }
+        }
       } catch (err) {
         errors.push(`items[${i}]: ${(err as Error).message}`);
       }
@@ -350,6 +502,7 @@ export async function createItems(
     }
     normalized.push(rows);
   }
+  errors.push(...(await validateReferences(db, bundleId, refs)));
   if (errors.length > 0) throw invalid(`invalid items: ${errors.join("; ")}`, { errors });
 
   const { items, itemValues } = db.tables;
@@ -419,6 +572,7 @@ export async function updateItems(
   // its existing rows are deleted and the new ones inserted (works uniformly
   // for single- and multi-valued properties). An empty/null value clears it.
   const errors: string[] = [];
+  const refs: RefEntry[] = [];
   const plans: { itemId: string; ops: { prop: Property; rows: { value: string; position: number }[] }[] }[] = [];
   for (const [i, update] of updates.entries()) {
     const item = byId.get(update.id);
@@ -440,6 +594,9 @@ export async function updateItems(
           errors.push(`updates[${i}]: required property "${prop.name}" cannot be cleared`);
         } else {
           plan.ops.push({ prop, rows });
+          if (prop.datatype === "item" || prop.datatype === "file") {
+            for (const r of rows) refs.push({ label: `updates[${i}]`, prop, value: r.value });
+          }
         }
       } catch (err) {
         errors.push(`updates[${i}]: ${(err as Error).message}`);
@@ -447,6 +604,7 @@ export async function updateItems(
     }
     plans.push(plan);
   }
+  errors.push(...(await validateReferences(db, bundleId, refs)));
   if (errors.length > 0) throw invalid(`invalid updates: ${errors.join("; ")}`, { errors });
 
   const now = nowIso();

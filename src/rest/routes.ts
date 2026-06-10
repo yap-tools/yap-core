@@ -21,6 +21,7 @@ import * as hooksCore from "../core/hooks.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
+import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import { headerSafeFilename } from "../core/util.js";
@@ -325,6 +326,7 @@ export function registerRestRoutes(server: YapServer): void {
     datatype: z.enum(bundlesCore.DATATYPES),
     required: z.boolean().optional(),
     multi: z.boolean().optional(),
+    config: propertyConfigSchema.optional(),
   });
 
   const bundleCreateSchema = z.object({
@@ -359,7 +361,7 @@ export function registerRestRoutes(server: YapServer): void {
       const userId = await requireUser(c, db, config);
       const ctx = await bundlesCore.getBundleContext(db, param(c, "id"));
       await bundlesCore.requireBundleReadAccess(db, userId, ctx);
-      const itemTypes = await itemTypesCore.listItemTypesUnchecked(db, ctx.bundle.id);
+      const itemTypes = (await itemTypesCore.listItemTypesUnchecked(db, ctx.bundle.id)).map(itemTypesCore.itemTypeView);
       return c.json({ ...ctx.bundle, itemTypes });
     }),
   );
@@ -414,7 +416,7 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({ name: z.string(), properties: z.array(propertyInputSchema).optional() }),
         await jsonBody(c),
       );
-      return c.json(await itemTypesCore.createItemType(db, userId, param(c, "id"), body), 201);
+      return c.json(itemTypesCore.itemTypeView(await itemTypesCore.createItemType(db, userId, param(c, "id"), body)), 201);
     }),
   );
 
@@ -422,7 +424,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/bundles/:id/item-types",
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
-      return c.json({ data: await itemTypesCore.listItemTypes(db, userId, param(c, "id")) });
+      return c.json({ data: (await itemTypesCore.listItemTypes(db, userId, param(c, "id"))).map(itemTypesCore.itemTypeView) });
     }),
   );
 
@@ -450,7 +452,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
       const body = parseBody(propertyInputSchema, await jsonBody(c));
-      return c.json(await itemTypesCore.addProperty(db, userId, param(c, "id"), body), 201);
+      return c.json(itemTypesCore.propertyView(await itemTypesCore.addProperty(db, userId, param(c, "id"), body)), 201);
     }),
   );
 
@@ -463,11 +465,16 @@ export function registerRestRoutes(server: YapServer): void {
           name: z.string().optional(),
           required: z.boolean().optional(),
           multi: z.boolean().optional(),
+          config: propertyConfigSchema.optional(),
           sortOrder: z.number().int().optional(),
         }),
         await jsonBody(c),
       );
-      return c.json(await itemTypesCore.updateProperty(db, userId, param(c, "id"), param(c, "propId"), body));
+      return c.json(
+        itemTypesCore.propertyView(
+          await itemTypesCore.updateProperty(db, userId, param(c, "id"), param(c, "propId"), body),
+        ),
+      );
     }),
   );
 

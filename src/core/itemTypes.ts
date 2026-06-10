@@ -18,6 +18,7 @@ import {
 } from "./bundles.js";
 import { requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
+import { parseConfig, serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
 import { newId, nowIso } from "./util.js";
 
 export interface Property {
@@ -27,7 +28,19 @@ export interface Property {
   datatype: string;
   required: number;
   multi: number;
+  /** JSON-text per-datatype constraints; "" = none. Parse with parseConfig. */
+  config: string;
   sortOrder: number;
+}
+
+/** Read-side view of a property: parsed config for the public/transport shape. */
+export function propertyView<T extends { config: string }>(p: T): Omit<T, "config"> & { config: PropertyConfig } {
+  return { ...p, config: parseConfig(p.config) };
+}
+
+/** Read-side view of an item-type with its properties' config parsed. */
+export function itemTypeView(t: ItemTypeWithProperties) {
+  return { ...t, properties: t.properties.map(propertyView) };
 }
 
 export interface ItemTypeWithProperties {
@@ -87,6 +100,8 @@ export async function createItemType(
     if (!DATATYPES.includes(prop.datatype)) {
       throw invalid(`invalid datatype ${JSON.stringify(prop.datatype)} for property "${prop.name}"`);
     }
+    const cfgErrors = validatePropertyConfig(prop.datatype, !!prop.multi, prop.config ?? {});
+    if (cfgErrors.length > 0) throw invalid(`property "${prop.name}": ${cfgErrors.join("; ")}`);
   }
 
   const id = newId();
@@ -100,6 +115,7 @@ export async function createItemType(
         datatype: prop.datatype,
         required: prop.required ? 1 : 0,
         multi: prop.multi ? 1 : 0,
+        config: serializeConfig(prop.config),
         sortOrder: order,
       })),
     );
@@ -155,13 +171,15 @@ export async function addProperty(
   db: Db,
   userId: string,
   itemTypeId: string,
-  input: { name: string; datatype: Datatype; required?: boolean; multi?: boolean },
+  input: { name: string; datatype: Datatype; required?: boolean; multi?: boolean; config?: PropertyConfig },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
   const name = input.name?.trim();
   if (!name) throw invalid("property name is required");
   if (!DATATYPES.includes(input.datatype)) throw invalid(`invalid datatype ${JSON.stringify(input.datatype)}`);
+  const cfgErrors = validatePropertyConfig(input.datatype, !!input.multi, input.config ?? {});
+  if (cfgErrors.length > 0) throw invalid(`property "${name}": ${cfgErrors.join("; ")}`);
   const { properties } = db.tables;
   const siblings = await db.client.select().from(properties).where(eq(properties.itemTypeId, itemTypeId));
   if (siblings.some((p) => p.name === name)) throw invalid(`property "${name}" already exists on this item-type`);
@@ -172,6 +190,7 @@ export async function addProperty(
     datatype: input.datatype,
     required: input.required ? 1 : 0,
     multi: input.multi ? 1 : 0,
+    config: serializeConfig(input.config),
     sortOrder: siblings.reduce((max, p) => Math.max(max, p.sortOrder), -1) + 1,
   };
   await db.client.insert(properties).values(row);
@@ -184,7 +203,7 @@ export async function updateProperty(
   userId: string,
   itemTypeId: string,
   propertyId: string,
-  patch: { name?: string; required?: boolean; multi?: boolean; sortOrder?: number },
+  patch: { name?: string; required?: boolean; multi?: boolean; config?: PropertyConfig; sortOrder?: number },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
@@ -202,6 +221,13 @@ export async function updateProperty(
     if (siblings.some((p) => p.name === name && p.id !== propertyId)) {
       throw invalid(`property "${name}" already exists on this item-type`);
     }
+  }
+  // Config is validated against the (immutable) datatype and the effective
+  // multi flag — so e.g. minItems can't survive a switch to single-valued.
+  if (patch.config !== undefined) {
+    const effectiveMulti = patch.multi ?? current.multi === 1;
+    const cfgErrors = validatePropertyConfig(current.datatype, effectiveMulti, patch.config);
+    if (cfgErrors.length > 0) throw invalid(`property "${current.name}": ${cfgErrors.join("; ")}`);
   }
   // single→multi is free (existing scalar reads back as a one-element list);
   // multi→single is rejected when any item holds more than one value, rather
@@ -227,6 +253,7 @@ export async function updateProperty(
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.required !== undefined ? { required: patch.required ? 1 : 0 } : {}),
       ...(patch.multi !== undefined ? { multi: patch.multi ? 1 : 0 } : {}),
+      ...(patch.config !== undefined ? { config: serializeConfig(patch.config) } : {}),
       ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
     })
     .where(eq(properties.id, propertyId));

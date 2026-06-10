@@ -113,9 +113,10 @@ describeEachAdapter("MCP surface", (adapter) => {
       const bundle = result.bundles[0];
       expect(bundle.docs).toContain("Always set it");
       expect(bundle.item_types[0].name).toBe("todo");
+      // Property ids are surfaced so update_property / delete_property are usable over MCP.
       expect(bundle.item_types[0].properties).toEqual([
-        { name: "title", datatype: "text", required: true, multi: false },
-        { name: "status", datatype: "text", required: true, multi: false },
+        { id: expect.any(String), name: "title", datatype: "text", required: true, multi: false },
+        { id: expect.any(String), name: "status", datatype: "text", required: true, multi: false },
       ]);
       expect(bundle.files).toEqual([]);
       expect(bundle.hooks).toEqual([]);

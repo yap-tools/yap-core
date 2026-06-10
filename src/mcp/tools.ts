@@ -22,6 +22,7 @@ import { listFilesUnchecked } from "../core/files.js";
 import { listHooksUnchecked } from "../core/hooks.js";
 import { listItemTypesUnchecked } from "../core/itemTypes.js";
 import type { Page } from "../core/pagination.js";
+import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import type { SessionAuth, YapServer } from "../server.js";
@@ -191,12 +192,17 @@ export function registerMcpTools(server: YapServer): void {
               item_types: (await listItemTypesUnchecked(db, bundleId)).map((t) => ({
                 id: t.id,
                 name: t.name,
-                properties: t.properties.map((p) => ({
-                  name: p.name,
-                  datatype: p.datatype,
-                  required: p.required === 1,
-                  multi: p.multi === 1,
-                })),
+                properties: t.properties.map((p) => {
+                  const cfg = parseConfig(p.config);
+                  return {
+                    id: p.id,
+                    name: p.name,
+                    datatype: p.datatype,
+                    required: p.required === 1,
+                    multi: p.multi === 1,
+                    ...(Object.keys(cfg).length > 0 ? { config: cfg } : {}),
+                  };
+                }),
               })),
               files: await listFilesUnchecked(db, bundleId),
               hooks: (await listHooksUnchecked(db, bundleId)).map((h) => ({
@@ -365,9 +371,9 @@ Input format:
 - name: bundle name (required)
 - description: one-line summary used for discovery
 - docs: the bundle's operating instructions (agents must follow these)
-- item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required?, multi? }] }
+- item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required?, multi?, config? }] }
 
-A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. Items are validated against these schemas on every write; properties can be renamed/added/removed later without touching stored data.`,
+Datatypes: text, number, boolean, date, plus item (a reference to another item in this bundle, item://<id>) and file (a reference to a finalized file, file://<id>). A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. config declares constraints, enforced on every write: text {pattern}; number {min, max, decimals} (decimals default 2, out-of-precision writes rejected); item {itemType} (pin the referent's type); any multi field {minItems, maxItems}. Properties can be renamed/added/removed later without touching stored data.`,
     parameters: z.object({
       space_id: z.string(),
       name: z.string(),
@@ -383,6 +389,7 @@ A property with multi: true holds an ordered list of values of its datatype (e.g
                 datatype: z.enum(DATATYPES),
                 required: z.boolean().optional(),
                 multi: z.boolean().optional(),
+                config: propertyConfigSchema.optional(),
               }),
             ),
           }),
