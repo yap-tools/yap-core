@@ -9,6 +9,7 @@ import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import * as docsCore from "../core/docs.js";
 import * as filesCore from "../core/files.js";
+import * as hooksCore from "../core/hooks.js";
 import * as itemsCore from "../core/items.js";
 import { YapError } from "../core/errors.js";
 
@@ -160,6 +161,17 @@ export const secondTier: Record<string, SecondTierTool> = {
       await filesCore.deleteFile(env, env.userId, String(params.file_id ?? ""));
       return { result: { deleted: true } };
     },
+  },
+  fire_hook: {
+    description:
+      "Fire a named hook with values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the hook's transport. Synchronous with a fixed timeout, no automatic retries; returns the raw response status and body. Params: hook (name or id), params? ({name: value}).",
+    capability: "fire_hooks",
+    handler: async (env, params) => ({
+      result: await hooksCore.fireHook(env, env.userId, env.bundleId, {
+        hook: String(params.hook ?? ""),
+        params: params.params as Record<string, unknown> | undefined,
+      }),
+    }),
   },
 };
 

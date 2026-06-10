@@ -19,6 +19,7 @@ import * as docsCore from "../core/docs.js";
 import { YapError, invalid } from "../core/errors.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
+import * as hooksCore from "../core/hooks.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
@@ -658,6 +659,98 @@ export function registerRestRoutes(server: YapServer): void {
       c.header("content-length", String(file.size));
       c.header("content-disposition", `inline; filename="${file.name.replace(/"/g, "")}"`);
       return c.body(Readable.toWeb(stream) as ReadableStream);
+    }),
+  );
+
+  // ---- Hooks (authoring is REST-only — deliberately absent from MCP) --------------
+
+  const hookEnv: hooksCore.HookEnv = { db, config };
+
+  const hookParamSpecSchema = z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    required: z.boolean().optional(),
+  });
+
+  const hookTransportSchema = z.object({
+    url: z.string(),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+    headers: z.record(z.string(), z.string()).optional(),
+    body_template: z.string().optional(),
+  });
+
+  app.post(
+    "/v1/bundles/:id/hooks",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({
+          name: z.string(),
+          description: z.string().optional(),
+          params: z.array(hookParamSpecSchema).optional(),
+          transport: hookTransportSchema,
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await hooksCore.createHook(hookEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/bundles/:id/hooks",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json({ data: await hooksCore.listHooks(db, userId, param(c, "id")) });
+    }),
+  );
+
+  app.patch(
+    "/v1/hooks/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({
+          name: z.string().optional(),
+          description: z.string().optional(),
+          params: z.array(hookParamSpecSchema).optional(),
+          transport: hookTransportSchema.optional(),
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await hooksCore.updateHook(hookEnv, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/hooks/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      await hooksCore.deleteHook(hookEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  app.post(
+    "/v1/hooks/:id/fire",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const rawText = await c.req.text();
+      let rawBody: unknown = {};
+      if (rawText) {
+        try {
+          rawBody = JSON.parse(rawText);
+        } catch {
+          throw invalid("request body must be valid JSON");
+        }
+      }
+      const body = parseBody(z.object({ params: z.record(z.string(), z.unknown()).optional() }), rawBody);
+      const hookId = param(c, "id");
+      const { hooks } = db.tables;
+      const rows = await db.client.select({ bundleId: hooks.bundleId }).from(hooks).where(eq(hooks.id, hookId));
+      if (rows.length === 0) throw new YapError("not_found", `hook ${hookId} not found`);
+      return c.json(
+        await hooksCore.fireHook(hookEnv, userId, rows[0]!.bundleId, { hook: hookId, params: body.params }),
+      );
     }),
   );
 
