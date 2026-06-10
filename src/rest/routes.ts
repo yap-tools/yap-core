@@ -28,6 +28,7 @@ import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
 import { verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
+import { buildOriginPage } from "../widgets/pages.js";
 import { requireSysadmin, requireUser } from "./auth.js";
 
 type Handler = (c: Context) => Promise<Response>;
@@ -577,7 +578,7 @@ export function registerRestRoutes(server: YapServer): void {
   app.post(
     "/v1/files/:id/complete",
     handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+      const fileId = param(c, "id");
       const raw = c.req.header("content-length") === "0" || c.req.header("content-length") === undefined
         ? {}
         : await jsonBody(c);
@@ -585,7 +586,18 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({ name: z.string().optional(), mime_type: z.string().optional() }),
         raw ?? {},
       );
-      return c.json(await filesCore.completeUpload(fileEnv, userId, param(c, "id"), body));
+      // Widget path: a signed completion token minted at upload_request time
+      // (the requester held edit_files then) authorizes the finalize step.
+      const token = c.req.query("token");
+      if (token) {
+        const payload = verifyToken(token, config.masterKey);
+        if (!payload || payload.scope !== "upload-complete" || payload.fileId !== fileId) {
+          throw new YapError("unauthorized", "invalid or expired completion token");
+        }
+        return c.json(await filesCore.completeUploadSigned(fileEnv, fileId, body));
+      }
+      const userId = await requireUser(c, db, config);
+      return c.json(await filesCore.completeUpload(fileEnv, userId, fileId, body));
     }),
   );
 
@@ -751,6 +763,20 @@ export function registerRestRoutes(server: YapServer): void {
       return c.json(
         await hooksCore.fireHook(hookEnv, userId, rows[0]!.bundleId, { hook: hookId, params: body.params }),
       );
+    }),
+  );
+
+  // ---- Origin-hosted widget pages (outside /v1; signed expiring tokens) -----------
+
+  app.get(
+    "/w/:widget",
+    handle(async (c) => {
+      const html = await buildOriginPage(
+        { db, blob, config },
+        param(c, "widget"),
+        c.req.query("token") ?? "",
+      );
+      return c.html(html);
     }),
   );
 

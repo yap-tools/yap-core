@@ -72,6 +72,8 @@ export interface UploadRequestResult {
   /** Short-lived, single-use direct-to-storage upload link. */
   upload_url: string;
   upload_url_expires_in: number;
+  /** Signed finalize endpoint used by the upload widget (no event channel needed). */
+  complete_url: string;
   /** Origin-hosted upload page for hosts that cannot render widgets. */
   origin_upload_url: string;
   status: "reserved";
@@ -116,6 +118,7 @@ export async function requestUpload(
   });
 
   const uploadUrl = await blob.uploadUrl(storageKey, fileId, config.uploadTtlSeconds);
+  const completeToken = signToken({ scope: "upload-complete", fileId }, config.masterKey, config.uploadTtlSeconds);
   const originToken = signToken(
     { scope: "widget", widget: "upload-dropzone", fileId },
     config.masterKey,
@@ -125,6 +128,7 @@ export async function requestUpload(
     file_id: fileId,
     upload_url: uploadUrl,
     upload_url_expires_in: config.uploadTtlSeconds,
+    complete_url: `${config.baseUrl}/v1/files/${fileId}/complete?token=${completeToken}`,
     origin_upload_url: `${config.baseUrl}/w/upload-dropzone?token=${originToken}`,
     status: "reserved",
   };
@@ -147,10 +151,32 @@ export async function completeUpload(
   fileId: string,
   patch: { name?: string; mime_type?: string } = {},
 ): Promise<FileInfo> {
-  const { db, blob, config } = env;
+  const { db } = env;
   const file = await getFileRow(db, fileId);
   const ctx = await getBundleContext(db, file.bundleId);
   await requireCapability(db, userId, "edit_files", bundleCapabilityCtx(ctx));
+  return finalizeUpload(env, fileId, patch);
+}
+
+/**
+ * Token-authorized finalize: used by the upload widget, whose signed
+ * complete_url was minted for someone holding edit_files at request time.
+ */
+export async function completeUploadSigned(
+  env: FileEnv,
+  fileId: string,
+  patch: { name?: string; mime_type?: string } = {},
+): Promise<FileInfo> {
+  return finalizeUpload(env, fileId, patch);
+}
+
+async function finalizeUpload(
+  env: FileEnv,
+  fileId: string,
+  patch: { name?: string; mime_type?: string },
+): Promise<FileInfo> {
+  const { db, blob, config } = env;
+  const file = await getFileRow(db, fileId);
   if (file.status !== "reserved") throw new YapError("conflict", `file ${fileId} is already finalized`);
 
   const stat = await blob.stat(file.storageKey);
@@ -243,6 +269,8 @@ export interface ShowFileResult {
   name?: string;
   mime_type?: string;
   size?: number;
+  /** Origin-hosted media-card page (signed, expiring) for non-rendering hosts. */
+  origin_view_url?: string;
 }
 
 /**
@@ -254,6 +282,11 @@ export async function showFile(env: FileEnv, userId: string, ref: string): Promi
   if (ref.startsWith("file://")) {
     const fileId = ref.slice("file://".length);
     const minted = await mintDownloadLink(env, userId, fileId);
+    const viewToken = signToken(
+      { scope: "widget", widget: "media-card", fileId },
+      env.config.masterKey,
+      env.config.widgetTokenTtlSeconds,
+    );
     return {
       kind: fileKind(minted.mime_type),
       url: minted.url,
@@ -261,6 +294,7 @@ export async function showFile(env: FileEnv, userId: string, ref: string): Promi
       name: minted.name,
       mime_type: minted.mime_type,
       size: minted.size,
+      origin_view_url: `${env.config.baseUrl}/w/media-card?token=${viewToken}`,
     };
   }
   if (/^https?:\/\//.test(ref)) {

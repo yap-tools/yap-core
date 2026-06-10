@@ -24,7 +24,8 @@ import { listItemTypesUnchecked } from "../core/itemTypes.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import type { SessionAuth, YapServer } from "../server.js";
-import { executeCall, secondTier } from "./call.js";
+import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
+import { executeCall, secondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
 
 function asJson(value: unknown): string {
@@ -54,6 +55,18 @@ const SECOND_TIER_SPECS = Object.fromEntries(
 export function registerMcpTools(server: YapServer): void {
   const { mcp, db, config, blob } = server;
   const env = { db, config, blob, baseUrl: config.baseUrl };
+
+  // ---- The widget registry: every widget is a ui:// resource -------------------
+
+  for (const def of Object.values(WIDGETS)) {
+    mcp.addResource({
+      uri: def.uri,
+      name: `widget: ${def.name}`,
+      description: def.description,
+      mimeType: "text/html",
+      load: async () => ({ text: widgetHtml(def.name, "client") }),
+    });
+  }
 
   // ---- Discovery & context ---------------------------------------------------
 
@@ -213,7 +226,7 @@ export function registerMcpTools(server: YapServer): void {
         if (!(await canReachSpace(db, userId, space))) {
           throw new YapError("not_found", `space ${args.space_id} not found`);
         }
-        const results = [];
+        const results: PerCallResult[] = [];
         for (const call of args.calls) {
           results.push(
             await executeCall({ ...env, userId }, args.space_id, call, async (bundleId) => {
@@ -225,10 +238,67 @@ export function registerMcpTools(server: YapServer): void {
             }),
           );
         }
-        return asJson({ results });
+        // Result-level widget delivery: per-call _meta pointers travel in the
+        // JSON payload, and each referenced ui:// resource is also attached as
+        // a spec-clean resource_link content item for MCP-Apps-capable hosts.
+        // (fastmcp's result validation rejects a literal result `_meta` key.)
+        const widgetUris = [...new Set(results.flatMap((r) => (r._meta ? [r._meta.widget] : [])))];
+        return {
+          content: [
+            { type: "text" as const, text: asJson({ results }) },
+            ...widgetUris.flatMap((uri) => {
+              const def = WIDGETS[uri.replace(UI_SCHEME_PREFIX, "")];
+              if (!def) return [];
+              return [
+                {
+                  type: "resource_link" as const,
+                  uri,
+                  name: def.name,
+                  mimeType: "text/html",
+                  description: def.description,
+                },
+              ];
+            }),
+          ],
+        };
       } catch (err) {
         rethrow(err);
       }
+    },
+  });
+
+  // ---- Display -------------------------------------------------------------------
+
+  mcp.addTool({
+    name: "show_widget",
+    description: `Render any registered widget by name. The statically-declared template is a thin shell that reads the named ui:// widget resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. Also the recovery path when a host did not render a widget from call's result metadata.`,
+    parameters: z.object({
+      widget: z.string().describe("Widget name or ui://yap/... URI"),
+      params: z.record(z.string(), z.unknown()).optional(),
+    }),
+    annotations: { readOnlyHint: true, title: "Show widget" },
+    _meta: { ui: { resourceUri: `${UI_SCHEME_PREFIX}shell` } },
+    execute: async (args) => {
+      const name = args.widget.replace(UI_SCHEME_PREFIX, "");
+      const def = WIDGETS[name];
+      if (!def) {
+        throw new UserError(`unknown widget ${args.widget} (registered: ${Object.keys(WIDGETS).join(", ")})`);
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: asJson({ widget: def.uri, params: args.params ?? {} }),
+          },
+          {
+            type: "resource_link" as const,
+            uri: def.uri,
+            name: def.name,
+            mimeType: "text/html",
+            description: def.description,
+          },
+        ],
+      };
     },
   });
 
