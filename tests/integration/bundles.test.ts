@@ -1,0 +1,231 @@
+/** REST surface for bundles, item-types, docs, items, and bundle-level grants. */
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { describeEachAdapter } from "../helpers/adapters.js";
+import { apiClient, type ApiClient } from "../helpers/api.js";
+import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
+
+describeEachAdapter("bundles over REST", (adapter) => {
+  let app: TestApp;
+  let alice: ApiClient;
+  let bob: ApiClient;
+  let bobId: string;
+  let spaceId: string;
+
+  beforeAll(async () => {
+    app = await bootTestApp({}, await adapter.makeDb());
+    const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+    const a = await sysadmin.post("/v1/users", { name: "Alice" });
+    const b = await sysadmin.post("/v1/users", { name: "Bob" });
+    alice = apiClient(app.baseUrl, a.body.initialKey.key);
+    bob = apiClient(app.baseUrl, b.body.initialKey.key);
+    bobId = b.body.user.id;
+    spaceId = (await alice.post("/v1/spaces", { name: "Work", keywords: "tasks, todos" })).body.id;
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  describe("bundle lifecycle", () => {
+    it("creates a bundle with docs and item-types in one validated step", async () => {
+      const res = await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+        name: "todos",
+        description: "Task tracking",
+        docs: "Always set status.",
+        itemTypes: [
+          {
+            name: "todo",
+            properties: [
+              { name: "title", datatype: "text", required: true },
+              { name: "status", datatype: "text", required: true },
+            ],
+          },
+        ],
+      });
+      expect(res.status).toBe(201);
+      const bundle = await alice.get(`/v1/bundles/${res.body.id}`);
+      expect(bundle.body.docs).toBe("Always set status.");
+      expect(bundle.body.itemTypes).toHaveLength(1);
+      expect(bundle.body.itemTypes[0].properties.map((p: any) => p.name)).toEqual(["title", "status"]);
+    });
+
+    it("rejects invalid designs wholesale with actionable errors", async () => {
+      const res = await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+        name: "broken",
+        itemTypes: [
+          {
+            name: "t",
+            properties: [
+              { name: "a", datatype: "text" },
+              { name: "a", datatype: "text" },
+            ],
+          },
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body.error.details)).toContain("duplicate property name");
+      const list = await alice.get(`/v1/spaces/${spaceId}/bundles`);
+      expect(list.body.data.some((b: any) => b.name === "broken")).toBe(false);
+    });
+
+    it("rejects invalid datatypes at the schema boundary", async () => {
+      const res = await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+        name: "badtype",
+        itemTypes: [{ name: "t", properties: [{ name: "a", datatype: "jsonb" }] }],
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("updates and deletes bundles with edit_bundles", async () => {
+      const created = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "temp" });
+      const patched = await alice.patch(`/v1/bundles/${created.body.id}`, { description: "tmp" });
+      expect(patched.body.description).toBe("tmp");
+      expect((await bob.patch(`/v1/bundles/${created.body.id}`, { description: "x" })).status).toBe(404);
+      expect((await alice.delete(`/v1/bundles/${created.body.id}`)).status).toBe(200);
+      expect((await alice.get(`/v1/bundles/${created.body.id}`)).status).toBe(404);
+    });
+  });
+
+  describe("docs", () => {
+    let bundleId: string;
+
+    beforeAll(async () => {
+      bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "documented", docs: "v1" })).body.id;
+    });
+
+    it("reads and replaces the bundle docs", async () => {
+      expect((await alice.get(`/v1/bundles/${bundleId}/docs`)).body.docs).toBe("v1");
+      const put = await alice.put(`/v1/bundles/${bundleId}/docs`, { docs: "v2 — follow these rules" });
+      expect(put.status).toBe(200);
+      expect((await alice.get(`/v1/bundles/${bundleId}/docs`)).body.docs).toBe("v2 — follow these rules");
+    });
+
+    it("gates docs writes on edit_docs separately from reads", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/grants`, {
+        userId: bobId,
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      expect((await bob.get(`/v1/bundles/${bundleId}/docs`)).status).toBe(200);
+      const denied = await bob.put(`/v1/bundles/${bundleId}/docs`, { docs: "hostile" });
+      expect(denied.status).toBe(403);
+      expect(denied.body.error.details.capability).toBe("edit_docs");
+    });
+  });
+
+  describe("items over REST", () => {
+    let bundleId: string;
+
+    beforeAll(async () => {
+      bundleId = (
+        await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+          name: "rest-items",
+          itemTypes: [
+            {
+              name: "todo",
+              properties: [
+                { name: "title", datatype: "text", required: true },
+                { name: "status", datatype: "text" },
+              ],
+            },
+          ],
+        })
+      ).body.id;
+    });
+
+    it("creates, queries, patches, and deletes items", async () => {
+      const created = await alice.post(`/v1/bundles/${bundleId}/items`, {
+        itemType: "todo",
+        items: [
+          { title: "One", status: "open" },
+          { title: "Two", status: "done" },
+        ],
+      });
+      expect(created.status).toBe(201);
+      expect(created.body.data).toHaveLength(2);
+
+      const filters = encodeURIComponent(JSON.stringify([{ property: "status", op: "eq", value: "open" }]));
+      const queried = await alice.get(`/v1/bundles/${bundleId}/items?itemType=todo&filters=${filters}`);
+      expect(queried.body.data.map((i: any) => i.values.title)).toEqual(["One"]);
+
+      const itemId = queried.body.data[0].id;
+      const patched = await alice.patch(`/v1/items/${itemId}`, { set: { status: "done" } });
+      expect(patched.body.values.status).toBe("done");
+
+      const byIds = await alice.get(`/v1/bundles/${bundleId}/items?ids=${itemId}`);
+      expect(byIds.body.data[0].values.status).toBe("done");
+
+      expect((await alice.delete(`/v1/items/${itemId}`)).status).toBe(200);
+      const remaining = await alice.get(`/v1/bundles/${bundleId}/items?itemType=todo`);
+      expect(remaining.body.data.map((i: any) => i.values.title)).toEqual(["Two"]);
+    });
+
+    it("manages item-types and properties over REST", async () => {
+      const typeRes = await alice.post(`/v1/bundles/${bundleId}/item-types`, {
+        name: "note",
+        properties: [{ name: "body", datatype: "text", required: true }],
+      });
+      expect(typeRes.status).toBe(201);
+      const typeId = typeRes.body.id;
+
+      const propRes = await alice.post(`/v1/item-types/${typeId}/properties`, {
+        name: "pinned",
+        datatype: "boolean",
+      });
+      expect(propRes.status).toBe(201);
+
+      const renamed = await alice.patch(`/v1/item-types/${typeId}/properties/${propRes.body.id}`, {
+        name: "starred",
+      });
+      expect(renamed.body.name).toBe("starred");
+
+      expect((await alice.delete(`/v1/item-types/${typeId}/properties/${propRes.body.id}`)).status).toBe(200);
+      expect((await alice.delete(`/v1/item-types/${typeId}`)).status).toBe(200);
+      const types = await alice.get(`/v1/bundles/${bundleId}/item-types`);
+      expect(types.body.data.some((t: any) => t.id === typeId)).toBe(false);
+    });
+  });
+
+  describe("bundle-level grants (cascade with per-capability override)", () => {
+    let openBundle: string;
+    let sensitiveBundle: string;
+
+    beforeAll(async () => {
+      openBundle = (
+        await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+          name: "open-bundle",
+          itemTypes: [{ name: "t", properties: [{ name: "v", datatype: "text" }] }],
+        })
+      ).body.id;
+      sensitiveBundle = (
+        await alice.post(`/v1/spaces/${spaceId}/bundles`, {
+          name: "sensitive-bundle",
+          itemTypes: [{ name: "t", properties: [{ name: "v", datatype: "text" }] }],
+        })
+      ).body.id;
+      // Space-level baseline: Bob can read items everywhere in the space.
+      await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        userId: bobId,
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      // Bundle-level override: revoked on the sensitive bundle only.
+      await alice.post(`/v1/bundles/${sensitiveBundle}/grants`, {
+        userId: bobId,
+        capabilities: ["read_items"],
+        effect: "deny",
+      });
+    });
+
+    it("space baseline cascades into bundles; bundle deny overrides", async () => {
+      expect((await bob.get(`/v1/bundles/${openBundle}/items?itemType=t`)).status).toBe(200);
+      const denied = await bob.get(`/v1/bundles/${sensitiveBundle}/items?itemType=t`);
+      expect(denied.status).toBe(403);
+      // The deciding row is identifiable.
+      expect(denied.body.error.details.decidedBy.level).toBe("bundle");
+      expect(denied.body.error.details.decidedBy.effect).toBe("deny");
+      expect(denied.body.error.details.decidedBy.grantId).toBeTruthy();
+    });
+  });
+});
