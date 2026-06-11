@@ -190,7 +190,7 @@ describeEachAdapter("bundles over REST", (adapter) => {
       // load_bundle-style read over REST exposes the multi flag.
       const got = await alice.get(`/v1/bundles/${mb}`);
       const tagsProp = got.body.itemTypes[0].properties.find((p: any) => p.name === "tags");
-      expect(tagsProp.multi).toBe(1);
+      expect(tagsProp.multi).toBe(true);
 
       await alice.post(`/v1/bundles/${mb}/items`, {
         itemType: "article",

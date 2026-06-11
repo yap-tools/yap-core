@@ -77,7 +77,11 @@ const BRIDGE_JS = `
     if (m.method === "ui/notifications/tool-input") {
       var args = m.params && m.params.arguments;
       if (args && typeof args === "object" && args.widget) {
-        window.__yapOnData && window.__yapOnData(args);
+        // The replayed arg is whatever the caller passed (possibly a bare name);
+        // normalize to the registered ui:// uri so resources/read can resolve it.
+        var w = String(args.widget);
+        if (w.indexOf("://") === -1) w = "${UI_SCHEME_PREFIX}" + w;
+        window.__yapOnData && window.__yapOnData({ widget: w, params: args.params });
       }
       return;
     }
@@ -131,10 +135,14 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       var rendered = false;
       var fallbackTimer = null;
+      var sizeListener = null;
       var root = document.getElementById("root");
       function mount(html, params) {
         if (!html) { if (!rendered) root.innerHTML = '<div class="card err">shell: empty widget</div>'; return; }
         if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+        // Drop the previous frame's size listener before mounting a new one so
+        // re-mounts don't accumulate listeners bound to stale iframes.
+        if (sizeListener) { window.removeEventListener("message", sizeListener); }
         var f = document.createElement("iframe");
         f.className = "shellframe";
         f.setAttribute("sandbox", "allow-scripts");
@@ -144,12 +152,13 @@ export const WIDGETS: Record<string, WidgetDef> = {
         };
         // The nested widget reports its size to us (its parent); resize the
         // frame and re-announce our own size up to the host.
-        window.addEventListener("message", function (e) {
+        sizeListener = function (e) {
           if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
             f.style.height = e.data.params.height + "px";
             requestAnimationFrame(announceHeight);
           }
-        });
+        };
+        window.addEventListener("message", sizeListener);
         root.innerHTML = "";
         root.appendChild(f);
         rendered = true;
@@ -275,17 +284,24 @@ function escapeForInlineJson(json: string): string {
   return json.replace(/</g, "\\u003c");
 }
 
+/** Client-mode HTML is identical for a given widget (no per-call data), so the
+ *  full template assembly is built once and reused for resources/read and
+ *  show_widget. */
+const clientHtmlCache = new Map<string, string>();
+
 /**
  * Builds the complete, self-contained widget HTML. In client mode the page
  * waits for ui/render-data over postMessage; in origin mode the data is
  * embedded at serve time and there is no event channel.
  */
 export function widgetHtml(name: string, mode: "client" | "origin", data?: unknown): string {
+  const cached = mode === "client" ? clientHtmlCache.get(name) : undefined;
+  if (cached) return cached;
   const def = WIDGETS[name];
   if (!def) throw new Error(`unknown widget ${name}`);
   const dataScript =
     mode === "origin" ? `<script>window.__YAP_DATA__ = ${escapeForInlineJson(JSON.stringify(data ?? {}))};</script>` : "";
-  return `<!doctype html>
+  const html = `<!doctype html>
 <html data-yap-mode="${mode}">
 <head>
 <meta charset="utf-8">
@@ -304,4 +320,6 @@ ${def.render}
 </script>
 </body>
 </html>`;
+  if (mode === "client") clientHtmlCache.set(name, html);
+  return html;
 }

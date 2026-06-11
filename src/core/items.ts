@@ -374,6 +374,12 @@ interface RefEntry {
   value: string;
 }
 
+/** Queues item/file values for existence checking (no-op for other datatypes). */
+function collectRefs(refs: RefEntry[], label: string, prop: Property, rows: { value: string }[]): void {
+  if (prop.datatype !== "item" && prop.datatype !== "file") return;
+  for (const r of rows) refs.push({ label, prop, value: r.value });
+}
+
 /**
  * Validates that item/file reference values point at something real in this
  * bundle — an existing item (optionally of the type a property's
@@ -483,12 +489,8 @@ export async function createItems(
         const prop = propertyByName(props, name);
         const elements = normalizeProperty(prop, value);
         if (elements.length > 0) populated.add(prop.id);
-        for (const el of elements) {
-          rows.push({ propertyId: prop.id, value: el.value, position: el.position });
-          if (prop.datatype === "item" || prop.datatype === "file") {
-            refs.push({ label: `items[${i}]`, prop, value: el.value });
-          }
-        }
+        for (const el of elements) rows.push({ propertyId: prop.id, value: el.value, position: el.position });
+        collectRefs(refs, `items[${i}]`, prop, elements);
       } catch (err) {
         errors.push(`items[${i}]: ${(err as Error).message}`);
       }
@@ -594,9 +596,7 @@ export async function updateItems(
           errors.push(`updates[${i}]: required property "${prop.name}" cannot be cleared`);
         } else {
           plan.ops.push({ prop, rows });
-          if (prop.datatype === "item" || prop.datatype === "file") {
-            for (const r of rows) refs.push({ label: `updates[${i}]`, prop, value: r.value });
-          }
+          collectRefs(refs, `updates[${i}]`, prop, rows);
         }
       } catch (err) {
         errors.push(`updates[${i}]: ${(err as Error).message}`);

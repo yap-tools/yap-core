@@ -292,10 +292,12 @@ export const secondTier: Record<string, SecondTierTool> = {
       "Add a new item-type (schema) to the targeted bundle. Params: name, properties? (array of {name, datatype, required?, multi?, config?}). See add_property for datatypes and config.",
     capability: "edit_bundles",
     handler: async (env, params) => ({
-      result: await itemTypesCore.createItemType(env.db, env.userId, env.bundleId, {
-        name: String(params.name ?? ""),
-        properties: params.properties as bundlesCore.PropertyInput[] | undefined,
-      }),
+      result: itemTypesCore.itemTypeView(
+        await itemTypesCore.createItemType(env.db, env.userId, env.bundleId, {
+          name: String(params.name ?? ""),
+          properties: params.properties as bundlesCore.PropertyInput[] | undefined,
+        }),
+      ),
     }),
   },
   update_item_type: {
@@ -321,13 +323,15 @@ export const secondTier: Record<string, SecondTierTool> = {
       "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern}; number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type); any multi field {minItems,maxItems}.",
     capability: "edit_bundles",
     handler: async (env, params) => ({
-      result: await itemTypesCore.addProperty(env.db, env.userId, String(params.item_type_id ?? ""), {
-        name: String(params.name ?? ""),
-        datatype: params.datatype as bundlesCore.Datatype,
-        required: params.required as boolean | undefined,
-        multi: params.multi as boolean | undefined,
-        config: params.config as PropertyConfig | undefined,
-      }),
+      result: itemTypesCore.propertyView(
+        await itemTypesCore.addProperty(env.db, env.userId, String(params.item_type_id ?? ""), {
+          name: String(params.name ?? ""),
+          datatype: params.datatype as bundlesCore.Datatype,
+          required: params.required as boolean | undefined,
+          multi: params.multi as boolean | undefined,
+          config: params.config as PropertyConfig | undefined,
+        }),
+      ),
     }),
   },
   update_property: {
@@ -335,18 +339,20 @@ export const secondTier: Record<string, SecondTierTool> = {
       "Update a property (rename, toggle required/multi, reorder, replace config). The datatype is immutable. single→multi is free; multi→single is rejected if any item has multiple values. Params: item_type_id, property_id, name?, required?, multi?, config?, sort_order?.",
     capability: "edit_bundles",
     handler: async (env, params) => ({
-      result: await itemTypesCore.updateProperty(
-        env.db,
-        env.userId,
-        String(params.item_type_id ?? ""),
-        String(params.property_id ?? ""),
-        {
-          name: params.name as string | undefined,
-          required: params.required as boolean | undefined,
-          multi: params.multi as boolean | undefined,
-          config: params.config as PropertyConfig | undefined,
-          sortOrder: params.sort_order as number | undefined,
-        },
+      result: itemTypesCore.propertyView(
+        await itemTypesCore.updateProperty(
+          env.db,
+          env.userId,
+          String(params.item_type_id ?? ""),
+          String(params.property_id ?? ""),
+          {
+            name: params.name as string | undefined,
+            required: params.required as boolean | undefined,
+            multi: params.multi as boolean | undefined,
+            config: params.config as PropertyConfig | undefined,
+            sortOrder: params.sort_order as number | undefined,
+          },
+        ),
       ),
     }),
   },

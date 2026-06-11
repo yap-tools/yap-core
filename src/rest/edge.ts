@@ -15,7 +15,7 @@
  * or a signed URL token, never by cookies, so CORS grants a browser nothing it
  * couldn't already do with the credential in hand.
  */
-import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { Agent, createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createNetServer } from "node:net";
 
 /** Allocates an OS-assigned free port on loopback (probe-and-close). */
@@ -58,6 +58,9 @@ export interface EdgeOptions {
 
 /** Builds the edge reverse-proxy server (call `.listen(port, host)` to start). */
 export function createEdgeServer(opts: EdgeOptions): Server {
+  // Reuse loopback connections to the upstream instead of a fresh TCP handshake
+  // (and ephemeral-port churn) per request — the edge fronts every request.
+  const agent = new Agent({ keepAlive: true });
   const server = createHttpServer((req, res) => {
     applyCors(req, res);
     if (req.method === "OPTIONS") {
@@ -76,7 +79,7 @@ export function createEdgeServer(opts: EdgeOptions): Server {
     headers.host = `${opts.targetHost}:${opts.targetPort}`;
 
     const upstream = httpRequest(
-      { host: opts.targetHost, port: opts.targetPort, method: req.method, path: req.url, headers },
+      { host: opts.targetHost, port: opts.targetPort, method: req.method, path: req.url, headers, agent },
       (proxyRes) => {
         for (const [key, value] of Object.entries(proxyRes.headers)) {
           if (value === undefined) continue;
@@ -91,11 +94,21 @@ export function createEdgeServer(opts: EdgeOptions): Server {
     );
     upstream.on("error", (err) => {
       opts.onError?.(err);
-      if (!res.headersSent) {
-        applyCors(req, res);
-        res.writeHead(502, { "content-type": "application/json" });
+      // Once headers/bytes are out (e.g. mid-SSE-stream) we can't send a clean
+      // 502 — injecting a JSON blob would corrupt the stream; abort instead.
+      if (res.headersSent) {
+        res.destroy();
+        return;
       }
+      applyCors(req, res);
+      res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { code: "bad_gateway", message: "upstream unavailable" } }));
+    });
+    // If the client goes away (browser navigates, widget iframe re-mounts),
+    // tear down the upstream request so its loopback socket and any fastmcp
+    // stream session don't leak.
+    res.on("close", () => {
+      if (!res.writableEnded) upstream.destroy();
     });
     req.pipe(upstream);
   });

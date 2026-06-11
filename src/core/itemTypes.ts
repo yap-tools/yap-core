@@ -33,9 +33,15 @@ export interface Property {
   sortOrder: number;
 }
 
-/** Read-side view of a property: parsed config for the public/transport shape. */
-export function propertyView<T extends { config: string }>(p: T): Omit<T, "config"> & { config: PropertyConfig } {
-  return { ...p, config: parseConfig(p.config) };
+/**
+ * Read-side view of a property: the public/transport shape. Parses the stored
+ * config JSON and normalizes the EAV storage ints (required/multi) to booleans,
+ * so the read shape matches the boolean write shape across REST and MCP.
+ */
+export function propertyView<T extends { config: string; required: number; multi: number }>(
+  p: T,
+): Omit<T, "config" | "required" | "multi"> & { config: PropertyConfig; required: boolean; multi: boolean } {
+  return { ...p, config: parseConfig(p.config), required: !!p.required, multi: !!p.multi };
 }
 
 /** Read-side view of an item-type with its properties' config parsed. */

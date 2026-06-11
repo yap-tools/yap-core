@@ -4,7 +4,6 @@
  */
 import { randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +11,7 @@ import { createBlobStore, type BlobStore } from "../../src/blob/index.js";
 import { loadConfig, type YapConfig } from "../../src/config.js";
 import { createDb, type Db } from "../../src/db/index.js";
 import { createLogger } from "../../src/logger.js";
+import { getFreeLoopbackPort } from "../../src/rest/edge.js";
 import { buildServer, type YapServer } from "../../src/server.js";
 
 export const TEST_SYSADMIN_KEY = "test-sysadmin-key-0123456789abcdef";
@@ -26,21 +26,8 @@ export function testEnv(overrides: Record<string, string> = {}): Record<string, 
   };
 }
 
-export async function getFreePort(): Promise<number> {
-  return new Promise((resolvePort, reject) => {
-    const srv = createServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const address = srv.address();
-      if (address === null || typeof address === "string") {
-        reject(new Error("could not allocate port"));
-        return;
-      }
-      const port = address.port;
-      srv.close(() => resolvePort(port));
-    });
-    srv.on("error", reject);
-  });
-}
+/** Re-exported from src so the allocator has a single implementation. */
+export const getFreePort = getFreeLoopbackPort;
 
 export interface TestApp {
   server: YapServer;
