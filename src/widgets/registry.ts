@@ -114,14 +114,30 @@ const BRIDGE_JS = `
 `;
 
 const BASE_STYLE = `
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    /* Inherit the host's surface and theme tokens where provided; every token
+       carries a light-dark() fallback so the widget themes correctly on hosts
+       that pass nothing. Background defaults to transparent so we sit on the
+       host's own surface instead of painting an opaque slab. */
+    --yap-font: var(--font-sans, system-ui, -apple-system, sans-serif);
+    --yap-fg: var(--color-text-primary, light-dark(#16161d, #ededf2));
+    --yap-fg-muted: var(--color-text-secondary, light-dark(#5b5b66, #9a9aa6));
+    --yap-bg: var(--color-background-primary, transparent);
+    --yap-surface: var(--color-background-secondary, light-dark(rgba(22,22,29,.05), rgba(255,255,255,.07)));
+    --yap-border: var(--color-border-primary, light-dark(rgba(22,22,29,.18), rgba(255,255,255,.2)));
+    --yap-danger: var(--color-text-danger, light-dark(#c0392b, #ff6b5e));
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, sans-serif; background: transparent; }
-  .card { border: 1px solid rgba(128,128,128,.35); border-radius: 10px; padding: 14px; max-width: 560px; }
-  .muted { opacity: .65; font-size: 12px; }
-  .err { color: #c0392b; }
-  button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(128,128,128,.5);
-           background: rgba(128,128,128,.12); cursor: pointer; }
+  /* The widget renders inside the host's own container; we draw no card chrome
+     of our own — the host owns the surface and border. The body is that
+     container, and its padding is the single source of content inset. */
+  body { margin: 0; font: 14px/1.45 var(--yap-font); color: var(--yap-fg); background: var(--yap-bg); padding: 18px; }
+  .card { max-width: 560px; }
+  .muted { color: var(--yap-fg-muted); font-size: 12px; }
+  .err { color: var(--yap-danger); }
+  button { font: inherit; color: inherit; padding: 6px 14px; border-radius: var(--border-radius-small, 8px);
+           border: 1px solid var(--yap-border); background: var(--yap-surface); cursor: pointer; }
 `;
 
 export const WIDGETS: Record<string, WidgetDef> = {
@@ -131,7 +147,11 @@ export const WIDGETS: Record<string, WidgetDef> = {
     description:
       "Generic widget shell: reads any registered ui:// widget resource through the host and renders it with the supplied params. The statically-declared template for show_widget.",
     originHostable: false,
-    style: ".shellframe { border: 0; width: 100%; }",
+    // The nested widget owns its own container padding, so the shell drops the
+    // body inset to avoid double-padding. Its `.card` keeps padding only so the
+    // rare error fallback stays readable (the nested widget renders in its own
+    // document, unaffected).
+    style: ".shellframe { border: 0; width: 100%; } body { padding: 0; } .card { padding: 14px; }",
     render: `
       var rendered = false;
       var fallbackTimer = null;
@@ -247,14 +267,19 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "media-card",
     uri: `${UI_SCHEME_PREFIX}media-card`,
     description:
-      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card with a download button. Data: { kind, url, name?, mime_type?, size? }.",
+      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card. Every kind offers a plain-text download link. Data: { kind, url, name?, mime_type?, size? }.",
     originHostable: true,
     style: `
-      img, video { max-width: 100%; border-radius: 8px; display: block; }
+      img { max-width: 100%; border-radius: 8px; display: block; }
       audio { width: 100%; }
+      /* Fit the real video's content height once metadata loads (natural ratio);
+         fall back to 16:9 only for the pre-load placeholder, so the box doesn't
+         start as a squat default and jump. */
+      video { width: 100%; aspect-ratio: auto 16 / 9; border-radius: 8px; display: block; }
       .filerow { display: flex; align-items: center; gap: 12px; }
       .fileicon { font-size: 28px; }
-      a.dl { text-decoration: none; }
+      .dl-line { margin: 12px 0 0; }
+      a.dl { color: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 2px; }
     `,
     render: `
       onData(function (d) {
@@ -268,11 +293,12 @@ export const WIDGETS: Record<string, WidgetDef> = {
         else if (d.kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
         else if (d.kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
-          '</div><div class="muted">' + esc(d.mime_type || "") + '</div></div>' +
-          '<a class="dl" href="' + url + '" download><button>Download</button></a></div>';
-        var expires = Number(d.expires_in) || 0;
-        root.innerHTML = '<div class="card">' + inner +
-          (expires ? '<p class="muted">Link expires in ' + expires + 's</p>' : "") + "</div>";
+          '</div><div class="muted">' + esc(d.mime_type || "") + '</div></div></div>';
+        // A plain-text download link for every file type, sitting where the
+        // expiry note used to. Omitted only when the URL isn't a usable
+        // http(s) link (safeUrl collapses those to "#").
+        var dl = url !== "#" ? '<p class="dl-line"><a class="dl" href="' + url + '" download>Download</a></p>' : "";
+        root.innerHTML = '<div class="card">' + inner + dl + "</div>";
         var media = root.querySelector("img,video,audio");
         if (media) media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", announceHeight);
       });
