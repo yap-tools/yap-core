@@ -150,12 +150,12 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       listDataTables: async () => listNames(),
       insertRows: async (table, rows) => {
         if (rows.length === 0) return;
-        const cols = Object.keys(rows[0]);
+        const cols = Object.keys(rows[0]!);
         const stmt = sqlite.prepare(
           `INSERT INTO ${quoteIdent(table)} (${cols.map(quoteIdent).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
         );
         const insertAll = sqlite.transaction((rs: Record<string, unknown>[]) => {
-          for (const r of rs) stmt.run(...cols.map((c) => r[c]));
+          for (const r of rs) stmt.run(...(cols.map((c) => r[c]) as never[]));
         });
         insertAll(rows);
       },
@@ -220,7 +220,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     listDataTables: listNames,
     insertRows: async (table, rows) => {
       if (rows.length === 0) return;
-      const cols = Object.keys(rows[0]);
+      const cols = Object.keys(rows[0]!);
       const conn = await pool.connect();
       try {
         await conn.query("BEGIN");
@@ -232,7 +232,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
             .join(", ");
           await conn.query(
             `INSERT INTO ${quoteIdent(table)} (${cols.map(quoteIdent).join(", ")}) VALUES ${placeholders}`,
-            chunk.flatMap((r) => cols.map((c) => r[c])),
+            chunk.flatMap((r) => cols.map((c) => r[c])) as unknown[],
           );
         }
         await conn.query("COMMIT");

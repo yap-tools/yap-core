@@ -41,7 +41,7 @@ export function archiveName(at: Date, trigger: BackupTrigger): string {
 
 export function parseArchiveName(name: string): { stamp: string; trigger: BackupTrigger } | undefined {
   const m = /^yap-backup-(\d{8}T\d{6}Z)-(manual|pre-migration|pre-upgrade|scheduled)\.tar\.gz$/.exec(name);
-  return m ? { stamp: m[1], trigger: m[2] as BackupTrigger } : undefined;
+  return m ? { stamp: m[1]!, trigger: m[2] as BackupTrigger } : undefined;
 }
 
 function sha256(bytes: Buffer): string {

@@ -200,7 +200,7 @@ describeEachAdapter("backup import", (adapter: Adapter) => {
     await db2.migrate();
     expect(await db2.appliedMigrations()).toBe(db2.journalLength());
     const users = await db2.snapshotRead(async (read) => read("users"));
-    expect(users[0].id).toBe("u1");
+    expect(users[0]?.id).toBe("u1");
     await db2.close();
   });
 

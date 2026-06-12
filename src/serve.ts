@@ -1,3 +1,7 @@
+import { createRequire } from "node:module";
+
+import { maybePreMigrationBackup, startBackupScheduler } from "./backup/auto.js";
+import { createBackupSink } from "./backup/sink.js";
 import { createBlobStore } from "./blob/index.js";
 import { resolveEnvFile } from "./cli/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
@@ -5,6 +9,10 @@ import { sweepOrphans } from "./core/files.js";
 import { createDb } from "./db/index.js";
 import { createLogger } from "./logger.js";
 import { buildServer } from "./server.js";
+
+// Resolves from src/ (tsx) and dist/ (built) alike — both sit one level below
+// the package root.
+const yapVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 export async function serve(): Promise<void> {
   // Load an env file before reading config, if one exists: explicit
@@ -28,8 +36,24 @@ export async function serve(): Promise<void> {
     throw err;
   }
   const db = await createDb(config.db);
-  await db.migrate();
   const blob = await createBlobStore(config);
+
+  if (config.backup.beforeMigrate) {
+    const sink = await createBackupSink(config.backup.sink);
+    try {
+      const name = await maybePreMigrationBackup({ db, blob, sink, yapVersion });
+      if (name) logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
+    } catch (err) {
+      // The safety promise: never migrate data that could not be backed up.
+      logger.error(
+        "pre-migration backup failed — refusing to migrate; set YAP_BACKUP_BEFORE_MIGRATE=false to override",
+        err,
+      );
+      await db.close();
+      process.exit(1);
+    }
+  }
+  await db.migrate();
 
   // Minted upload/download/widget links are absolute and built from baseUrl.
   // If the server binds publicly but baseUrl still defaults to localhost, those
@@ -65,9 +89,19 @@ export async function serve(): Promise<void> {
   }, config.orphanSweepIntervalMs);
   sweeper.unref();
 
+  let stopScheduler: (() => void) | undefined;
+  if (config.backup.schedule) {
+    const sink = await createBackupSink(config.backup.sink);
+    stopScheduler = startBackupScheduler({ db, blob, sink, yapVersion }, config.backup.schedule, config.backup.keep, logger);
+    logger.info(
+      `backup scheduler active (${config.backup.schedule}, keep ${config.backup.keep ?? "all"}) → ${sink.describe()}`,
+    );
+  }
+
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, async () => {
       clearInterval(sweeper);
+      stopScheduler?.();
       await server.stop();
       await db.close();
       process.exit(0);

@@ -27,7 +27,7 @@ describe("fs backup sink", () => {
 
     expect((await sink.list()).map((e) => e.name)).toEqual([...names].reverse());
 
-    const stream = await sink.read(names[2]);
+    const stream = await sink.read(names[2]!);
     const chunks: Buffer[] = [];
     for await (const c of stream) chunks.push(c as Buffer);
     expect(Buffer.concat(chunks).toString("utf8")).toBe(names[2]);
