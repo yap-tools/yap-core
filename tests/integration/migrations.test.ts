@@ -2,8 +2,9 @@
  * The 0005 cutover: non-empty inline bundles.docs values become autoloaded
  * bundle_docs rows named "instructions". Applies migrations up to 0004 with
  * drizzle's stock migrator against a truncated journal copy, seeds legacy
- * rows, then lets the full migrate() finish the job — same hashes, so the
- * bookkeeping continues where the partial run stopped.
+ * rows, then lets the full migrate() finish the job — the truncated journal
+ * copy preserves each entry's `when` timestamps, so the full run continues
+ * where the partial run stopped.
  */
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,7 +38,8 @@ function truncatedFolder(uptoIdx: number): string {
 
 describe("bundle docs cutover migration (sqlite)", () => {
   it("backfills non-empty inline docs as an autoloaded 'instructions' doc and drops the column", () => {
-    const dbPath = join(mkdtempSync(join(tmpdir(), "yap-mig-db-")), "yap.db");
+    const dbDir = mkdtempSync(join(tmpdir(), "yap-mig-db-"));
+    const dbPath = join(dbDir, "yap.db");
     const sqlite = new BetterSqlite3(dbPath);
     sqlite.pragma("foreign_keys = ON");
     const client = drizzle(sqlite);
@@ -46,6 +48,8 @@ describe("bundle docs cutover migration (sqlite)", () => {
       migrate(client, { migrationsFolder: partial });
 
       const t = "2026-01-01T00:00:00.000Z";
+      const created = "2026-01-01T00:00:00.000Z";
+      const updated = "2026-02-01T00:00:00.000Z";
       sqlite.prepare("INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)").run("u1", "ada", t);
       sqlite
         .prepare(
@@ -55,8 +59,8 @@ describe("bundle docs cutover migration (sqlite)", () => {
       const insertBundle = sqlite.prepare(
         "INSERT INTO bundles (id, space_id, name, description, docs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       );
-      insertBundle.run("b1", "s1", "legacy", "", "Always set status.", t, t);
-      insertBundle.run("b2", "s1", "empty", "", "", t, t);
+      insertBundle.run("b1", "s1", "legacy", "", "Always set status.", created, updated);
+      insertBundle.run("b2", "s1", "empty", "", "", created, updated);
 
       migrate(client, { migrationsFolder: MIGRATIONS });
 
@@ -67,8 +71,8 @@ describe("bundle docs cutover migration (sqlite)", () => {
         name: "instructions",
         content: "Always set status.",
         autoload: 1,
-        created_at: t,
-        updated_at: t,
+        created_at: updated,
+        updated_at: updated,
       });
       expect(String(docs[0]!.id)).toMatch(/^[0-9a-f-]{36}$/);
 
@@ -77,6 +81,7 @@ describe("bundle docs cutover migration (sqlite)", () => {
     } finally {
       sqlite.close();
       rmSync(partial, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
     }
   });
 });

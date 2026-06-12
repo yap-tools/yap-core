@@ -27,7 +27,7 @@ export interface BundleDoc extends BundleDocInfo {
 type DocRow = BundleDoc & { bundleId: string };
 
 const toDoc = ({ bundleId: _omit, ...doc }: DocRow): BundleDoc => doc;
-const toInfo = ({ bundleId: _omit, content: _c, ...info }: DocRow): BundleDocInfo => info;
+export const docInfoView = ({ bundleId: _omit, content: _c, ...info }: DocRow): BundleDocInfo => info;
 
 /** All docs in a bundle, no capability check — for callers that have already
  * established bundle read access (load_bundle, bundle GET). */
@@ -43,7 +43,7 @@ export async function listDocsUnchecked(db: Db, bundleId: string): Promise<DocRo
 export async function listDocs(db: Db, userId: string, bundleId: string): Promise<BundleDocInfo[]> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleReadAccess(db, userId, ctx);
-  return (await listDocsUnchecked(db, bundleId)).map(toInfo);
+  return (await listDocsUnchecked(db, bundleId)).map(docInfoView);
 }
 
 /** Full content. With refs (ids or names), exactly those docs — missing refs
