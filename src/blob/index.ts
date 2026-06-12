@@ -5,9 +5,9 @@
  *
  * - s3 (and compatible): FlyDrive presigned URLs; bytes go browser↔store
  *   directly and never pass through the API layer.
- * - fs (onbox default): there is nothing to presign against, so Yap mints
- *   HMAC tokens for its own app-served upload/download endpoints — bytes do
- *   pass through the app layer, the accepted onbox tradeoff.
+ * - fs (single-machine default): there is nothing to presign against, so Yap
+ *   mints HMAC tokens for its own app-served upload/download endpoints —
+ *   bytes do pass through the app layer, the accepted local-disk tradeoff.
  */
 import type { Readable } from "node:stream";
 

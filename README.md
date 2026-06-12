@@ -18,8 +18,8 @@
 
 Yap is an API-first, self-hosted, open-source system for building **navigable
 contexts** that any AI agent can connect to over MCP. There is no UI: a REST
-API is the entire product surface. It runs **onbox by default** — SQLite and
-local-disk file storage on a single machine with no external dependencies —
+API is the entire product surface. It runs **on a single machine by
+default** — SQLite and local-disk file storage, no external dependencies —
 and the same codebase swaps to Postgres and S3-compatible object storage by
 configuration alone.
 
@@ -41,7 +41,7 @@ disk. The one thing outside the tree is **user docs**: account-level guidance
 that travels with a user across all their spaces (optionally autoloading at
 session start).
 
-## Quickstart (onbox)
+## Quickstart
 
 Install straight from GitHub — no registry involved (Node 22+; npm clones,
 builds, and links the `yap` command):

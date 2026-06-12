@@ -1,5 +1,5 @@
 /**
- * The file lifecycle on the onbox (local-disk) adapter: request → upload →
+ * The file lifecycle on the local-disk adapter: request → upload →
  * complete, mint-on-demand links with TTL expiry, single-use upload links,
  * policy enforcement, immediate blob deletion, and the orphan sweep.
  */

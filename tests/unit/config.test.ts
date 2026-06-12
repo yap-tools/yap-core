@@ -21,7 +21,7 @@ describe("loadConfig", () => {
     );
   });
 
-  it("applies onbox defaults: sqlite + local disk", () => {
+  it("applies single-machine defaults: sqlite + local disk", () => {
     const config = loadConfig(base);
     expect(config.db).toEqual({ dialect: "sqlite", path: "./data/yap.db" });
     expect(config.blob).toEqual({ driver: "fs", root: "./data/blobs" });
