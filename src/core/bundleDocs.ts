@@ -134,15 +134,16 @@ export async function updateDoc(
   const ctx = await getBundleContext(db, bundleId);
   await requireCapability(db, userId, "edit_docs", bundleCapabilityCtx(ctx));
   const doc = await resolveDoc(db, bundleId, ref);
+  const name = patch.name?.trim();
   if (patch.name !== undefined) {
-    if (!patch.name.trim()) throw invalid("doc name cannot be empty");
-    await requireNameFree(db, bundleId, patch.name.trim(), doc.id);
+    if (!name) throw invalid("doc name cannot be empty");
+    await requireNameFree(db, bundleId, name, doc.id);
   }
   const { bundleDocs } = db.tables;
   await db.client
     .update(bundleDocs)
     .set({
-      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+      ...(patch.name !== undefined ? { name } : {}),
       ...(patch.content !== undefined ? { content: patch.content } : {}),
       ...(patch.autoload !== undefined ? { autoload: patch.autoload ? 1 : 0 } : {}),
       updatedAt: nowIso(),

@@ -120,7 +120,7 @@ describeEachAdapter("bundles over REST", (adapter) => {
       });
 
       const list = await alice.get(`/v1/bundles/${bundleId}/docs`);
-      expect(list.body.data.map((d: any) => d.name)).toEqual(["style-guide", "instructions"]);
+      expect(list.body.data.map((d: any) => d.name).sort()).toEqual(["instructions", "style-guide"]);
       expect(list.body.data[0].content).toBeUndefined();
 
       const byName = await alice.get(`/v1/bundles/${bundleId}/docs/style-guide`);
@@ -143,6 +143,20 @@ describeEachAdapter("bundles over REST", (adapter) => {
       const dup = await alice.post(`/v1/bundles/${bundleId}/docs`, { name: "instructions" });
       expect(dup.status).toBe(400);
       expect(dup.body.error.message).toContain("already exists");
+    });
+
+    it("rejects renaming a doc to an existing name but allows self-rename", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/docs`, { name: "renameme" });
+      const clash = await alice.patch(`/v1/bundles/${bundleId}/docs/renameme`, { name: "instructions" });
+      expect(clash.status).toBe(400);
+      expect(clash.body.error.message).toContain("already exists");
+      const self = await alice.patch(`/v1/bundles/${bundleId}/docs/renameme`, { name: "renameme" });
+      expect(self.status).toBe(200);
+    });
+
+    it("does not resolve docs across bundles", async () => {
+      const otherId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "documented-other" })).body.id;
+      expect((await alice.get(`/v1/bundles/${otherId}/docs/instructions`)).status).toBe(404);
     });
 
     it("gates doc writes on edit_docs separately from reads", async () => {
