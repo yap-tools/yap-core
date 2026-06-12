@@ -14,7 +14,7 @@ import { createBlobStore } from "../blob/index.js";
 import { resolveEnvFile } from "../instance/env.js";
 import { CliError } from "../instance/errors.js";
 import { runningPid } from "../instance/proc.js";
-import { loadConfig, type YapConfig } from "../config.js";
+import { ConfigError, loadConfig, type YapConfig } from "../config.js";
 import { createDb } from "../db/index.js";
 import { backupToSink } from "./auto.js";
 import { exportBackup } from "./export.js";
@@ -25,7 +25,14 @@ import { createBackupSink } from "./sink.js";
 function loadEnvAndConfig(): YapConfig {
   const envFile = resolveEnvFile();
   if (envFile) process.loadEnvFile(envFile);
-  return loadConfig();
+  try {
+    return loadConfig();
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      throw new CliError(`${err.message} — run this from an instance directory (see \`yap init\`)`);
+    }
+    throw err;
+  }
 }
 
 function yapVersion(): string {
