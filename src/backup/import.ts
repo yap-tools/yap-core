@@ -16,6 +16,7 @@ const INSERT_ORDER = [
   "spaces",
   "grants",
   "bundles",
+  "bundle_docs",
   "item_types",
   "properties",
   "items",

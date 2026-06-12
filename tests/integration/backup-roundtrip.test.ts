@@ -32,7 +32,7 @@ const tmp = (): string => {
   return d;
 };
 
-/** users + space + bundle + one finalized file row; blob bytes "hello" at k/f1. */
+/** users + space + bundle + doc + one finalized file row; blob bytes "hello" at k/f1. */
 async function seed(db: Db, blobRoot: string): Promise<void> {
   const blob = await createBlobStore(blobConfig(blobRoot));
   await db.insertRows("users", [{ id: "u1", name: "ada", created_at: "2026-01-01T00:00:00Z" }]);
@@ -50,7 +50,10 @@ async function seed(db: Db, blobRoot: string): Promise<void> {
     },
   ]);
   await db.insertRows("bundles", [
-    { id: "b1", space_id: "s1", name: "bu", description: "", docs: "", created_at: "x", updated_at: "x" },
+    { id: "b1", space_id: "s1", name: "bu", description: "", created_at: "x", updated_at: "x" },
+  ]);
+  await db.insertRows("bundle_docs", [
+    { id: "d1", bundle_id: "b1", name: "instructions", content: "Follow these.", autoload: 1, created_at: "x", updated_at: "x" },
   ]);
   await db.insertRows("files", [
     {
@@ -154,6 +157,10 @@ describeEachAdapter("backup import", (adapter: Adapter) => {
     expect(users).toEqual([{ id: "u1", name: "ada", created_at: "2026-01-01T00:00:00Z" }]);
     const files = await db2.snapshotRead(async (read) => read("files"));
     expect(files).toHaveLength(1);
+    const docs = await db2.snapshotRead(async (read) => read("bundle_docs"));
+    expect(docs).toEqual([
+      { id: "d1", bundle_id: "b1", name: "instructions", content: "Follow these.", autoload: 1, created_at: "x", updated_at: "x" },
+    ]);
     expect(await blob2.stat("k/f1")).toMatchObject({ size: 5 });
 
     // schema sits at the archive's index; a normal migrate() completes it
