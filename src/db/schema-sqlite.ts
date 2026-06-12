@@ -71,7 +71,6 @@ export const bundles = sqliteTable(
       .references(() => spaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
-    docs: text("docs").notNull().default(""),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

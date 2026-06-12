@@ -89,7 +89,7 @@ describe("resolveCapability (db-backed)", () => {
       personal: 0, createdAt: now, updatedAt: now,
     });
     await db.client.insert(bundles).values({
-      id: "bn1", spaceId: "sp1", name: "B", description: "", docs: "", createdAt: now, updatedAt: now,
+      id: "bn1", spaceId: "sp1", name: "B", description: "", createdAt: now, updatedAt: now,
     });
     let n = 0;
     return {

@@ -32,6 +32,7 @@ describeEachAdapter("bundles over REST", (adapter) => {
       const res = await alice.post(`/v1/spaces/${spaceId}/bundles`, {
         name: "todos",
         description: "Task tracking",
+        docs: [{ name: "instructions", content: "Always set status.", autoload: true }],
         itemTypes: [
           {
             name: "todo",
@@ -46,6 +47,9 @@ describeEachAdapter("bundles over REST", (adapter) => {
       const bundle = await alice.get(`/v1/bundles/${res.body.id}`);
       expect(bundle.body.itemTypes).toHaveLength(1);
       expect(bundle.body.itemTypes[0].properties.map((p: any) => p.name)).toEqual(["title", "status"]);
+      expect(bundle.body.docs).toEqual([
+        expect.objectContaining({ id: expect.any(String), name: "instructions", autoload: 1 }),
+      ]);
     });
 
     it("rejects invalid designs wholesale with actionable errors", async () => {

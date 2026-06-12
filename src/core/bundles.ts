@@ -55,7 +55,6 @@ export interface Bundle {
   spaceId: string;
   name: string;
   description: string;
-  docs: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -137,7 +136,6 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
     spaceId,
     name,
     description: input.description ?? "",
-    docs: "",
     createdAt: now,
     updatedAt: now,
   };

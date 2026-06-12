@@ -394,7 +394,10 @@ export function registerRestRoutes(server: YapServer): void {
       const ctx = await bundlesCore.getBundleContext(db, param(c, "id"));
       await bundlesCore.requireBundleReadAccess(db, userId, ctx);
       const itemTypes = (await itemTypesCore.listItemTypesUnchecked(db, ctx.bundle.id)).map(itemTypesCore.itemTypeView);
-      return c.json({ ...ctx.bundle, itemTypes });
+      const docs = (await bundleDocsCore.listDocsUnchecked(db, ctx.bundle.id)).map(
+        ({ bundleId: _omit, content: _c, ...info }) => info,
+      );
+      return c.json({ ...ctx.bundle, docs, itemTypes });
     }),
   );
 
