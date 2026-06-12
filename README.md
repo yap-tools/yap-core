@@ -80,6 +80,17 @@ exactly that reason).
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
 
+## Teach your agent Yap
+
+A coding agent that hasn't seen Yap will guess at endpoints. The
+[Yap skill](skills/yap/SKILL.md) fixes that — one command installs it into
+Claude Code, Cursor, Copilot, and most other agents via
+[skills.sh](https://skills.sh):
+
+```sh
+npx skills add yap-tools/yap-core
+```
+
 ## The CLI
 
 Everything after bootstrap goes through the instance's HTTP API — the CLI
