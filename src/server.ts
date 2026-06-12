@@ -13,10 +13,8 @@ import { FastMCP } from "fastmcp";
 
 import type { BlobStore } from "./blob/index.js";
 import type { YapConfig } from "./config.js";
-import { OAUTH_ACCESS_TOKEN_PREFIX, constantTimeEqual } from "./crypto.js";
 import type { TokenAuth } from "./core/authScope.js";
-import { authenticateKey } from "./core/keys.js";
-import { authenticateToken } from "./core/oauth.js";
+import { bearerToken, resolveCredential } from "./core/credential.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
 import { registerMcpTools } from "./mcp/tools.js";
@@ -64,29 +62,28 @@ async function authenticateMcp(
     });
   };
 
-  let key: string | null = null;
   const header = request.headers["authorization"];
-  const headerValue = Array.isArray(header) ? header[0] : header;
-  if (headerValue) {
-    const match = /^Bearer\s+(.+)$/i.exec(headerValue.trim());
-    if (match) key = match[1]!.trim();
-  }
+  let key = bearerToken(Array.isArray(header) ? header[0] : header);
   if (!key && request.url) {
     const url = new URL(request.url, "http://internal");
     key = url.searchParams.get("key");
   }
-  if (!key) return deny("access key or access token required (Authorization: Bearer or ?key= fallback)");
-  if (constantTimeEqual(key, config.sysadminKey)) {
-    return deny("the sysadmin key cannot be used over MCP");
+
+  const auth = await resolveCredential(db, config, key);
+  switch (auth.kind) {
+    case "user":
+      return { userId: auth.userId };
+    case "token":
+      return { userId: auth.userId, tokenAuth: auth.tokenAuth };
+    case "missing":
+      return deny("access key or access token required (Authorization: Bearer or ?key= fallback)");
+    case "sysadmin":
+      return deny("the sysadmin key cannot be used over MCP");
+    case "invalid-token":
+      return deny("invalid, expired, or revoked access token");
+    case "invalid-key":
+      return deny("invalid or revoked access key");
   }
-  if (key.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
-    const tokenAuth = await authenticateToken(db, key);
-    if (!tokenAuth) return deny("invalid, expired, or revoked access token");
-    return { userId: tokenAuth.userId, tokenAuth };
-  }
-  const userId = await authenticateKey(db, key);
-  if (!userId) return deny("invalid or revoked access key");
-  return { userId };
 }
 
 export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: YapLogger = createLogger()): YapServer {

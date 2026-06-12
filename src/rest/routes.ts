@@ -28,12 +28,13 @@ import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import { headerSafeFilename } from "../core/util.js";
 import * as usersCore from "../core/users.js";
-import { OAUTH_ACCESS_TOKEN_PREFIX, verifyToken } from "../crypto.js";
+import { verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
 import { buildOriginPage } from "../widgets/pages.js";
+import { resolveCredential, type CredentialOutcome } from "../core/credential.js";
 import { bearerFrom, requireSysadmin, requireUser } from "./auth.js";
 
-type Handler = (c: Context) => Promise<Response>;
+type Handler = (c: Context, auth: CredentialOutcome) => Promise<Response>;
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
@@ -84,16 +85,14 @@ export function registerRestRoutes(server: YapServer): void {
     (fn: Handler) =>
     async (c: Context): Promise<Response> => {
       try {
-        // OAuth-token lane: resolve the delegation up front and run the
-        // handler inside its scope context, so capability resolution deep in
-        // core sees the clamp. The key lane runs unscoped, exactly as before.
-        const bearer = bearerFrom(c);
-        if (bearer?.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
-          const tokenAuth = await oauthCore.authenticateToken(db, bearer);
-          if (!tokenAuth) throw unauthorized("invalid, expired, or revoked access token");
-          return await runWithTokenAuth(tokenAuth, () => fn(c));
+        // Resolve the presented credential once; every handler receives the
+        // outcome. The token lane additionally runs inside its scope context,
+        // so capability resolution deep in core sees the clamp.
+        const auth = await resolveCredential(db, config, bearerFrom(c));
+        if (auth.kind === "token") {
+          return await runWithTokenAuth(auth.tokenAuth, () => fn(c, auth));
         }
-        return await fn(c);
+        return await fn(c, auth);
       } catch (err) {
         if (err instanceof YapError) {
           if (err.httpStatus === 404) {
@@ -113,8 +112,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/users",
-    handle(async (c) => {
-      requireSysadmin(c, config);
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
       const body = parseBody(createUserSchema, await jsonBody(c));
       const created = await usersCore.createUser(db, body);
       return c.json(created, 201);
@@ -123,24 +122,24 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/users",
-    handle(async (c) => {
-      requireSysadmin(c, config);
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
       return c.json(await usersCore.listUsers(db, pageOpts(c)));
     }),
   );
 
   app.get(
     "/v1/users/:id",
-    handle(async (c) => {
-      requireSysadmin(c, config);
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
       return c.json(await usersCore.getUser(db, param(c, "id")));
     }),
   );
 
   app.delete(
     "/v1/users/:id",
-    handle(async (c) => {
-      requireSysadmin(c, config);
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
       await usersCore.deleteUser(db, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
@@ -152,8 +151,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/keys",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(createKeySchema, await jsonBody(c));
       return c.json(await keysCore.createKey(db, userId, body.name ?? ""), 201);
     }),
@@ -161,24 +160,24 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/keys",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await keysCore.listKeys(db, userId) });
     }),
   );
 
   app.post(
     "/v1/keys/:id/rotate",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await keysCore.rotateKey(db, userId, param(c, "id")));
     }),
   );
 
   app.delete(
     "/v1/keys/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await keysCore.deleteKey(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
@@ -188,16 +187,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/oauth/grants",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await oauthCore.listUserGrants(db, userId) });
     }),
   );
 
   app.delete(
     "/v1/oauth/grants/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await oauthCore.revokeUserGrant(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
@@ -221,8 +220,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/spaces",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(spaceCreateSchema, await jsonBody(c));
       return c.json(await spacesCore.createSpace(db, userId, body), 201);
     }),
@@ -230,16 +229,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/spaces",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await spacesCore.listSpacesForUser(db, userId, pageOpts(c)));
     }),
   );
 
   app.get(
     "/v1/spaces/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const space = await spacesCore.getSpaceRow(db, param(c, "id"));
       if (!(await spacesCore.canReachSpace(db, userId, space))) {
         throw new YapError("not_found", `space ${space.id} not found`);
@@ -250,8 +249,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.patch(
     "/v1/spaces/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(spacePatchSchema, await jsonBody(c));
       return c.json(await spacesCore.updateSpace(db, userId, param(c, "id"), body));
     }),
@@ -259,8 +258,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/spaces/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await spacesCore.deleteSpace(db, userId, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
@@ -283,8 +282,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/spaces/:id/grants",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const body = parseBody(grantSchema, await jsonBody(c));
       const target = await grantsCore.spaceGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
@@ -298,8 +297,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/spaces/:id/grants",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const target = await grantsCore.spaceGrantTarget(db, param(c, "id"));
       return c.json({ data: await grantsCore.listGrants(db, actorId, target) });
     }),
@@ -307,8 +306,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/spaces/:id/grants/:grantId",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const target = await grantsCore.spaceGrantTarget(db, param(c, "id"));
       await grantsCore.deleteGrant(db, actorId, target, param(c, "grantId"));
       return c.json({ deleted: true });
@@ -317,8 +316,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/bundles/:id/grants",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const body = parseBody(grantSchema, await jsonBody(c));
       const target = await bundlesCore.bundleGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
@@ -332,8 +331,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/grants",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const target = await bundlesCore.bundleGrantTarget(db, param(c, "id"));
       return c.json({ data: await grantsCore.listGrants(db, actorId, target) });
     }),
@@ -341,8 +340,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/bundles/:id/grants/:grantId",
-    handle(async (c) => {
-      const actorId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const actorId = requireUser(auth);
       const target = await bundlesCore.bundleGrantTarget(db, param(c, "id"));
       await grantsCore.deleteGrant(db, actorId, target, param(c, "grantId"));
       return c.json({ deleted: true });
@@ -372,8 +371,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/spaces/:id/bundles",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(bundleCreateSchema, await jsonBody(c));
       return c.json(await bundlesCore.createBundle(db, userId, param(c, "id"), body), 201);
     }),
@@ -381,16 +380,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/spaces/:id/bundles",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await bundlesCore.listBundles(db, userId, param(c, "id"), pageOpts(c)));
     }),
   );
 
   app.get(
     "/v1/bundles/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const ctx = await bundlesCore.getBundleContext(db, param(c, "id"));
       await bundlesCore.requireBundleReadAccess(db, userId, ctx);
       const itemTypes = (await itemTypesCore.listItemTypesUnchecked(db, ctx.bundle.id)).map(itemTypesCore.itemTypeView);
@@ -401,8 +400,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.patch(
     "/v1/bundles/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string().optional(), description: z.string().optional() }),
         await jsonBody(c),
@@ -413,8 +412,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/bundles/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await bundlesCore.deleteBundle(db, userId, param(c, "id"), blob);
       return c.json({ deleted: true });
     }),
@@ -424,8 +423,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/bundles/:id/docs",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }),
         await jsonBody(c),
@@ -436,24 +435,24 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/docs",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await bundleDocsCore.listDocs(db, userId, param(c, "id")) });
     }),
   );
 
   app.get(
     "/v1/bundles/:id/docs/:docRef",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await bundleDocsCore.getDoc(db, userId, param(c, "id"), param(c, "docRef")));
     }),
   );
 
   app.patch(
     "/v1/bundles/:id/docs/:docRef",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
         await jsonBody(c),
@@ -464,8 +463,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/bundles/:id/docs/:docRef",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await bundleDocsCore.deleteDoc(db, userId, param(c, "id"), param(c, "docRef"));
       return c.json({ deleted: true });
     }),
@@ -475,8 +474,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/bundles/:id/item-types",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string(), properties: z.array(propertyInputSchema).optional() }),
         await jsonBody(c),
@@ -487,16 +486,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/item-types",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: (await itemTypesCore.listItemTypes(db, userId, param(c, "id"))).map(itemTypesCore.itemTypeView) });
     }),
   );
 
   app.patch(
     "/v1/item-types/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(z.object({ name: z.string().optional() }), await jsonBody(c));
       await itemTypesCore.updateItemType(db, userId, param(c, "id"), body);
       return c.json({ updated: true });
@@ -505,8 +504,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/item-types/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await itemTypesCore.deleteItemType(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
@@ -514,8 +513,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/item-types/:id/properties",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(propertyInputSchema, await jsonBody(c));
       return c.json(itemTypesCore.propertyView(await itemTypesCore.addProperty(db, userId, param(c, "id"), body)), 201);
     }),
@@ -523,8 +522,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.patch(
     "/v1/item-types/:id/properties/:propId",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({
           name: z.string().optional(),
@@ -545,8 +544,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/item-types/:id/properties/:propId",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await itemTypesCore.deleteProperty(db, userId, param(c, "id"), param(c, "propId"));
       return c.json({ deleted: true });
     }),
@@ -563,8 +562,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/bundles/:id/items",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ itemType: z.string(), items: z.array(z.record(z.string(), z.unknown())) }),
         await jsonBody(c),
@@ -575,8 +574,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/items",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const itemType = c.req.query("itemType") ?? c.req.query("item_type");
       const ids = c.req.query("ids");
       if (ids) {
@@ -610,8 +609,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.patch(
     "/v1/items/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(z.object({ set: z.record(z.string(), z.unknown()) }), await jsonBody(c));
       const itemId = param(c, "id");
       const bundleId = await itemsCore.getItemBundleId(db, itemId);
@@ -622,8 +621,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/items/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const itemId = param(c, "id");
       const bundleId = await itemsCore.getItemBundleId(db, itemId);
       await itemsCore.deleteItems(db, userId, bundleId, [itemId]);
@@ -635,16 +634,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/files",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await filesCore.listFiles(fileEnv, userId, param(c, "id")) });
     }),
   );
 
   app.post(
     "/v1/bundles/:id/files/upload-request",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string(), mime_type: z.string().optional(), size: z.number().int().optional() }),
         await jsonBody(c),
@@ -655,7 +654,7 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/files/:id/complete",
-    handle(async (c) => {
+    handle(async (c, auth) => {
       const fileId = param(c, "id");
       const raw = c.req.header("content-length") === "0" || c.req.header("content-length") === undefined
         ? {}
@@ -674,23 +673,23 @@ export function registerRestRoutes(server: YapServer): void {
         }
         return c.json(await filesCore.completeUploadSigned(fileEnv, fileId, body));
       }
-      const userId = await requireUser(c, db, config);
+      const userId = requireUser(auth);
       return c.json(await filesCore.completeUpload(fileEnv, userId, fileId, body));
     }),
   );
 
   app.get(
     "/v1/files/:id/link",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await filesCore.mintDownloadLink(fileEnv, userId, param(c, "id")));
     }),
   );
 
   app.delete(
     "/v1/files/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await filesCore.deleteFile(fileEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
@@ -753,8 +752,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/bundles/:id/hooks",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({
           name: z.string(),
@@ -770,16 +769,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/bundles/:id/hooks",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await hooksCore.listHooks(db, userId, param(c, "id")) });
     }),
   );
 
   app.patch(
     "/v1/hooks/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({
           name: z.string().optional(),
@@ -795,8 +794,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/hooks/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await hooksCore.deleteHook(hookEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
@@ -804,8 +803,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/hooks/:id/fire",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const rawText = await c.req.text();
       let rawBody: unknown = {};
       if (rawText) {
@@ -840,8 +839,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.post(
     "/v1/user-docs",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }),
         await jsonBody(c),
@@ -852,24 +851,24 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.get(
     "/v1/user-docs",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json({ data: await userDocsCore.listUserDocs(db, userId) });
     }),
   );
 
   app.get(
     "/v1/user-docs/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       return c.json(await userDocsCore.getUserDoc(db, userId, param(c, "id")));
     }),
   );
 
   app.patch(
     "/v1/user-docs/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       const body = parseBody(
         z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
         await jsonBody(c),
@@ -880,8 +879,8 @@ export function registerRestRoutes(server: YapServer): void {
 
   app.delete(
     "/v1/user-docs/:id",
-    handle(async (c) => {
-      const userId = await requireUser(c, db, config);
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
       await userDocsCore.deleteUserDoc(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
