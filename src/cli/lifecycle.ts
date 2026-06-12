@@ -4,7 +4,6 @@
  * directory's, never the global CLI's.
  */
 import { openSync, readSync, statSync } from "node:fs";
-import { realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
@@ -12,15 +11,7 @@ import { parseArgs } from "node:util";
 import { instanceBaseUrl, loadInstanceEnv } from "./env.js";
 import { vendoredServerEntry, vendoredServerVersion } from "./install.js";
 import { logPath, runningPid, startInstance, stopInstance, tailLog } from "./proc.js";
-import { CliError } from "./util.js";
-
-function sameFile(a: string, b: string): boolean {
-  try {
-    return realpathSync(a) === realpathSync(b);
-  } catch {
-    return false;
-  }
-}
+import { CliError, sameFile } from "./util.js";
 
 /**
  * Foreground serve. Delegates to the vendored server when the directory has

@@ -7,6 +7,7 @@
  */
 import { createRequire } from "node:module";
 
+import { cmdBackup, cmdRestore } from "./cli/backup.js";
 import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
 import { cmdCreate, cmdInit, cmdService, cmdUpgrade } from "./cli/setup.js";
@@ -26,7 +27,12 @@ An instance is a directory; run yap inside it.
 Instance:
   init [--version v] [--port n] [--no-install]   Scaffold here + install the server from GitHub
   create <dir> [--user n] [--version v] [--port n]   mkdir + init + start + user create, in one go
-  upgrade [version] [--no-restart]    Reinstall this instance's server, restart if running
+  upgrade [version] [--no-restart] [--skip-backup]   Reinstall this instance's server, restart if running
+
+Data:
+  backup [--out <path>]               Write a portable backup (to the sink, or a file)
+  backup list                         List backups in the configured sink
+  restore <name|path> | --latest      Replace this instance's data from a backup (--force to overwrite)
 
 Run:
   (none), serve                       Serve in the foreground (Ctrl+C stops)
@@ -69,6 +75,14 @@ try {
     case "upgrade":
       assertLocal(target, command);
       await cmdUpgrade(dir, rest);
+      break;
+    case "backup":
+      assertLocal(target, command);
+      await cmdBackup(dir, rest);
+      break;
+    case "restore":
+      assertLocal(target, command);
+      await cmdRestore(dir, rest);
       break;
     case "start":
       assertLocal(target, command);
