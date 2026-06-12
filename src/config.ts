@@ -32,6 +32,33 @@ export interface S3BlobConfig {
   forcePathStyle: boolean;
 }
 
+export interface FsBackupSinkConfig {
+  driver: "fs";
+  root: string;
+}
+
+export interface S3BackupSinkConfig {
+  driver: "s3";
+  bucket: string;
+  region: string;
+  endpoint?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  forcePathStyle: boolean;
+  /** Key prefix inside the bucket ("" = bucket root). */
+  prefix: string;
+}
+
+export interface BackupConfig {
+  sink: FsBackupSinkConfig | S3BackupSinkConfig;
+  /** Snapshot automatically before pending schema migrations at startup. */
+  beforeMigrate: boolean;
+  /** Cron expression for scheduled backups; unset disables the scheduler. */
+  schedule?: string;
+  /** Retention: prune the sink to the newest n archives after scheduled runs. */
+  keep?: number;
+}
+
 export interface YapConfig {
   port: number;
   host: string;
@@ -43,6 +70,7 @@ export interface YapConfig {
   masterKey: Buffer;
   db: SqliteDbConfig | PgDbConfig;
   blob: FsBlobConfig | S3BlobConfig;
+  backup: BackupConfig;
   uploadTtlSeconds: number;
   downloadTtlSeconds: number;
   widgetTokenTtlSeconds: number;
@@ -146,6 +174,41 @@ export function loadConfig(env: Env = process.env): YapConfig {
     throw new ConfigError(`YAP_BLOB must be "fs" or "s3", got ${JSON.stringify(blobDriver)}`);
   }
 
+  const backupSinkDriver = env.YAP_BACKUP_SINK || "fs";
+  let backupSink: BackupConfig["sink"];
+  if (backupSinkDriver === "fs") {
+    backupSink = { driver: "fs", root: env.YAP_BACKUP_FS_ROOT || "./data/backups" };
+  } else if (backupSinkDriver === "s3") {
+    const bucket = env.YAP_BACKUP_S3_BUCKET;
+    const accessKeyId = env.YAP_BACKUP_S3_ACCESS_KEY_ID || env.YAP_S3_ACCESS_KEY_ID || env.AWS_ACCESS_KEY_ID;
+    const secretAccessKey =
+      env.YAP_BACKUP_S3_SECRET_ACCESS_KEY || env.YAP_S3_SECRET_ACCESS_KEY || env.AWS_SECRET_ACCESS_KEY;
+    if (!bucket || !accessKeyId || !secretAccessKey) {
+      throw new ConfigError(
+        "YAP_BACKUP_SINK=s3 requires YAP_BACKUP_S3_BUCKET and credentials (YAP_BACKUP_S3_* or YAP_S3_*/AWS_*)",
+      );
+    }
+    backupSink = {
+      driver: "s3",
+      bucket,
+      region: env.YAP_BACKUP_S3_REGION || env.YAP_S3_REGION || "auto",
+      endpoint: env.YAP_BACKUP_S3_ENDPOINT || env.YAP_S3_ENDPOINT,
+      accessKeyId,
+      secretAccessKey,
+      forcePathStyle: (env.YAP_BACKUP_S3_FORCE_PATH_STYLE ?? env.YAP_S3_FORCE_PATH_STYLE) === "true",
+      prefix: env.YAP_BACKUP_S3_PREFIX || "",
+    };
+  } else {
+    throw new ConfigError(`YAP_BACKUP_SINK must be "fs" or "s3", got ${JSON.stringify(backupSinkDriver)}`);
+  }
+
+  const backup: BackupConfig = {
+    sink: backupSink,
+    beforeMigrate: env.YAP_BACKUP_BEFORE_MIGRATE !== "false",
+    schedule: env.YAP_BACKUP_SCHEDULE || undefined,
+    keep: env.YAP_BACKUP_KEEP ? intEnv(env, "YAP_BACKUP_KEEP", 0) : undefined,
+  };
+
   const mimeRaw = env.YAP_MIME_ALLOWLIST;
   const mimeAllowlist: YapConfig["mimeAllowlist"] =
     !mimeRaw || mimeRaw === "*" ? "*" : listEnv(env, "YAP_MIME_ALLOWLIST");
@@ -158,6 +221,7 @@ export function loadConfig(env: Env = process.env): YapConfig {
     masterKey,
     db,
     blob,
+    backup,
     uploadTtlSeconds: intEnv(env, "YAP_UPLOAD_TTL_SECONDS", 600),
     downloadTtlSeconds: intEnv(env, "YAP_DOWNLOAD_TTL_SECONDS", 300),
     widgetTokenTtlSeconds: intEnv(env, "YAP_WIDGET_TOKEN_TTL_SECONDS", 600),

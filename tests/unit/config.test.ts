@@ -68,3 +68,41 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...base, YAP_PORT: "-1" })).toThrow(ConfigError);
   });
 });
+
+describe("backup config", () => {
+  it("defaults: fs sink under ./data/backups, beforeMigrate on, no schedule", () => {
+    const config = loadConfig(base);
+    expect(config.backup.sink).toEqual({ driver: "fs", root: "./data/backups" });
+    expect(config.backup.beforeMigrate).toBe(true);
+    expect(config.backup.schedule).toBeUndefined();
+    expect(config.backup.keep).toBeUndefined();
+  });
+
+  it("parses schedule, keep, and opt-out", () => {
+    const config = loadConfig({
+      ...base,
+      YAP_BACKUP_BEFORE_MIGRATE: "false",
+      YAP_BACKUP_SCHEDULE: "0 3 * * *",
+      YAP_BACKUP_KEEP: "7",
+    });
+    expect(config.backup.beforeMigrate).toBe(false);
+    expect(config.backup.schedule).toBe("0 3 * * *");
+    expect(config.backup.keep).toBe(7);
+  });
+
+  it("s3 sink requires a bucket, creds fall back to blob/AWS vars", () => {
+    expect(() => loadConfig({ ...base, YAP_BACKUP_SINK: "s3" })).toThrow(ConfigError);
+    const config = loadConfig({
+      ...base,
+      YAP_BACKUP_SINK: "s3",
+      YAP_BACKUP_S3_BUCKET: "backups",
+      AWS_ACCESS_KEY_ID: "ak",
+      AWS_SECRET_ACCESS_KEY: "sk",
+    });
+    expect(config.backup.sink).toMatchObject({ driver: "s3", bucket: "backups", prefix: "" });
+  });
+
+  it("rejects an unknown sink driver", () => {
+    expect(() => loadConfig({ ...base, YAP_BACKUP_SINK: "ftp" })).toThrow(ConfigError);
+  });
+});
