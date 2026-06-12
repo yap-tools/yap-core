@@ -142,16 +142,18 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
     updatedAt: now,
   };
   await db.client.insert(bundles).values(bundle);
-  for (const doc of input.docs ?? []) {
-    await db.client.insert(bundleDocs).values({
-      id: newId(),
-      bundleId: bundle.id,
-      name: doc.name.trim(),
-      content: doc.content ?? "",
-      autoload: doc.autoload ? 1 : 0,
-      createdAt: now,
-      updatedAt: now,
-    });
+  if ((input.docs ?? []).length > 0) {
+    await db.client.insert(bundleDocs).values(
+      (input.docs ?? []).map((doc) => ({
+        id: newId(),
+        bundleId: bundle.id,
+        name: doc.name.trim(),
+        content: doc.content ?? "",
+        autoload: doc.autoload ? 1 : 0,
+        createdAt: now,
+        updatedAt: now,
+      })),
+    );
   }
   for (const itemType of input.itemTypes ?? []) {
     const itemTypeId = newId();

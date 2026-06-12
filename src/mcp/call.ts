@@ -9,6 +9,7 @@ import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
+import type { BundleDoc } from "../core/bundleDocs.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as hooksCore from "../core/hooks.js";
@@ -47,6 +48,9 @@ export interface SecondTierTool {
   targets?: TargetKind[];
   handler: (env: CallEnv, params: Record<string, unknown>) => Promise<SecondTierResult>;
 }
+
+/** Maps a core BundleDoc row to the MCP view (autoload as boolean). */
+const docView = (d: BundleDoc) => ({ ...d, autoload: d.autoload === 1 });
 
 /** Builds a grant target from the call's resource (bundle if present, else space). */
 function grantTargetFor(env: CallEnv): Promise<grantsCore.GrantTarget> {
@@ -120,7 +124,7 @@ export const secondTier: Record<string, SecondTierTool> = {
       "Read bundle doc content. Params: refs? (array of doc ids or names; omit to read every doc). load_bundle lists what exists and inlines the autoloaded ones — use this for the rest.",
     capability: "(bundle read access)",
     handler: async (env, params) => ({
-      result: { data: await bundleDocsCore.readDocs(env.db, env.userId, env.bundleId, params.refs as string[] | undefined) },
+      result: { data: (await bundleDocsCore.readDocs(env.db, env.userId, env.bundleId, params.refs as string[] | undefined)).map(docView) },
     }),
   },
   create_doc: {
@@ -128,22 +132,22 @@ export const secondTier: Record<string, SecondTierTool> = {
       "Create a named doc in the bundle. Set autoload: true for binding operating instructions that load_bundle should always return in full. Params: name, content?, autoload?.",
     capability: "edit_docs",
     handler: async (env, params) => ({
-      result: await bundleDocsCore.createDoc(env.db, env.userId, env.bundleId, {
+      result: docView(await bundleDocsCore.createDoc(env.db, env.userId, env.bundleId, {
         name: String(params.name ?? ""),
         content: params.content as string | undefined,
         autoload: params.autoload as boolean | undefined,
-      }),
+      })),
     }),
   },
   update_doc: {
     description: "Update a doc. Params: doc (name or id), name?, content?, autoload?.",
     capability: "edit_docs",
     handler: async (env, params) => ({
-      result: await bundleDocsCore.updateDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""), {
+      result: docView(await bundleDocsCore.updateDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""), {
         name: params.name as string | undefined,
         content: params.content as string | undefined,
         autoload: params.autoload as boolean | undefined,
-      }),
+      })),
     }),
   },
   delete_doc: {

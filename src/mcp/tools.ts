@@ -210,20 +210,18 @@ export function registerMcpTools(server: YapServer): void {
           try {
             const bundleCtx = await getBundleContext(db, bundleId);
             await requireBundleReadAccess(db, userId, bundleCtx);
+            const docRows = await bundleDocsCore.listDocsUnchecked(db, bundleId);
             results.push({
               id: bundleCtx.bundle.id,
               space_id: bundleCtx.space.id,
               name: bundleCtx.bundle.name,
               description: bundleCtx.bundle.description,
-              docs: await (async () => {
-                const all = await bundleDocsCore.listDocsUnchecked(db, bundleId);
-                return {
-                  autoloaded: all
-                    .filter((d) => d.autoload === 1)
-                    .map((d) => ({ name: d.name, content: d.content })),
-                  available: all.map((d) => ({ id: d.id, name: d.name, autoload: d.autoload === 1 })),
-                };
-              })(),
+              docs: {
+                autoloaded: docRows
+                  .filter((d) => d.autoload === 1)
+                  .map((d) => ({ name: d.name, content: d.content })),
+                available: docRows.map((d) => ({ id: d.id, name: d.name, autoload: d.autoload === 1 })),
+              },
               role: await effectiveCapabilities(db, userId, bundleCapabilityCtx(bundleCtx)),
               item_types: (await listItemTypesUnchecked(db, bundleId)).map((t) => ({
                 id: t.id,

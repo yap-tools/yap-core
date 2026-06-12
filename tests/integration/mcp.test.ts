@@ -234,13 +234,20 @@ describeEachAdapter("MCP surface", (adapter) => {
           { bundle_id: todosBundleId, tool: "update_doc", params: { doc: "triage", autoload: true } },
         ],
       });
-      expect(update.results[0].result.autoload).toBe(1);
+      expect(update.results[0].result.autoload).toBe(true);
 
       const del = await alice.call("call", {
         space_id: spaceId,
         calls: [{ bundle_id: todosBundleId, tool: "delete_doc", params: { doc: "triage" } }],
       });
       expect(del.results[0].ok).toBe(true);
+
+      const gone = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "read_docs", params: { refs: ["triage"] } }],
+      });
+      expect(gone.results[0].ok).toBe(false);
+      expect(gone.results[0].error.code).toBe("not_found");
     });
 
     it("gates per-capability: a user with read but not edit can query, not write", async () => {
