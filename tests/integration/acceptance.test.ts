@@ -49,7 +49,7 @@ describeEachAdapter("acceptance", (adapter) => {
       await operator.post(`/v1/spaces/${workSpaceId}/bundles`, {
         name: "todos",
         description: "The team's todo list",
-        docs: "Items of type todo carry title and status (open|done).",
+        docs: [{ name: "instructions", content: "Items of type todo carry title and status (open|done).", autoload: true }],
         itemTypes: [
           {
             name: "todo",
@@ -107,7 +107,7 @@ describeEachAdapter("acceptance", (adapter) => {
     // load_bundle → binding docs + the schema that makes the query correct.
     const bundleDetail = await agent.call("load_bundle", { bundle_ids: [bundle.id] });
     const schema = bundleDetail.bundles[0];
-    expect(schema.docs).toContain("status");
+    expect(schema.docs.autoloaded[0].content).toContain("status");
     const todoType = schema.item_types.find((t: any) => t.name === "todo");
     expect(todoType.properties.some((p: any) => p.name === "status")).toBe(true);
 

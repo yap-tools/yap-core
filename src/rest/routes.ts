@@ -362,7 +362,9 @@ export function registerRestRoutes(server: YapServer): void {
   const bundleCreateSchema = z.object({
     name: z.string(),
     description: z.string().optional(),
-    docs: z.string().optional(),
+    docs: z
+      .array(z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }))
+      .optional(),
     itemTypes: z
       .array(z.object({ name: z.string(), properties: z.array(propertyInputSchema) }))
       .optional(),

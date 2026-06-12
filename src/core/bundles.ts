@@ -36,10 +36,17 @@ export interface ItemTypeInput {
   properties: PropertyInput[];
 }
 
+export interface BundleDocInput {
+  name: string;
+  content?: string;
+  /** When true, load_bundle returns this doc's content automatically. */
+  autoload?: boolean;
+}
+
 export interface BundleInput {
   name: string;
   description?: string;
-  docs?: string;
+  docs?: BundleDocInput[];
   itemTypes?: ItemTypeInput[];
 }
 
@@ -60,6 +67,17 @@ export interface Bundle {
 export function validateBundleInput(input: BundleInput): string[] {
   const errors: string[] = [];
   if (!input.name?.trim()) errors.push("bundle name is required");
+  const docNames = new Set<string>();
+  for (const [i, doc] of (input.docs ?? []).entries()) {
+    const docName = doc.name?.trim();
+    if (!docName) {
+      errors.push(`docs[${i}]: doc name is required`);
+    } else if (docNames.has(docName)) {
+      errors.push(`docs[${i}]: duplicate doc name "${docName}"`);
+    } else {
+      docNames.add(docName);
+    }
+  }
   const typeNames = new Set<string>();
   for (const [i, itemType] of (input.itemTypes ?? []).entries()) {
     const where = `itemTypes[${i}]`;
@@ -106,7 +124,7 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
   }
 
   const name = input.name.trim();
-  const { bundles, itemTypes, properties } = db.tables;
+  const { bundles, bundleDocs, itemTypes, properties } = db.tables;
   const clash = await db.client
     .select({ id: bundles.id })
     .from(bundles)
@@ -119,11 +137,22 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
     spaceId,
     name,
     description: input.description ?? "",
-    docs: input.docs ?? "",
+    docs: "",
     createdAt: now,
     updatedAt: now,
   };
   await db.client.insert(bundles).values(bundle);
+  for (const doc of input.docs ?? []) {
+    await db.client.insert(bundleDocs).values({
+      id: newId(),
+      bundleId: bundle.id,
+      name: doc.name.trim(),
+      content: doc.content ?? "",
+      autoload: doc.autoload ? 1 : 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
   for (const itemType of input.itemTypes ?? []) {
     const itemTypeId = newId();
     await db.client.insert(itemTypes).values({

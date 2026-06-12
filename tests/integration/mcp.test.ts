@@ -41,7 +41,7 @@ describeEachAdapter("MCP surface", (adapter) => {
       await aliceRest.post(`/v1/spaces/${spaceId}/bundles`, {
         name: "todos",
         description: "Open and closed todos",
-        docs: "Todos have a status property: open or done. Always set it.",
+        docs: [{ name: "instructions", content: "Todos have a status property: open or done. Always set it.", autoload: true }],
         itemTypes: [
           {
             name: "todo",
@@ -114,7 +114,12 @@ describeEachAdapter("MCP surface", (adapter) => {
     it("load_bundle returns binding docs, schemas, files, and hooks", async () => {
       const result = await alice.call("load_bundle", { bundle_ids: [todosBundleId] });
       const bundle = result.bundles[0];
-      expect(bundle.docs).toContain("Always set it");
+      expect(bundle.docs.autoloaded).toEqual([
+        { name: "instructions", content: expect.stringContaining("Always set it") },
+      ]);
+      expect(bundle.docs.available).toEqual([
+        { id: expect.any(String), name: "instructions", autoload: true },
+      ]);
       expect(bundle.item_types[0].name).toBe("todo");
       // Property ids are surfaced so update_property / delete_property are usable over MCP.
       expect(bundle.item_types[0].properties).toEqual([
@@ -171,7 +176,7 @@ describeEachAdapter("MCP surface", (adapter) => {
       });
       expect(result.results).toHaveLength(3);
       expect(result.results[0].ok).toBe(true);
-      expect(result.results[0].result.docs).toContain("status");
+      expect(result.results[0].result.data.some((d: any) => d.content.includes("status"))).toBe(true);
       expect(result.results[1].ok).toBe(false);
       expect(result.results[1].error.code).toBe("not_found");
       expect(result.results[2].ok).toBe(true); // failure of call 2 did not block call 3
@@ -196,6 +201,48 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(result.results[0].error.message).toContain("not in space");
     });
 
+    it("manages docs through call: create, read on demand, update, delete", async () => {
+      const create = await alice.call("call", {
+        space_id: spaceId,
+        calls: [
+          {
+            bundle_id: todosBundleId,
+            tool: "create_doc",
+            params: { name: "triage", content: "Oldest first." },
+          },
+        ],
+      });
+      expect(create.results[0].ok).toBe(true);
+
+      const read = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "read_docs", params: { refs: ["triage"] } }],
+      });
+      expect(read.results[0].result.data).toEqual([
+        expect.objectContaining({ name: "triage", content: "Oldest first." }),
+      ]);
+
+      const readAll = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "read_docs" }],
+      });
+      expect(readAll.results[0].result.data.map((d: any) => d.name)).toContain("instructions");
+
+      const update = await alice.call("call", {
+        space_id: spaceId,
+        calls: [
+          { bundle_id: todosBundleId, tool: "update_doc", params: { doc: "triage", autoload: true } },
+        ],
+      });
+      expect(update.results[0].result.autoload).toBe(1);
+
+      const del = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "delete_doc", params: { doc: "triage" } }],
+      });
+      expect(del.results[0].ok).toBe(true);
+    });
+
     it("gates per-capability: a user with read but not edit can query, not write", async () => {
       await aliceRest.post(`/v1/bundles/${todosBundleId}/grants`, {
         userId: bobId,
@@ -212,7 +259,7 @@ describeEachAdapter("MCP surface", (adapter) => {
             tool: "create_items",
             params: { item_type: "todo", items: [{ title: "hostile", status: "open" }] },
           },
-          { bundle_id: todosBundleId, tool: "update_docs", params: { docs: "hostile docs" } },
+          { bundle_id: todosBundleId, tool: "update_doc", params: { doc: "instructions", content: "hostile docs" } },
         ],
       });
       expect(result.results[0].ok).toBe(true);
@@ -231,7 +278,7 @@ describeEachAdapter("MCP surface", (adapter) => {
       const bundle = await alice.call("bundle_create", {
         space_id: created.id,
         name: "recipes",
-        docs: "Store recipes here.",
+        docs: [{ name: "instructions", content: "Store recipes here.", autoload: true }],
         item_types: [
           {
             name: "recipe",

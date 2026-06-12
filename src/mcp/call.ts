@@ -8,7 +8,7 @@ import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import * as bundlesCore from "../core/bundles.js";
-import * as docsCore from "../core/docs.js";
+import * as bundleDocsCore from "../core/bundleDocs.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as hooksCore from "../core/hooks.js";
@@ -116,16 +116,43 @@ export const secondTier: Record<string, SecondTierTool> = {
     }),
   },
   read_docs: {
-    description: "Return the bundle's docs (also returned by load_bundle). No params.",
+    description:
+      "Read bundle doc content. Params: refs? (array of doc ids or names; omit to read every doc). load_bundle lists what exists and inlines the autoloaded ones — use this for the rest.",
     capability: "(bundle read access)",
-    handler: async (env) => ({ result: await docsCore.readDocs(env.db, env.userId, env.bundleId) }),
+    handler: async (env, params) => ({
+      result: { data: await bundleDocsCore.readDocs(env.db, env.userId, env.bundleId, params.refs as string[] | undefined) },
+    }),
   },
-  update_docs: {
-    description: "Replace the bundle's docs. Params: docs (string).",
+  create_doc: {
+    description:
+      "Create a named doc in the bundle. Set autoload: true for binding operating instructions that load_bundle should always return in full. Params: name, content?, autoload?.",
     capability: "edit_docs",
     handler: async (env, params) => ({
-      result: await docsCore.updateDocs(env.db, env.userId, env.bundleId, String(params.docs ?? "")),
+      result: await bundleDocsCore.createDoc(env.db, env.userId, env.bundleId, {
+        name: String(params.name ?? ""),
+        content: params.content as string | undefined,
+        autoload: params.autoload as boolean | undefined,
+      }),
     }),
+  },
+  update_doc: {
+    description: "Update a doc. Params: doc (name or id), name?, content?, autoload?.",
+    capability: "edit_docs",
+    handler: async (env, params) => ({
+      result: await bundleDocsCore.updateDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""), {
+        name: params.name as string | undefined,
+        content: params.content as string | undefined,
+        autoload: params.autoload as boolean | undefined,
+      }),
+    }),
+  },
+  delete_doc: {
+    description: "Delete a doc. Params: doc (name or id).",
+    capability: "edit_docs",
+    handler: async (env, params) => {
+      await bundleDocsCore.deleteDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""));
+      return { result: { deleted: true } };
+    },
   },
   list_files: {
     description: "List the bundle's file records (finalized files: id, name, mime type, size). No params.",

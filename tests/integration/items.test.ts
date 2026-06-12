@@ -41,7 +41,7 @@ describeEachAdapter("EAV items", (adapter) => {
     const space = await createSpace(db, userId, { name: "Work" });
     const bundle = await createBundle(db, userId, space.id, {
       name: "todos",
-      docs: "Track todos.",
+      docs: [{ name: "instructions", content: "Track todos.", autoload: true }],
       itemTypes: [
         {
           name: "todo",

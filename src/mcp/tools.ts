@@ -19,6 +19,7 @@ import {
 } from "../core/bundles.js";
 import { effectiveCapabilities } from "../core/capabilities.js";
 import { YapError } from "../core/errors.js";
+import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
 import { listHooksUnchecked } from "../core/hooks.js";
 import { listItemTypesUnchecked } from "../core/itemTypes.js";
@@ -198,7 +199,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load_bundle",
     description:
-      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (binding — read and follow them), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
+      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
     parameters: z.object({ bundle_ids: z.array(z.string()).min(1) }),
     annotations: { readOnlyHint: true, title: "Load bundles" },
     execute: async (args, ctx) => {
@@ -214,7 +215,15 @@ export function registerMcpTools(server: YapServer): void {
               space_id: bundleCtx.space.id,
               name: bundleCtx.bundle.name,
               description: bundleCtx.bundle.description,
-              docs: bundleCtx.bundle.docs,
+              docs: await (async () => {
+                const all = await bundleDocsCore.listDocsUnchecked(db, bundleId);
+                return {
+                  autoloaded: all
+                    .filter((d) => d.autoload === 1)
+                    .map((d) => ({ name: d.name, content: d.content })),
+                  available: all.map((d) => ({ id: d.id, name: d.name, autoload: d.autoload === 1 })),
+                };
+              })(),
               role: await effectiveCapabilities(db, userId, bundleCapabilityCtx(bundleCtx)),
               item_types: (await listItemTypesUnchecked(db, bundleId)).map((t) => ({
                 id: t.id,
@@ -379,7 +388,7 @@ Input format:
 - space_id: target space id (you need the create_bundles capability there)
 - name: bundle name (required)
 - description: one-line summary used for discovery
-- docs: the bundle's operating instructions (agents must follow these)
+- docs: named markdown docs, [{ name, content?, autoload? }] — set autoload: true for operating instructions agents must always see; leave it off for reference material loaded on demand
 - item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required?, multi?, config? }] }
 
 Datatypes: text, number, boolean, date, plus item (a reference to another item in this bundle, item://<id>) and file (a reference to a finalized file, file://<id>). A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. config declares constraints, enforced on every write: text {pattern}; number {min, max, decimals} (decimals default 2, out-of-precision writes rejected); item {itemType} (pin the referent's type); any multi field {minItems, maxItems}. Properties can be renamed/added/removed later without touching stored data.`,
@@ -387,7 +396,9 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
       space_id: z.string(),
       name: z.string(),
       description: z.string().optional(),
-      docs: z.string().optional(),
+      docs: z
+        .array(z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }))
+        .optional(),
       item_types: z
         .array(
           z.object({
