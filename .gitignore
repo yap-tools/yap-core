@@ -7,3 +7,6 @@ data/
 *.db-shm
 .DS_Store
 .env
+
+# Local planning scratch — not part of the published repo
+docs/superpowers/

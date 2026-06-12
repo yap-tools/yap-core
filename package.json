@@ -4,6 +4,23 @@
   "description": "Yap: API-first, self-hosted, navigable context for AI agents over MCP and REST.",
   "type": "module",
   "license": "MIT",
+  "author": "Troels Abrahamsen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yap-tools/yap-core.git"
+  },
+  "homepage": "https://github.com/yap-tools/yap-core#readme",
+  "bugs": {
+    "url": "https://github.com/yap-tools/yap-core/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "context",
+    "self-hosted",
+    "oauth"
+  ],
   "engines": {
     "node": ">=22"
   },

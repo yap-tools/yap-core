@@ -1,4 +1,20 @@
-# Yap
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="Yap" width="260">
+  </picture>
+</p>
+
+<p align="center">
+  <strong>Navigable context for AI agents — self-hosted, API-first, MCP-native.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/yap-tools/yap-core/actions/workflows/ci.yml"><img src="https://github.com/yap-tools/yap-core/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
+
+---
 
 Yap is an API-first, self-hosted, open-source system for building **navigable
 contexts** that any AI agent can connect to over MCP. There is no UI: a REST
@@ -234,3 +250,18 @@ SQLite/Postgres portability promise. Architecture rules: all domain logic
 lives in `src/core/`; the REST routes and MCP tools are thin transports over
 it; storage is reached only through the adapter layers (`src/db/`,
 `src/blob/` — Drizzle and FlyDrive live there, never inline in domain code).
+
+The founding design document — vocabulary, data model, and the reasoning
+behind the architecture — lives in [`yap-brief.md`](yap-brief.md).
+
+## Contributing
+
+Issues and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules (short version: tests
+green on both database matrices, domain logic stays in `src/core/`). For
+anything security-sensitive, follow [SECURITY.md](SECURITY.md) instead of
+opening a public issue.
+
+## License
+
+[MIT](LICENSE)
