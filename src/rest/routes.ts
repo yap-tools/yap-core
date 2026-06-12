@@ -12,9 +12,11 @@ import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
+import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as docsCore from "../core/docs.js";
-import { YapError, invalid } from "../core/errors.js";
+import { YapError, invalid, unauthorized } from "../core/errors.js";
+import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as hooksCore from "../core/hooks.js";
@@ -26,10 +28,10 @@ import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import { headerSafeFilename } from "../core/util.js";
 import * as usersCore from "../core/users.js";
-import { verifyToken } from "../crypto.js";
+import { OAUTH_ACCESS_TOKEN_PREFIX, verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
 import { buildOriginPage } from "../widgets/pages.js";
-import { requireSysadmin, requireUser } from "./auth.js";
+import { bearerFrom, requireSysadmin, requireUser } from "./auth.js";
 
 type Handler = (c: Context) => Promise<Response>;
 
@@ -82,6 +84,15 @@ export function registerRestRoutes(server: YapServer): void {
     (fn: Handler) =>
     async (c: Context): Promise<Response> => {
       try {
+        // OAuth-token lane: resolve the delegation up front and run the
+        // handler inside its scope context, so capability resolution deep in
+        // core sees the clamp. The key lane runs unscoped, exactly as before.
+        const bearer = bearerFrom(c);
+        if (bearer?.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
+          const tokenAuth = await oauthCore.authenticateToken(db, bearer);
+          if (!tokenAuth) throw unauthorized("invalid, expired, or revoked access token");
+          return await runWithTokenAuth(tokenAuth, () => fn(c));
+        }
         return await fn(c);
       } catch (err) {
         if (err instanceof YapError) {
@@ -169,6 +180,25 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
       await keysCore.deleteKey(db, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- Connected apps (OAuth grants, self) -----------------------------------
+
+  app.get(
+    "/v1/oauth/grants",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      return c.json({ data: await oauthCore.listUserGrants(db, userId) });
+    }),
+  );
+
+  app.delete(
+    "/v1/oauth/grants/:id",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      await oauthCore.revokeUserGrant(db, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
   );

@@ -30,6 +30,10 @@ const ALL_TABLES = [
   "grants",
   "bundles",
   "spaces",
+  "oauth_tokens",
+  "oauth_codes",
+  "oauth_grants",
+  "oauth_clients",
   "access_keys",
   "users",
 ];

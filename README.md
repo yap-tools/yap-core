@@ -166,6 +166,30 @@ in one bundle and not its sibling, with the deciding row auditable either
 way. Personal spaces accept no grants; their owner implicitly holds all
 capabilities.
 
+## OAuth (connecting apps)
+
+Every instance is its own **OAuth 2.1 authorization server** — no central
+identity service. Access keys stay the root credential; tokens are
+delegations of a key, issued through authorization code + PKCE with dynamic
+client registration (RFC 7591) and discovery (RFC 8414/9728), so a compliant
+MCP client connects with a standard authorize prompt and zero manual config.
+The authorize screen — served by Core itself — authenticates by access key
+(Core has no passwords) and binds the grant to that key: revoking the key
+revokes every delegation made with it. Tokens are opaque, hashed at rest,
+short-lived, and renewed by rotating refresh tokens (reuse kills the grant).
+
+A token's scope is `role:admin | role:member | role:read-only` plus optional
+`space:<id>` / `bundle:<id>` restrictions; every authorization resolves as
+*live grants ∧ scope*, so a delegation can never out-power the key behind it
+and role changes apply to outstanding tokens immediately. The default
+(unrequested) scope is `member`: content work, but no credential, role, or
+space management — minting keys or managing connected apps over the token
+lane requires `role:admin`. Connected apps are listed and revocable at
+`/v1/oauth/grants`, on the self-served `/oauth/connections` page, and via
+RFC 7009 `/oauth/revoke`. Both lanes — keys and
+tokens — work on every REST and MCP endpoint. OAuth needs `YAP_BASE_URL` to
+be the instance's externally reachable origin (https except on loopback).
+
 ## Files, hooks, widgets
 
 - **Files** upload in three phases (request → direct-to-storage upload →

@@ -157,6 +157,78 @@ export const hooks = sqliteTable("hooks", {
   updatedAt: text("updated_at").notNull(),
 });
 
+/** OAuth clients (RFC 7591 dynamic registration). Public clients only — no
+ * secret column by design; PKCE is the proof of possession. */
+export const oauthClients = sqliteTable("oauth_clients", {
+  id: text("id").primaryKey(), // the client_id
+  name: text("name").notNull().default(""),
+  redirectUris: text("redirect_uris").notNull(), // JSON string array
+  createdAt: text("created_at").notNull(),
+});
+
+/** Pending authorization codes: single-use, short-lived, stored hashed. */
+export const oauthCodes = sqliteTable(
+  "oauth_codes",
+  {
+    id: text("id").primaryKey(),
+    codeHash: text("code_hash").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => accessKeys.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(), // JSON TokenScope
+    codeChallenge: text("code_challenge").notNull(), // PKCE S256
+    redirectUri: text("redirect_uri").notNull(),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => [uniqueIndex("oauth_codes_code_hash_idx").on(t.codeHash)],
+);
+
+/** One row per user↔client consent — the "connected apps" view. key_id binds
+ * the grant to the access key presented at the authorize screen so revoking
+ * that key kills the grant (and, via FK cascade, its tokens). */
+export const oauthGrants = sqliteTable(
+  "oauth_grants",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => accessKeys.id, { onDelete: "cascade" }),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(), // JSON TokenScope
+    createdAt: text("created_at").notNull(),
+    lastUsedAt: text("last_used_at").notNull(),
+  },
+  (t) => [index("oauth_grants_user_idx").on(t.userId), index("oauth_grants_key_idx").on(t.keyId)],
+);
+
+/** Access/refresh tokens, stored hashed. Rotated refresh tokens keep their
+ * row (revoked_at set) so replay of a rotated token is detectable. */
+export const oauthTokens = sqliteTable(
+  "oauth_tokens",
+  {
+    id: text("id").primaryKey(),
+    tokenHash: text("token_hash").notNull(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => oauthGrants.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(), // 'access' | 'refresh'
+    expiresAt: text("expires_at").notNull(),
+    revokedAt: text("revoked_at"),
+  },
+  (t) => [uniqueIndex("oauth_tokens_token_hash_idx").on(t.tokenHash), index("oauth_tokens_grant_idx").on(t.grantId)],
+);
+
 export const userDocs = sqliteTable("user_docs", {
   id: text("id").primaryKey(),
   userId: text("user_id")

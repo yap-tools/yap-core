@@ -14,6 +14,7 @@
 import { and, eq, inArray, or } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
+import { currentTokenAuth, type TokenScope } from "./authScope.js";
 import { forbidden } from "./errors.js";
 
 export const CONTENT_CAPABILITIES = [
@@ -45,7 +46,34 @@ export interface GrantRow {
 export type Decision =
   | { allowed: true; decidedBy: "personal_owner" }
   | { allowed: boolean; decidedBy: { grantId: string; level: "bundle" | "space"; effect: Effect } }
-  | { allowed: false; decidedBy: "default_deny" };
+  | { allowed: false; decidedBy: "default_deny" }
+  | { allowed: false; decidedBy: "token_scope" };
+
+/** Capability masks behind the spec's named roles. Admin is the absence of a
+ * mask: full delegation, clamped only by the user's live grants. */
+const ROLE_MASKS: Record<string, readonly string[] | null> = {
+  admin: null,
+  member: [...CONTENT_CAPABILITIES, "create_bundles", "edit_bundles"],
+  "read-only": ["read_items", "read_files"],
+};
+
+/**
+ * Does the request's token scope (if any) permit this capability on this
+ * resource? Evaluated ahead of grant resolution AND ahead of the
+ * personal-owner shortcut — a read-only token stays read-only even in the
+ * holder's own personal space. `allowed = liveGrants ∧ mask ∧ restriction`.
+ */
+export function scopeAllows(scope: TokenScope, capability: string, ctx: CapabilityContext): boolean {
+  const mask = ROLE_MASKS[scope.role];
+  if (mask === undefined) return false; // unknown role carries no authority
+  if (mask !== null && !mask.includes(capability)) return false;
+  if (scope.spaces?.length || scope.bundles?.length) {
+    const inSpaces = scope.spaces?.includes(ctx.space.id) ?? false;
+    const inBundles = (ctx.bundleId !== undefined && scope.bundles?.includes(ctx.bundleId)) ?? false;
+    if (!inSpaces && !inBundles) return false;
+  }
+  return true;
+}
 
 /** Pure most-specific-wins evaluation over already-fetched grant rows. */
 export function decide(bundleRows: GrantRow[], spaceRows: GrantRow[]): Decision {
@@ -81,6 +109,10 @@ export async function resolveCapability(
   capability: string,
   ctx: CapabilityContext,
 ): Promise<Decision> {
+  const tokenScope = currentTokenAuth()?.scope;
+  if (tokenScope && !scopeAllows(tokenScope, capability, ctx)) {
+    return { allowed: false, decidedBy: "token_scope" };
+  }
   if (ctx.space.personal && ctx.space.ownerId === userId) {
     return { allowed: true, decidedBy: "personal_owner" };
   }
@@ -125,8 +157,9 @@ export async function effectiveCapabilities(
   userId: string,
   ctx: CapabilityContext,
 ): Promise<string[]> {
+  const tokenScope = currentTokenAuth()?.scope;
   if (ctx.space.personal && ctx.space.ownerId === userId) {
-    return [...KNOWN_CAPABILITIES];
+    return KNOWN_CAPABILITIES.filter((cap) => !tokenScope || scopeAllows(tokenScope, cap, ctx)).sort();
   }
   const { grants } = db.tables;
   const resourceIds = ctx.bundleId ? [ctx.space.id, ctx.bundleId] : [ctx.space.id];
@@ -143,6 +176,7 @@ export async function effectiveCapabilities(
   const caps = new Set<string>([...KNOWN_CAPABILITIES, ...rows.map((r) => r.capability)]);
   const result: string[] = [];
   for (const cap of caps) {
+    if (tokenScope && !scopeAllows(tokenScope, cap, ctx)) continue;
     const capRows = rows.filter((r) => r.capability === cap);
     const decision = decide(
       capRows.filter((r) => r.resourceType === "bundle" && r.resourceId === ctx.bundleId),

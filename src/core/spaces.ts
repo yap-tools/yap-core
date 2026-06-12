@@ -9,6 +9,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
+import { assertAccountWrite } from "./authScope.js";
 import { KNOWN_CAPABILITIES, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
@@ -31,6 +32,9 @@ export async function createSpace(
   userId: string,
   input: { name: string; description?: string; keywords?: string; context?: string },
 ): Promise<Space> {
+  // Space creation is account-level (no capability gate), so the token-scope
+  // clamp has to be asserted here rather than in capability resolution.
+  assertAccountWrite();
   const name = input.name?.trim();
   if (!name) throw invalid("space name is required");
   const { spaces, grants } = db.tables;

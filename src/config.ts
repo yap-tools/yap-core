@@ -46,6 +46,9 @@ export interface YapConfig {
   uploadTtlSeconds: number;
   downloadTtlSeconds: number;
   widgetTokenTtlSeconds: number;
+  oauthAccessTokenTtlSeconds: number;
+  oauthRefreshTokenTtlSeconds: number;
+  oauthCodeTtlSeconds: number;
   maxFileSizeBytes: number;
   /** "*" allows all MIME types. */
   mimeAllowlist: string[] | "*";
@@ -158,6 +161,9 @@ export function loadConfig(env: Env = process.env): YapConfig {
     uploadTtlSeconds: intEnv(env, "YAP_UPLOAD_TTL_SECONDS", 600),
     downloadTtlSeconds: intEnv(env, "YAP_DOWNLOAD_TTL_SECONDS", 300),
     widgetTokenTtlSeconds: intEnv(env, "YAP_WIDGET_TOKEN_TTL_SECONDS", 600),
+    oauthAccessTokenTtlSeconds: intEnv(env, "YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", 3600),
+    oauthRefreshTokenTtlSeconds: intEnv(env, "YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS", 30 * 24 * 3600),
+    oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
     hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000),

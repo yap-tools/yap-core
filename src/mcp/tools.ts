@@ -7,6 +7,7 @@
 import { UserError } from "fastmcp";
 import { z } from "zod";
 
+import { runWithTokenAuth } from "../core/authScope.js";
 import {
   DATATYPES,
   getBundleContext,
@@ -80,6 +81,20 @@ export function registerMcpTools(server: YapServer): void {
   const { mcp, db, config, blob } = server;
   const env = { db, config, blob, baseUrl: config.baseUrl };
 
+  // Every tool executes inside the session's token-scope context (if the
+  // session authenticated with an OAuth token) so capability resolution deep
+  // in core sees the delegation clamp. Key-lane sessions run unscoped.
+  const rawAddTool = mcp.addTool.bind(mcp);
+  const addTool: typeof mcp.addTool = (tool) =>
+    rawAddTool({
+      ...tool,
+      execute: (args, ctx) => {
+        const tokenAuth = ctx.session?.tokenAuth;
+        const run = () => tool.execute(args, ctx);
+        return tokenAuth ? runWithTokenAuth(tokenAuth, run) : run();
+      },
+    });
+
   // ---- The widget registry: every widget is a ui:// resource -------------------
 
   for (const def of Object.values(WIDGETS)) {
@@ -96,7 +111,7 @@ export function registerMcpTools(server: YapServer): void {
 
   // ---- Discovery & context ---------------------------------------------------
 
-  mcp.addTool({
+  addTool({
     name: "load",
     description:
       "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or hooks, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → call. Run the chain silently — do not narrate loading calls.",
@@ -149,7 +164,7 @@ export function registerMcpTools(server: YapServer): void {
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "load_space",
     description:
       "Step 2 of the discovery chain. Given a space id, returns the space's context (operator instructions to follow), the bundles it contains (id, name, description — pick the ones likely to hold the answer), and your role in the space. Next: load_bundle with the bundle ids you intend to use. Do not narrate this call.",
@@ -180,7 +195,7 @@ export function registerMcpTools(server: YapServer): void {
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "load_bundle",
     description:
       "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (binding — read and follow them), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
@@ -238,7 +253,7 @@ export function registerMcpTools(server: YapServer): void {
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "help",
     description:
       "Reference documentation for core Yap concepts (spaces, bundles, items, hooks, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
@@ -263,7 +278,7 @@ export function registerMcpTools(server: YapServer): void {
       .min(1),
   });
 
-  mcp.addTool({
+  addTool({
     name: "call",
     description:
       `The single execution verb: a batch of second-tier operations in one round trip. You MUST call load_bundle on a bundle before calling into it — its docs and schemas are needed to call correctly. Each call names a tool, its params, and a target — a bundle (provide bundle_id) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Every tool is gated by the capability in its spec (returned by load) — check it against your role before calling; on a denial, tell the user which capability they lack rather than retrying. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items". Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
@@ -305,7 +320,7 @@ export function registerMcpTools(server: YapServer): void {
 
   // ---- Display -------------------------------------------------------------------
 
-  mcp.addTool({
+  addTool({
     name: "show_widget",
     description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those.`,
     parameters: z.object({
@@ -335,7 +350,7 @@ export function registerMcpTools(server: YapServer): void {
 
   // ---- Authoring -----------------------------------------------------------------
 
-  mcp.addTool({
+  addTool({
     name: "space_create",
     description:
       "Create a new space owned by you (an account-level right — every user may create spaces). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
@@ -356,7 +371,7 @@ export function registerMcpTools(server: YapServer): void {
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "bundle_create",
     description: `Create a bundle — docs, item-types, and initial structure — and install it into a space, in one validated step. Invalid input is rejected with actionable errors and nothing is applied.
 
@@ -408,7 +423,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
 
   // ---- User docs (account-level; require load but not load_space) ---------------
 
-  mcp.addTool({
+  addTool({
     name: "list_user_docs",
     description: "List your user docs (id, name, autoload flag) — account-level docs available across all your spaces.",
     annotations: { readOnlyHint: true, title: "List user docs" },
@@ -423,7 +438,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "load_user_docs",
     description: "Full content of specific user docs, by id or name. Params: refs (array of ids or names).",
     parameters: z.object({ refs: z.array(z.string()).min(1) }),
@@ -438,7 +453,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "create_user_doc",
     description:
       "Create a user doc. Set autoload: true to have it surface at the start of every session (via load). Params: name, content?, autoload?.",
@@ -457,7 +472,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "update_user_doc",
     description: "Update a user doc's name, content, or autoload flag. Params: id, name?, content?, autoload?.",
     parameters: z.object({
@@ -477,7 +492,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
     },
   });
 
-  mcp.addTool({
+  addTool({
     name: "delete_user_doc",
     description: "Delete a user doc by id.",
     parameters: z.object({ id: z.string() }),

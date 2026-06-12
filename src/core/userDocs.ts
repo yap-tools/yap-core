@@ -7,6 +7,7 @@
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
+import { assertAccountWrite } from "./authScope.js";
 import { invalid, notFound } from "./errors.js";
 import { newId, nowIso } from "./util.js";
 
@@ -27,6 +28,7 @@ export async function createUserDoc(
   userId: string,
   input: { name: string; content?: string; autoload?: boolean },
 ): Promise<UserDoc> {
+  assertAccountWrite();
   const name = input.name?.trim();
   if (!name) throw invalid("user doc name is required");
   const { userDocs } = db.tables;
@@ -96,6 +98,7 @@ export async function updateUserDoc(
   docId: string,
   patch: { name?: string; content?: string; autoload?: boolean },
 ): Promise<UserDoc> {
+  assertAccountWrite();
   await getUserDoc(db, userId, docId);
   if (patch.name !== undefined && !patch.name.trim()) throw invalid("user doc name cannot be empty");
   const { userDocs } = db.tables;
@@ -112,6 +115,7 @@ export async function updateUserDoc(
 }
 
 export async function deleteUserDoc(db: Db, userId: string, docId: string): Promise<void> {
+  assertAccountWrite();
   await getUserDoc(db, userId, docId);
   const { userDocs } = db.tables;
   await db.client.delete(userDocs).where(eq(userDocs.id, docId));

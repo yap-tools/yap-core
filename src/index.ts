@@ -31,6 +31,18 @@ if (!process.env.YAP_BASE_URL && boundPublic) {
   );
 }
 
+// baseUrl doubles as the OAuth issuer identity. OAuth 2.1 requires TLS except
+// on loopback, so a plain-http issuer on a reachable host means remote OAuth
+// clients (Claude included) will refuse or leak the flow. Warn, don't refuse —
+// LAN and tunnel setups are legitimate during bring-up.
+const issuer = new URL(config.baseUrl);
+if (issuer.protocol === "http:" && !["127.0.0.1", "[::1]", "::1", "localhost"].includes(issuer.hostname)) {
+  logger.warn(
+    `YAP_BASE_URL (${config.baseUrl}) is plain http on a non-loopback host; OAuth requires https for remote ` +
+      `clients. Put a TLS-terminating proxy in front and set YAP_BASE_URL to its https origin.`,
+  );
+}
+
 const server = buildServer(config, db, blob, logger);
 await server.start();
 logger.info(`yap listening on ${config.baseUrl} (REST under /v1, MCP at /mcp)`);

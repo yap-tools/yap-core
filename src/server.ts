@@ -13,17 +13,23 @@ import { FastMCP } from "fastmcp";
 
 import type { BlobStore } from "./blob/index.js";
 import type { YapConfig } from "./config.js";
-import { constantTimeEqual } from "./crypto.js";
+import { OAUTH_ACCESS_TOKEN_PREFIX, constantTimeEqual } from "./crypto.js";
+import type { TokenAuth } from "./core/authScope.js";
 import { authenticateKey } from "./core/keys.js";
+import { authenticateToken } from "./core/oauth.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
 import { registerMcpTools } from "./mcp/tools.js";
 import { createEdgeServer, getFreeLoopbackPort } from "./rest/edge.js";
+import { registerOAuthRoutes } from "./rest/oauth.js";
 import { registerRestRoutes } from "./rest/routes.js";
 
-/** MCP session auth payload: identity only — permissions come from grants. */
+/** MCP session auth payload: identity (plus, on the OAuth lane, the token's
+ * delegation) — permissions always come from grants. */
 export interface SessionAuth extends Record<string, unknown> {
   userId: string;
+  /** Present on token-authenticated sessions; tools run inside its scope. */
+  tokenAuth?: TokenAuth;
 }
 
 export interface YapServer {
@@ -37,8 +43,11 @@ export interface YapServer {
 }
 
 /**
- * MCP authentication: bearer access key preferred, with a ?key= query
- * fallback for URL-only clients. The sysadmin key never authenticates MCP.
+ * MCP authentication, both credential lanes: a bearer access key (with a
+ * ?key= query fallback for URL-only clients) or an OAuth access token. 401s
+ * carry the RFC 9728 resource-metadata pointer — that header is what lets a
+ * compliant MCP client discover the authorize flow with no manual config.
+ * The sysadmin key never authenticates MCP.
  */
 async function authenticateMcp(
   request: { headers: Record<string, string | string[] | undefined>; url?: string },
@@ -48,7 +57,10 @@ async function authenticateMcp(
   const deny = (message: string): never => {
     throw new Response(JSON.stringify({ error: { code: "unauthorized", message } }), {
       status: 401,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "www-authenticate": `Bearer resource_metadata="${config.baseUrl}/.well-known/oauth-protected-resource/mcp"`,
+      },
     });
   };
 
@@ -63,9 +75,14 @@ async function authenticateMcp(
     const url = new URL(request.url, "http://internal");
     key = url.searchParams.get("key");
   }
-  if (!key) return deny("access key required (Authorization: Bearer or ?key= fallback)");
+  if (!key) return deny("access key or access token required (Authorization: Bearer or ?key= fallback)");
   if (constantTimeEqual(key, config.sysadminKey)) {
     return deny("the sysadmin key cannot be used over MCP");
+  }
+  if (key.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
+    const tokenAuth = await authenticateToken(db, key);
+    if (!tokenAuth) return deny("invalid, expired, or revoked access token");
+    return { userId: tokenAuth.userId, tokenAuth };
   }
   const userId = await authenticateKey(db, key);
   if (!userId) return deny("invalid or revoked access key");
@@ -132,6 +149,7 @@ Stored references are opaque — resolve before showing them to a user: file://{
   };
 
   registerRestRoutes(server);
+  registerOAuthRoutes(server);
   registerMcpTools(server);
 
   return server;

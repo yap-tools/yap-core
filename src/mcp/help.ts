@@ -68,6 +68,13 @@ bundles) decide what you may do. A space grant is the baseline; bundle-level
 grants override per capability. Checks are per-capability (read_items,
 edit_items, edit_docs, read_files, edit_files, fire_hooks, ...).
 
+Sessions may also be authenticated by an OAuth token — a delegation of an
+access key, possibly narrowed to a role (admin | member | read-only) and/or
+specific spaces or bundles. A narrowed session sees correspondingly smaller
+role lists from load, and denied calls report the missing capability; tell
+the user the authorization's scope doesn't cover the action (they can
+reconnect the app with a wider scope) rather than retrying.
+
 ## Reference URIs
 
 Stored references stay opaque — resolve before showing them to a user:

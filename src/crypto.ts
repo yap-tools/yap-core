@@ -14,9 +14,23 @@ import {
 } from "node:crypto";
 
 export const ACCESS_KEY_PREFIX = "yap_";
+/** OAuth access-token prefix — distinct so the auth layer can route lanes. */
+export const OAUTH_ACCESS_TOKEN_PREFIX = "yap_at_";
+/** OAuth refresh-token prefix. */
+export const OAUTH_REFRESH_TOKEN_PREFIX = "yap_rt_";
 
 export function generateAccessKey(): string {
   return ACCESS_KEY_PREFIX + randomBytes(32).toString("base64url");
+}
+
+export function generateSecret(prefix = ""): string {
+  return prefix + randomBytes(32).toString("base64url");
+}
+
+/** PKCE S256: base64url(sha256(verifier)) must equal the stored challenge. */
+export function verifyPkceS256(verifier: string, challenge: string): boolean {
+  const computed = createHash("sha256").update(verifier, "utf8").digest("base64url");
+  return constantTimeEqual(computed, challenge);
 }
 
 export function hashKey(key: string): string {
