@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * The `yap` command. No arguments starts the server; `init` scaffolds config
- * and keys under the yap home (~/.yap or YAP_HOME). Kept dependency-free —
- * two subcommands don't justify an argument parser.
+ * The `yap` command: a global CLI that creates instances (vendoring the
+ * server from GitHub into the instance directory), runs them, and manages
+ * them over their own HTTP API. Dependency-free by design — the command
+ * surface is a switch, arguments are node:util parseArgs.
  */
 import { createRequire } from "node:module";
 
-import { initInstance } from "./cli/init.js";
+import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
+import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
+import { cmdCreate, cmdInit, cmdService, cmdUpgrade } from "./cli/setup.js";
+import { CliError } from "./cli/util.js";
 
 // `yap … | head` closes stdout early; treat that as a normal end, not a crash.
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {
@@ -14,66 +18,105 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const USAGE = `Usage: yap [command]
+const USAGE = `Usage: yap <command>
 
-Commands:
-  (none), serve   Serve the instance in the current directory (REST /v1, MCP /mcp)
-  init            Scaffold a Yap instance here: .env with generated keys + data/
-  version         Print the yap version
-  help            Show this message
+An instance is a directory; run yap inside it.
 
-An instance is a directory. Config comes from the environment, with an env
-file as fallback: YAP_ENV_FILE if set, else ./.env. Run one instance per
-directory; give each its own YAP_PORT.`;
+Instance:
+  init [--version v] [--port n] [--no-install]   Scaffold here + install the server from GitHub
+  create <dir> [--user n] [--version v] [--port n]   mkdir + init + start + user create, in one go
+  upgrade [version] [--no-restart]    Reinstall this instance's server, restart if running
 
-const command = process.argv[2];
-switch (command) {
-  case undefined:
-  case "serve": {
-    await (await import("./serve.js")).serve();
-    break;
-  }
-  case "init": {
-    const result = initInstance(process.cwd());
-    if (!result.created) {
-      console.error(`yap: ${result.envPath} already exists — not overwriting.`);
-      console.error("Edit it directly, or remove it and run `yap init` again to start fresh.");
-      process.exit(1);
+Run:
+  (none), serve                       Serve in the foreground (Ctrl+C stops)
+  start | stop | status               Detached background process (.yap/yap.pid)
+  logs [-n N] [-f]                    Show .yap/logs/yap.log
+  service install|uninstall [--name]  Generate a systemd/launchd unit for real supervision
+
+Manage (over the instance API, authenticated via .yap/credentials.json):
+  user create <name>                  Create a user (sysadmin lane); saves the CLI credential
+  api <METHOD> </path> [body|-] [--sysadmin]   Raw API passthrough — the full /v1 surface
+  users list|delete                   keys list|create|rotate|delete
+  spaces list|show|create|delete      bundles list <spaceId> | show <id>
+  items query <bundleId> --type t [--filters json] | get <bundleId> <ids>
+  connections list | revoke <id>      (--json on any list for raw output)
+
+  version | help`;
+
+const [command, ...rest] = process.argv.slice(2);
+const dir = process.cwd();
+
+try {
+  switch (command) {
+    case undefined:
+    case "serve":
+      await cmdServe(dir);
+      break;
+    case "init":
+      await cmdInit(dir, rest);
+      break;
+    case "create":
+      await cmdCreate(rest);
+      break;
+    case "upgrade":
+      await cmdUpgrade(dir, rest);
+      break;
+    case "start":
+      await cmdStart(dir);
+      break;
+    case "stop":
+      await cmdStop(dir);
+      break;
+    case "status":
+      await cmdStatus(dir);
+      break;
+    case "logs":
+      await cmdLogs(dir, rest);
+      break;
+    case "service":
+      await cmdService(dir, rest);
+      break;
+    case "user": {
+      if (rest[0] !== "create") throw new CliError("usage: yap user create <name>");
+      await cmdUserCreate(dir, rest.slice(1));
+      break;
     }
-    console.log(`Scaffolded a Yap instance in this directory (.env with generated keys, data under ./data).`);
-    console.log("");
-    console.log(`Your sysadmin key (shown once here; it stays readable in the .env file):`);
-    console.log(`  ${result.sysadminKey}`);
-    console.log("");
-    console.log("Next steps:");
-    console.log("  yap                       # serve this instance on http://localhost:8787");
-    console.log("  curl -s -X POST localhost:8787/v1/users \\");
-    console.log(`    -H "Authorization: Bearer ${result.sysadminKey}" \\`);
-    console.log(`    -H "Content-Type: application/json" -d '{"name": "Ada"}'`);
-    console.log("");
-    console.log("The response includes a personal space and a one-time access key —");
-    console.log("connect any MCP client to http://localhost:8787/mcp with that key.");
-    break;
+    case "api":
+      await cmdApi(dir, rest);
+      break;
+    case "users":
+    case "keys":
+    case "spaces":
+    case "bundles":
+    case "items":
+    case "connections":
+      await cmdResource(dir, command, rest);
+      break;
+    case "version":
+    case "--version":
+    case "-v": {
+      // Resolves from src/ (tsx) and dist/ (built) alike — both sit one level
+      // below the package root.
+      const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
+      console.log(pkg.version);
+      break;
+    }
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(USAGE);
+      break;
+    default:
+      console.error(`yap: unknown command ${JSON.stringify(command)}`);
+      console.error("");
+      console.error(USAGE);
+      process.exit(1);
   }
-  case "version":
-  case "--version":
-  case "-v": {
-    // Resolves from src/ (tsx) and dist/ (built) alike — both sit one level
-    // below the package root.
-    const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
-    console.log(pkg.version);
-    break;
-  }
-  case "help":
-  case "--help":
-  case "-h": {
-    console.log(USAGE);
-    break;
-  }
-  default: {
-    console.error(`yap: unknown command ${JSON.stringify(command)}`);
-    console.error("");
-    console.error(USAGE);
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (err instanceof CliError || code?.startsWith("ERR_PARSE_ARGS")) {
+    console.error(`yap: ${(err as Error).message}`);
     process.exit(1);
   }
+  throw err;
 }

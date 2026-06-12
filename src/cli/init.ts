@@ -19,7 +19,7 @@ export interface InitResult {
   sysadminKey: string;
 }
 
-export function initInstance(dir: string): InitResult {
+export function initInstance(dir: string, options: { port?: string } = {}): InitResult {
   const envPath = join(dir, ".env");
   if (existsSync(envPath)) return { envPath, created: false, sysadminKey: "" };
 
@@ -42,19 +42,18 @@ YAP_SQLITE_PATH=./data/yap.db
 YAP_BLOB_FS_ROOT=./data/blobs
 
 # Give each instance on this machine its own port.
-# YAP_PORT=8787
+${options.port ? `YAP_PORT=${options.port}` : "# YAP_PORT=8787"}
 # Public origin for minted links and the OAuth issuer — set this when the
 # instance is reachable from other machines (https except on loopback).
 # YAP_BASE_URL=http://localhost:8787
 `;
   writeFileSync(envPath, content, { mode: 0o600 });
 
-  // Keys and data must never land in version control if the instance
-  // directory becomes a repo; node_modules covers a per-instance
-  // version-pinned install of yap itself.
+  // Keys, data, the CLI credential, and the vendored server must never land
+  // in version control if the instance directory becomes a repo.
   const gitignorePath = join(dir, ".gitignore");
   if (!existsSync(gitignorePath)) {
-    writeFileSync(gitignorePath, "# Yap instance state — keep keys and data out of version control\n.env\ndata/\nnode_modules/\n");
+    writeFileSync(gitignorePath, "# Yap instance state — keep keys and data out of version control\n.env\n.yap/\ndata/\nnode_modules/\n");
   }
 
   return { envPath, created: true, sysadminKey };

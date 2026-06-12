@@ -43,62 +43,80 @@ session start).
 
 ## Quickstart
 
-Install straight from GitHub — no registry involved (Node 22+; npm clones,
-builds, and links the `yap` command):
+Install the CLI once (Node 22+; straight from GitHub, no registry involved),
+then create an instance:
 
 ```sh
 npm install -g github:yap-tools/yap-core
 
 mkdir my-yap && cd my-yap
-yap init     # scaffolds this directory: .env with generated keys + data/
-yap          # serve the instance
+yap init                  # scaffold + install the server into this directory
+yap start                 # serve it in the background
+yap user create ada       # create your user; the CLI keeps the access key
 ```
 
-**An instance is a directory.** `yap init` writes a `.env` (your generated
-**sysadmin key** and master key — printed once, never overwritten) plus a
-`data/` folder for the database and files, and `yap` serves whichever
-instance directory it runs from. Run as many instances as you like — one
-directory each, each with its own keys, data, and `YAP_PORT`. Upgrade the
-shared CLI by re-running the install command, or pin a single instance to a
-release by installing locally inside it:
+Or all of that in one go: `yap create my-yap --user ada`.
 
-```sh
-cd my-yap
-npm install github:yap-tools/yap-core#v0.1.0
-npx yap      # prefers the local, pinned copy over the global one
-```
+**An instance is a directory.** `yap init` writes a `.env` (generated
+**sysadmin key** and master key — printed once, never overwritten), a `data/`
+folder for the database and files, and — the one network step — vendors the
+Yap server from GitHub into the directory's own `node_modules` at the latest
+release (`--version v0.1.0` to pin). The global `yap` is just the manager:
+`serve`/`start` always run *the directory's* copy, so every instance keeps
+its own version, keys, data, and port (`--port` at init). Run as many
+instances as you like — one directory each; `yap upgrade` moves a single
+instance forward when you choose.
 
-Running from a checkout works the same way — the repo root is just an
-instance directory:
-
-```sh
-npm install
-cp .env.example .env       # then fill in YAP_MASTER_KEY etc.
-npm run dev                # or: npm run build && npm start
-```
-
-Config comes from the environment, with an env file as fallback — `YAP_ENV_FILE`
-if set, else `./.env` (Node's built-in parser, no dependency). Real
-environment variables override file entries, so a deployment can inject
-secrets via the environment and leave the file for local dev.
+`yap user create` is the bootstrap: it reads the sysadmin key from `.env`,
+creates the user over the instance's own API, and stores the returned access
+key in `.yap/credentials.json` (0600). From then on the CLI — like every
+other client — is just an API consumer authenticated as that user. Connect
+any MCP client to `http://localhost:8787/mcp` with the same key as a bearer
+token (or `?key=` as a fallback for URL-only clients — bearer is preferred;
+query strings leak into logs, and Yap redacts keys from its own logs for
+exactly that reason).
 
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
 
-Provision a user (sysadmin key, REST only — never MCP):
+## The CLI
+
+Everything after bootstrap goes through the instance's HTTP API — the CLI
+never touches the database, so it has exactly the authority of the credential
+it presents. Run commands from inside the instance directory:
 
 ```sh
-curl -s -X POST localhost:8787/v1/users \
-  -H "Authorization: Bearer $YAP_SYSADMIN_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Ada"}'
+yap status                      # pid, health, server version
+yap logs -f                     # follow .yap/logs/yap.log
+yap spaces list                 # ergonomic commands (tables; --json for raw)
+yap keys rotate <id>
+yap connections list            # connected OAuth apps; revoke <grantId>
+yap api GET /v1/spaces          # raw passthrough — the entire /v1 surface
+yap api POST /v1/spaces '{"name": "Docs"}'
+yap users list                  # sysadmin-lane commands read .env on demand
 ```
 
-The response includes the user's **personal space** and a one-time **access
-key** (`yap_…`). Connect any MCP client to `http://localhost:8787/mcp` with
-that key as a bearer token (or `?key=` as a fallback for URL-only clients —
-bearer is preferred; query strings leak into logs, and Yap redacts keys from
-its own logs for exactly that reason).
+Three ways to run an instance, by how much you need it to survive:
+
+| | Verbs | Survives logout | Survives reboot/crash |
+|---|---|---|---|
+| Foreground | `yap` / `yap serve` | no | no |
+| Detached | `yap start` / `stop` | yes | no |
+| Supervised | `yap service install` | yes | yes |
+
+`yap service install` generates a systemd unit (Linux) or launchd plist
+(macOS) pointing at the instance directory and prints the activation
+commands — the OS owns supervision; the CLI deliberately is not a process
+manager. `yap upgrade [version]` reinstalls the vendored server and restarts
+a running instance.
+
+Running from a checkout: the repo root is itself an instance directory
+(`cp .env.example .env`, then `npm run dev` — serve runs in-process when no
+vendored server is present). Config comes from the environment, with an env
+file as fallback — `YAP_ENV_FILE` if set, else `./.env` (Node's built-in
+parser, no dependency). Real environment variables override file entries, so
+a deployment can inject secrets via the environment and leave the file for
+local dev.
 
 ## Configuration
 
