@@ -13,8 +13,10 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 - **Bundle** — the self-contained unit of stored context. Loading several
   bundles combines them for your session only; bundles are never merged in
   storage.
-- **Docs** — a bundle's operating instructions. They are binding: read them
-  via load_bundle and follow them while working in that bundle.
+- **Docs** — named markdown docs a bundle carries. Autoloaded ones are
+  binding operating instructions: returned in full by load_bundle, follow them
+  while working in that bundle. Other docs are available on demand via
+  read_docs.
 - **Item / item-type** — structured records conforming to per-bundle schemas.
   Properties are typed (text, number, boolean, date, plus item — a reference to
   another item in the same bundle, item://<id> — and file — a reference to a
@@ -43,11 +45,12 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
    the user. Autoloading user docs and the current time arrive here too.
 2. **load_space(space_id)** — the space's instructions and its bundles.
 3. **load_bundle(bundle_ids)** — required before calling into a bundle:
-   returns docs (follow them), item-type schemas, files, and hooks.
+   returns docs (autoloaded ones in full — follow them; list and fetch the rest
+   with read_docs), item-type schemas, files, and hooks.
 4. **call(space_id, calls)** — execute. Batch related operations in one
    round trip; each call succeeds or fails independently. A call targets a
    bundle (provide bundle_id) or the space (omit bundle_id). Second-tier tools:
-   items (query/get/create/update/delete), docs (read/update), files
+   items (query/get/create/update/delete), docs (read/create/update/delete), files
    (list_files, show_file, upload_request, upload_complete, delete_file),
    hooks (fire_hook), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles

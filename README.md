@@ -161,7 +161,7 @@ local dev.
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
 | `YAP_DB` | `sqlite` | `sqlite` or `postgres` |
 | `YAP_SQLITE_PATH` | `./data/yap.db` | SQLite database file |
-| `YAP_DATABASE_URL` | — | Postgres connection string (when `YAP_DB=postgres`) |
+| `YAP_DATABASE_URL` | — | Postgres connection string (when `YAP_DB=postgres`; requires Postgres 13+) |
 | `YAP_BLOB` | `fs` | `fs` or `s3` |
 | `YAP_BLOB_FS_ROOT` | `./data/blobs` | Local blob root |
 | `YAP_S3_BUCKET` / `YAP_S3_REGION` / `YAP_S3_ENDPOINT` / `YAP_S3_ACCESS_KEY_ID` / `YAP_S3_SECRET_ACCESS_KEY` / `YAP_S3_FORCE_PATH_STYLE` | — | S3-compatible storage (R2/GCS-interop/MinIO via endpoint) |
@@ -186,7 +186,8 @@ metadata and descending only into the relevant branch:
 - **`call`** → the single execution verb: a batch of second-tier operations,
   each targeting a bundle (`bundle_id`) or the call's space (omit it) and
   succeeding/failing independently. Data & content: `query_items`, `get_items`,
-  `create_items`, `update_items`, `delete_items`, `read_docs`, `update_docs`,
+  `create_items`, `update_items`, `delete_items`, `read_docs`, `create_doc`,
+  `update_doc`, `delete_doc`,
   `list_files`, `show_file`, `upload_request`, `upload_complete`, `delete_file`,
   `fire_hook`. Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
