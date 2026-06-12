@@ -251,9 +251,6 @@ lives in `src/core/`; the REST routes and MCP tools are thin transports over
 it; storage is reached only through the adapter layers (`src/db/`,
 `src/blob/` — Drizzle and FlyDrive live there, never inline in domain code).
 
-The founding design document — vocabulary, data model, and the reasoning
-behind the architecture — lives in [`yap-brief.md`](yap-brief.md).
-
 ## Contributing
 
 Issues and pull requests are welcome — see
