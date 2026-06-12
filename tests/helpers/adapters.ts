@@ -13,6 +13,8 @@ export interface Adapter {
   dialect: "sqlite" | "pg";
   /** Returns a migrated, empty database. Caller must close() it. */
   makeDb(): Promise<Db>;
+  /** Returns an unmigrated (schema-less) database. Caller must close() it. */
+  makeFreshDb(): Promise<Db>;
 }
 
 const PG_URL = process.env.YAP_TEST_PG_URL;
@@ -60,12 +62,25 @@ async function makeSqliteDb(): Promise<Db> {
   return db;
 }
 
+/** Schema-less database: sqlite gets a blank :memory: file; pg gets the shared
+ * database with every table (and migration bookkeeping) dropped. */
+async function makeFreshSqliteDb(): Promise<Db> {
+  return createDb({ dialect: "sqlite", path: ":memory:" });
+}
+
+async function makeFreshPgDb(url: string): Promise<Db> {
+  const db = await createDb({ dialect: "pg", url });
+  await db.dropAllTables();
+  pgMigrated = false; // a later makeDb must re-migrate
+  return db;
+}
+
 export function describeEachAdapter(name: string, fn: (adapter: Adapter) => void): void {
   describe(`${name} [sqlite]`, () => {
-    fn({ dialect: "sqlite", makeDb: makeSqliteDb });
+    fn({ dialect: "sqlite", makeDb: makeSqliteDb, makeFreshDb: makeFreshSqliteDb });
   });
   const pgDescribe = PG_URL ? describe : describe.skip;
   pgDescribe(`${name} [pg]`, () => {
-    fn({ dialect: "pg", makeDb: () => makePgDb(PG_URL!) });
+    fn({ dialect: "pg", makeDb: () => makePgDb(PG_URL!), makeFreshDb: () => makeFreshPgDb(PG_URL!) });
   });
 }
