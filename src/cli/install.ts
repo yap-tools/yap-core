@@ -11,11 +11,15 @@ import { join } from "node:path";
 import { CliError } from "./util.js";
 
 export const SERVER_PACKAGE = "yap-core";
-const SERVER_REPO = "github:yap-tools/yap-core";
+const RELEASES = "https://github.com/yap-tools/yap-core/releases";
 
-/** Latest release tag by default (npm resolves semver ranges against git tags). */
+/**
+ * Prebuilt release tarball, latest by default. Releases ship the packed
+ * package under the constant asset name yap-core.tgz, so no GitHub API call
+ * (or TypeScript toolchain on the operator's machine) is ever needed.
+ */
 export function installSpec(version?: string): string {
-  return `${SERVER_PACKAGE}@${SERVER_REPO}#${version ?? "semver:*"}`;
+  return version ? `${RELEASES}/download/${version}/yap-core.tgz` : `${RELEASES}/latest/download/yap-core.tgz`;
 }
 
 export async function installServer(dir: string, version?: string): Promise<void> {

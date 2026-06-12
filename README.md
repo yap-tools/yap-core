@@ -43,11 +43,11 @@ session start).
 
 ## Quickstart
 
-Install the CLI once (Node 22+; straight from GitHub, no registry involved),
-then create an instance:
+Install the CLI once (Node 22+ is the only prerequisite — releases ship
+prebuilt, no registry and no compiler involved), then create an instance:
 
 ```sh
-npm install -g github:yap-tools/yap-core
+npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz
 
 mkdir my-yap && cd my-yap
 yap init                  # scaffold + install the server into this directory
@@ -60,8 +60,9 @@ Or all of that in one go: `yap create my-yap --user ada`.
 **An instance is a directory.** `yap init` writes a `.env` (generated
 **sysadmin key** and master key — printed once, never overwritten), a `data/`
 folder for the database and files, and — the one network step — vendors the
-Yap server from GitHub into the directory's own `node_modules` at the latest
-release (`--version v0.1.0` to pin). The global `yap` is just the manager:
+Yap server from GitHub Releases (prebuilt) into the directory's own
+`node_modules` at the latest release (`--version v0.2.0` to pin). The global
+`yap` is just the manager:
 `serve`/`start` always run *the directory's* copy, so every instance keeps
 its own version, keys, data, and port (`--port` at init). Run as many
 instances as you like — one directory each; `yap upgrade` moves a single

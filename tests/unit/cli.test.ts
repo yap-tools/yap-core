@@ -133,9 +133,9 @@ describe("credentials", () => {
 });
 
 describe("vendored server", () => {
-  it("builds the GitHub install spec for latest and pinned", () => {
-    expect(installSpec()).toBe("yap-core@github:yap-tools/yap-core#semver:*");
-    expect(installSpec("v0.1.0")).toBe("yap-core@github:yap-tools/yap-core#v0.1.0");
+  it("points at the prebuilt release tarball, latest or pinned", () => {
+    expect(installSpec()).toBe("https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz");
+    expect(installSpec("v0.2.0")).toBe("https://github.com/yap-tools/yap-core/releases/download/v0.2.0/yap-core.tgz");
   });
 
   it("detects an installed server and its version", () => {
