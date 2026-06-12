@@ -5,9 +5,9 @@
  * YAP_URL/YAP_KEY env name an instance elsewhere; no local state is read at
  * all, so a credential never travels to a host it wasn't given for.
  */
+import { instanceBaseUrl, instanceSysadminKey, loadInstanceEnv } from "../instance/env.js";
+import { CliError } from "../instance/errors.js";
 import { readCredentials } from "./credentials.js";
-import { instanceBaseUrl, instanceSysadminKey, loadInstanceEnv } from "./env.js";
-import { CliError } from "./util.js";
 
 type Env = Record<string, string | undefined>;
 

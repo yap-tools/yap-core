@@ -3,7 +3,7 @@
  * the instance's HTTP API — never the database or the filesystem — so the CLI
  * has exactly the authority of the credential it presents, like any client.
  */
-import { CliError } from "./util.js";
+import { CliError } from "../instance/errors.js";
 
 export interface ApiResult {
   status: number;

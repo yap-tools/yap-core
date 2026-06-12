@@ -1,13 +1,15 @@
 /**
- * A Yap instance is a directory: its .env (written by `yap init`), data/,
- * vendored server (node_modules/yap-core), and the CLI's state (.yap/) live
- * together, and the CLI operates on whichever instance directory it runs from.
+ * The instance's effective configuration: .env entries with real environment
+ * variables taking precedence — the same precedence the server itself
+ * applies. Used by the CLI, by serve() at startup, and by the in-process
+ * backup/restore implementations.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 
-import { CliError } from "./util.js";
+import { CliError } from "./errors.js";
+import { envPath } from "./layout.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -24,14 +26,9 @@ export function resolveEnvFile(env: Env = process.env, cwd: string = process.cwd
   return undefined;
 }
 
-/**
- * The instance's effective configuration as the CLI sees it: .env entries
- * with real environment variables taking precedence — the same precedence the
- * server itself applies.
- */
 export function loadInstanceEnv(dir: string, env: Env = process.env): Env {
-  const envPath = join(dir, ".env");
-  const fileEnv = existsSync(envPath) ? (parseEnv(readFileSync(envPath, "utf8")) as Env) : {};
+  const path = envPath(dir);
+  const fileEnv = existsSync(path) ? (parseEnv(readFileSync(path, "utf8")) as Env) : {};
   return { ...fileEnv, ...env };
 }
 

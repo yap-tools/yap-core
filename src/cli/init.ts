@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { generateSecret } from "../crypto.js";
+import { dataDir, envPath as instanceEnvPath } from "../instance/layout.js";
 
 export interface InitResult {
   envPath: string;
@@ -20,10 +21,10 @@ export interface InitResult {
 }
 
 export function initInstance(dir: string, options: { port?: string } = {}): InitResult {
-  const envPath = join(dir, ".env");
+  const envPath = instanceEnvPath(dir);
   if (existsSync(envPath)) return { envPath, created: false, sysadminKey: "" };
 
-  mkdirSync(join(dir, "data"), { recursive: true });
+  mkdirSync(dataDir(dir), { recursive: true });
 
   const sysadminKey = generateSecret("yap_sys_");
   const masterKey = randomBytes(32).toString("base64");

@@ -6,19 +6,11 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { vendoredServerEntry } from "./install.js";
-import { CliError } from "./util.js";
-
-export function pidPath(dir: string): string {
-  return join(dir, ".yap", "yap.pid");
-}
-
-export function logPath(dir: string): string {
-  return join(dir, ".yap", "logs", "yap.log");
-}
+import { CliError } from "./errors.js";
+import { logPath, logsDir, pidPath } from "./layout.js";
+import { serverEntry } from "./server.js";
 
 function alive(pid: number): boolean {
   try {
@@ -39,21 +31,12 @@ export function runningPid(dir: string): number | undefined {
   return undefined;
 }
 
-/** The server entry `start`/`serve` should execute for this instance. */
-export function serverEntry(dir: string): string {
-  const vendored = vendoredServerEntry(dir);
-  if (vendored) return vendored;
-  throw new CliError(
-    "no server installed in this directory — run `yap init` (or `yap init --no-install` plus a manual install) first",
-  );
-}
-
 export function startInstance(dir: string): number {
   const existing = runningPid(dir);
   if (existing) throw new CliError(`already running (pid ${existing}) — \`yap stop\` first`);
 
   const entry = serverEntry(dir);
-  mkdirSync(join(dir, ".yap", "logs"), { recursive: true });
+  mkdirSync(logsDir(dir), { recursive: true });
   const log = openSync(logPath(dir), "a");
   const child = spawn(process.execPath, [entry, "serve"], {
     cwd: dir,

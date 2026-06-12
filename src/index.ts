@@ -12,7 +12,7 @@ import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
 import { cmdCreate, cmdInit, cmdService, cmdUpgrade } from "./cli/setup.js";
 import { assertLocal, resolveTarget } from "./cli/target.js";
-import { CliError } from "./cli/util.js";
+import { CliError } from "./instance/errors.js";
 
 // `yap … | head` closes stdout early; treat that as a normal end, not a crash.
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {

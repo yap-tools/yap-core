@@ -1,23 +1,11 @@
 /**
- * backup/restore delegation: run inside the instance's vendored server where
- * the server deps live; fall back to in-process for repo checkouts. The
+ * backup/restore: delegate into the instance's vendored server where the
+ * server deps live; fall back to in-process for repo checkouts. The
  * manager-only yap-cli package ships neither serve.js nor backup/, so both
  * paths fail there with the same guidance as serve.
  */
-import { spawn } from "node:child_process";
-
-import { vendoredServerEntry } from "./install.js";
-import { CliError, sameFile } from "./util.js";
-
-async function delegated(dir: string, args: string[]): Promise<boolean> {
-  const vendored = vendoredServerEntry(dir);
-  const self = process.argv[1];
-  if (!vendored || (self && sameFile(vendored, self))) return false;
-  const child = spawn(process.execPath, [vendored, ...args], { cwd: dir, stdio: "inherit" });
-  const code = await new Promise<number>((res) => child.on("exit", (c) => res(c ?? 1)));
-  if (code !== 0) process.exit(code);
-  return true;
-}
+import { CliError } from "../instance/errors.js";
+import { execInServer } from "../instance/server.js";
 
 async function inProcess(): Promise<typeof import("../backup/run.js")> {
   try {
@@ -29,11 +17,19 @@ async function inProcess(): Promise<typeof import("../backup/run.js")> {
 }
 
 export async function cmdBackup(dir: string, argv: string[]): Promise<void> {
-  if (await delegated(dir, ["backup", ...argv])) return;
+  const r = await execInServer(dir, ["backup", ...argv]);
+  if (r.status === "ran") {
+    if (r.code !== 0) process.exit(r.code);
+    return;
+  }
   await (await inProcess()).runBackup(dir, argv);
 }
 
 export async function cmdRestore(dir: string, argv: string[]): Promise<void> {
-  if (await delegated(dir, ["restore", ...argv])) return;
+  const r = await execInServer(dir, ["restore", ...argv]);
+  if (r.status === "ran") {
+    if (r.code !== 0) process.exit(r.code);
+    return;
+  }
   await (await inProcess()).runRestore(dir, argv);
 }

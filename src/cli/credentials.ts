@@ -5,16 +5,13 @@
  * need it.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+
+import { credentialsPath, stateDir } from "../instance/layout.js";
 
 export interface Credentials {
   accessKey: string;
   userId?: string;
   userName?: string;
-}
-
-export function credentialsPath(dir: string): string {
-  return join(dir, ".yap", "credentials.json");
 }
 
 export function readCredentials(dir: string): Credentials | undefined {
@@ -25,6 +22,6 @@ export function readCredentials(dir: string): Credentials | undefined {
 }
 
 export function writeCredentials(dir: string, creds: Credentials): void {
-  mkdirSync(join(dir, ".yap"), { recursive: true });
+  mkdirSync(stateDir(dir), { recursive: true });
   writeFileSync(credentialsPath(dir), JSON.stringify(creds, null, 2) + "\n", { mode: 0o600 });
 }

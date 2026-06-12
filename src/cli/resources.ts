@@ -6,11 +6,11 @@
  */
 import { parseArgs } from "node:util";
 
+import { CliError } from "../instance/errors.js";
 import { apiRequest, requireOk } from "./client.js";
 import { readCredentials, writeCredentials } from "./credentials.js";
 import { table } from "./table.js";
 import type { Target } from "./target.js";
-import { CliError } from "./util.js";
 
 async function call(target: Target, method: string, path: string, key: string, body?: unknown): Promise<unknown> {
   return requireOk(await apiRequest(target.baseUrl, method, path, key, body, { remote: target.remote }));

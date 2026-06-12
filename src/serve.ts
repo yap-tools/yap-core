@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { maybePreMigrationBackup, startBackupScheduler } from "./backup/auto.js";
 import { createBackupSink } from "./backup/sink.js";
 import { createBlobStore } from "./blob/index.js";
-import { resolveEnvFile } from "./cli/env.js";
+import { resolveEnvFile } from "./instance/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
 import { sweepOrphans } from "./core/files.js";
 import { createDb } from "./db/index.js";

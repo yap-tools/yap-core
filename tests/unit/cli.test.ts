@@ -1,20 +1,22 @@
 /**
- * CLI plumbing: env-file search order, instance config derivation, the
- * `yap init` scaffold, credentials, vendored-server detection, pidfile
- * hygiene, table formatting, and service-unit generation.
+ * CLI plumbing over the instance layer: env-file search order, instance
+ * config derivation, the `yap init` scaffold, credentials, vendored-server
+ * detection, pidfile hygiene, table formatting, and service-unit generation.
+ * (Delegation — execInServer — is covered in instance.test.ts.)
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { credentialsPath, readCredentials, writeCredentials } from "../../src/cli/credentials.js";
-import { instanceBaseUrl, loadInstanceEnv, resolveEnvFile } from "../../src/cli/env.js";
+import { readCredentials, writeCredentials } from "../../src/cli/credentials.js";
 import { initInstance } from "../../src/cli/init.js";
-import { installSpec, vendoredServerEntry, vendoredServerVersion } from "../../src/cli/install.js";
-import { pidPath, runningPid } from "../../src/cli/proc.js";
 import { launchdPlist, systemdUnit } from "../../src/cli/service.js";
 import { table } from "../../src/cli/table.js";
+import { instanceBaseUrl, loadInstanceEnv, resolveEnvFile } from "../../src/instance/env.js";
+import { credentialsPath, pidPath } from "../../src/instance/layout.js";
+import { runningPid } from "../../src/instance/proc.js";
+import { installSpec, vendoredServerEntry, vendoredServerVersion } from "../../src/instance/server.js";
 
 const tempDirs: string[] = [];
 function tempDir(): string {

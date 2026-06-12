@@ -3,19 +3,18 @@
  * than talk to it. The one network act is vendoring the server from GitHub;
  * everything else is local file generation.
  */
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
+import { CliError } from "../instance/errors.js";
+import { runningPid, stopInstance } from "../instance/proc.js";
+import { execInServer, installServer, serverSupportsBackup, vendoredServerVersion } from "../instance/server.js";
 import { initInstance } from "./init.js";
-import { installServer, vendoredServerEntry, vendoredServerVersion } from "./install.js";
 import { cmdStart } from "./lifecycle.js";
-import { runningPid, stopInstance } from "./proc.js";
 import { cmdUserCreate } from "./resources.js";
 import { installService, planService, serviceName, uninstallService } from "./service.js";
 import { localTarget } from "./target.js";
-import { CliError } from "./util.js";
 
 export async function cmdInit(dir: string, argv: string[]): Promise<void> {
   const { values } = parseArgs({
@@ -63,16 +62,16 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
   // currently-installed server (which matches the data's schema). Versions
   // that predate backup support can't take one — say so and continue.
   if (!values["skip-backup"]) {
-    const vendored = vendoredServerEntry(dir);
-    const supportsBackup = vendored && existsSync(join(dirname(vendored), "backup", "run.js"));
-    if (supportsBackup) {
+    if (serverSupportsBackup(dir)) {
       console.log("backing up before upgrade… (--skip-backup to skip)");
-      const child = spawn(process.execPath, [vendored, "backup", "--trigger", "pre-upgrade"], {
-        cwd: dir,
-        stdio: "inherit",
-      });
-      const code = await new Promise<number>((res) => child.on("exit", (c) => res(c ?? 1)));
-      if (code !== 0) throw new CliError("pre-upgrade backup failed — fix it or rerun with --skip-backup");
+      const r = await execInServer(dir, ["backup", "--trigger", "pre-upgrade"]);
+      if (r.status === "ran" && r.code !== 0) {
+        throw new CliError("pre-upgrade backup failed — fix it or rerun with --skip-backup");
+      }
+      if (r.status === "self") {
+        // We are the vendored server upgrading our own instance — back up in-process.
+        await (await import("../backup/run.js")).runBackup(dir, ["--trigger", "pre-upgrade"]);
+      }
     } else {
       console.error("note: the installed server predates backup support — upgrading without a backup");
     }

@@ -4,28 +4,23 @@
  * directory's, never the global CLI's.
  */
 import { openSync, readSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 
-import { instanceBaseUrl, loadInstanceEnv } from "./env.js";
-import { vendoredServerEntry, vendoredServerVersion } from "./install.js";
-import { logPath, runningPid, startInstance, stopInstance, tailLog } from "./proc.js";
-import { CliError, sameFile } from "./util.js";
+import { instanceBaseUrl, loadInstanceEnv } from "../instance/env.js";
+import { CliError } from "../instance/errors.js";
+import { logPath } from "../instance/layout.js";
+import { runningPid, startInstance, stopInstance, tailLog } from "../instance/proc.js";
+import { execInServer, vendoredServerVersion } from "../instance/server.js";
 
 /**
  * Foreground serve. Delegates to the vendored server when the directory has
- * one that isn't this very file (the realpath guard stops the vendored copy
- * delegating to itself, and keeps a repo checkout serving in-process).
+ * one that isn't this very process (`self` keeps a repo checkout, and the
+ * vendored copy itself, serving in-process).
  */
 export async function cmdServe(dir: string): Promise<void> {
-  const vendored = vendoredServerEntry(dir);
-  const self = process.argv[1];
-  if (vendored && (!self || !sameFile(vendored, self))) {
-    const child = spawn(process.execPath, [vendored, "serve"], { cwd: dir, stdio: "inherit" });
-    const code = await new Promise<number>((resolve) => child.on("exit", (c) => resolve(c ?? 1)));
-    process.exit(code);
-  }
+  const r = await execInServer(dir, ["serve"]);
+  if (r.status === "ran") process.exit(r.code);
   // In-process serve exists for repo checkouts. The manager-only CLI package
   // (yap-cli) deliberately ships without serve.js and the server's deps.
   let serve: () => Promise<void>;

@@ -9,7 +9,7 @@ import { runBackup, runRestore } from "../../src/backup/run.js";
 import { createBlobStore } from "../../src/blob/index.js";
 import type { YapConfig } from "../../src/config.js";
 import { createDb } from "../../src/db/index.js";
-import { CliError } from "../../src/cli/util.js";
+import { CliError } from "../../src/instance/errors.js";
 
 /** A scaffolded sqlite/fs instance directory with its own .env. */
 function makeInstance(): string {

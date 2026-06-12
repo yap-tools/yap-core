@@ -8,8 +8,9 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { serverEntry } from "./proc.js";
-import { CliError } from "./util.js";
+import { CliError } from "../instance/errors.js";
+import { logPath } from "../instance/layout.js";
+import { serverEntry } from "../instance/server.js";
 
 export interface ServicePlan {
   /** Where the unit/plist is (or would be) written. */
@@ -59,8 +60,8 @@ export function launchdPlist(dir: string, entry: string, name: string): string {
   <key>WorkingDirectory</key><string>${dir}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${join(dir, ".yap", "logs", "yap.log")}</string>
-  <key>StandardErrorPath</key><string>${join(dir, ".yap", "logs", "yap.log")}</string>
+  <key>StandardOutPath</key><string>${logPath(dir)}</string>
+  <key>StandardErrorPath</key><string>${logPath(dir)}</string>
 </dict>
 </plist>
 `;

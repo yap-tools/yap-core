@@ -1,0 +1,7 @@
+# Domain glossary
+
+Extends the Vocabulary section of [docs/superpowers/yap-brief.md](docs/superpowers/yap-brief.md), which remains the contract for the stored-context domain (space, bundle, item-type, item, doc, file, hook, capability, …). This file records terms that crystallized after the brief.
+
+- **Instance** — a Yap installation rooted in a directory: its `.env` (operator configuration and keys), `data/` (database and blobs), vendored server (`node_modules/yap-core`), and CLI state (`.yap/`: pidfile, logs, saved credential). The `yap` CLI operates on whichever instance directory it runs from. Instance layout and behaviour — paths, env resolution, running state, vendored-server lookup, delegation — are owned by the `src/instance/` module, which ships in both `yap-core` and the manager-only `yap-cli` and depends only on Node builtins.
+- **Vendored server** — the instance's own copy of `yap-core`, installed into the instance directory at `yap init` and replaced only by `yap upgrade`, so instances on one machine are isolated from each other and from the global CLI's version.
+- **Delegation** — running a server-side command (`serve`, `backup`, `restore`) by spawning the instance's vendored server entry instead of the CLI's own code. Delegation has exactly three outcomes: *ran* (with the child's exit code), *self* (the vendored entry is the running process — caller runs in-process), *absent* (no server installed). What to do about *self* and *absent* — in-process fallback, error, message — is the command layer's policy, never the instance module's.

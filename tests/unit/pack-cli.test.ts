@@ -56,10 +56,11 @@ describe("cliPackageJson", () => {
 });
 
 describe("CLI_DIST_FILES", () => {
-  it("covers the entry, the cli tree, and crypto — nothing server-side", () => {
+  it("covers the entry, the cli and instance trees, and crypto — nothing server-side", () => {
     expect(CLI_DIST_FILES).toContain("index.js");
     expect(CLI_DIST_FILES).toContain("crypto.js");
     expect(CLI_DIST_FILES).toContain("cli");
+    expect(CLI_DIST_FILES).toContain("instance");
     expect(CLI_DIST_FILES).not.toContain("serve.js");
     expect(CLI_DIST_FILES).not.toContain("server.js");
   });

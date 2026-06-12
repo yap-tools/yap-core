@@ -11,9 +11,9 @@ import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 
 import { createBlobStore } from "../blob/index.js";
-import { resolveEnvFile } from "../cli/env.js";
-import { runningPid } from "../cli/proc.js";
-import { CliError } from "../cli/util.js";
+import { resolveEnvFile } from "../instance/env.js";
+import { CliError } from "../instance/errors.js";
+import { runningPid } from "../instance/proc.js";
 import { loadConfig, type YapConfig } from "../config.js";
 import { createDb } from "../db/index.js";
 import { backupToSink } from "./auto.js";
