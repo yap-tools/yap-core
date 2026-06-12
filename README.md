@@ -171,6 +171,50 @@ local dev.
 | `YAP_HOOK_TIMEOUT_MS` | 30000 | Hook firing timeout (no automatic retries) |
 | `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal hook targets |
 | `YAP_ORPHAN_SWEEP_INTERVAL_MS` / `YAP_ORPHAN_MAX_AGE_MS` | 10 min / 60 min | Reserved-placeholder cleanup |
+| `YAP_BACKUP_BEFORE_MIGRATE` | `true` | Snapshot automatically before pending schema migrations |
+| `YAP_BACKUP_SINK` | `fs` | Where archives go: `fs` or `s3` |
+| `YAP_BACKUP_FS_ROOT` | `./data/backups` | Local archive directory |
+| `YAP_BACKUP_S3_BUCKET` / `YAP_BACKUP_S3_PREFIX` / `YAP_BACKUP_S3_REGION` / `YAP_BACKUP_S3_ENDPOINT` / `YAP_BACKUP_S3_ACCESS_KEY_ID` / `YAP_BACKUP_S3_SECRET_ACCESS_KEY` | — | S3 archive sink (credentials fall back to `YAP_S3_*`/`AWS_*`) |
+| `YAP_BACKUP_SCHEDULE` | — | Cron expression for scheduled backups (off when unset) |
+| `YAP_BACKUP_KEEP` | *(keep all)* | Prune the sink to the newest *n* archives after scheduled runs |
+
+## Backups
+
+Backups are portable by construction: one archive format (a gzipped tar of
+per-table JSONL dumps plus blob bytes, with a checksummed manifest) that
+restores into **any** storage combination — SQLite or Postgres, local disk or
+S3. A backup taken on a laptop's SQLite instance restores into a Postgres/S3
+deployment unchanged, which also makes backups the migration path between
+backends.
+
+They are taken automatically at the moments data is at risk:
+
+- **Before schema migrations** — at startup, when the server detects pending
+  migrations on an existing database, it writes a backup first. If that
+  backup fails, the server refuses to start rather than migrate data it
+  could not save (`YAP_BACKUP_BEFORE_MIGRATE=false` opts out).
+- **Before upgrades** — `yap upgrade` backs up via the currently-installed
+  server before swapping code (`--skip-backup` opts out).
+- **On a schedule** — set `YAP_BACKUP_SCHEDULE="0 3 * * *"` and optionally
+  `YAP_BACKUP_KEEP=7`; the server runs the schedule in-process, no cron job
+  needed.
+
+And by hand:
+
+```sh
+yap backup                      # write an archive to the configured sink
+yap backup --out snapshot.tar.gz
+yap backup list
+yap restore --latest            # replace this instance's data (server stopped)
+yap restore yap-backup-20260612T030000Z-scheduled.tar.gz
+```
+
+Restore brings a fresh database to exactly the archive's schema version,
+loads the data, then lets the normal startup migration carry it forward. So
+rolling back a bad upgrade is: `yap upgrade <previous-version>`, then
+`yap restore --latest`. Archives never include `.env` — keys and secrets stay
+out of backups; restoring onto a new machine needs the instance's `.env`
+restored separately.
 
 ## The MCP surface
 
