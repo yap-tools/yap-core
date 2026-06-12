@@ -71,7 +71,7 @@ Or stepwise, from inside the directory: `yap init` (writes `.env` with generated
 
 `yap user create` **prints the user's access key once** — that's the credential to give MCP/REST clients — and saves it to `.yap/credentials.json` (field `accessKey`, mode 0600), making the CLI an API client as that user. Mint additional keys later with `yap keys create`.
 
-All commands resolve the instance from the current directory — run them inside it.
+All commands resolve the instance from the current directory — run them inside it. To target a **remote** instance instead, pass `--url <url> --key <accessKey>` (or set `YAP_URL`/`YAP_KEY`): manage commands only — sysadmin-lane (`users …`, `user create`, `api --sysadmin`) and lifecycle commands (`start`, `logs`, `upgrade`, …) refuse remotely and must run on the instance host. Local `.env`/`.yap/` are never read in remote mode; the key must be explicit.
 
 | Need | Command |
 |---|---|

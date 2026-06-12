@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
 import { cmdCreate, cmdInit, cmdService, cmdUpgrade } from "./cli/setup.js";
+import { assertLocal, resolveTarget } from "./cli/target.js";
 import { CliError } from "./cli/util.js";
 
 // `yap … | head` closes stdout early; treat that as a normal end, not a crash.
@@ -41,48 +42,61 @@ Manage (over the instance API, authenticated via .yap/credentials.json):
   items query <bundleId> --type t [--filters json] | get <bundleId> <ids>
   connections list | revoke <id>      (--json on any list for raw output)
 
+Remote (manage commands only; sysadmin and lifecycle stay on the instance host):
+  --url <url> --key <accessKey>       Target a remote instance — or set YAP_URL / YAP_KEY
+
   version | help`;
 
-const [command, ...rest] = process.argv.slice(2);
+const { target, argv } = resolveTarget(process.argv.slice(2));
+const [command, ...rest] = argv;
 const dir = process.cwd();
 
 try {
   switch (command) {
     case undefined:
     case "serve":
+      assertLocal(target, command ?? "serve");
       await cmdServe(dir);
       break;
     case "init":
+      assertLocal(target, command);
       await cmdInit(dir, rest);
       break;
     case "create":
+      assertLocal(target, command);
       await cmdCreate(rest);
       break;
     case "upgrade":
+      assertLocal(target, command);
       await cmdUpgrade(dir, rest);
       break;
     case "start":
+      assertLocal(target, command);
       await cmdStart(dir);
       break;
     case "stop":
+      assertLocal(target, command);
       await cmdStop(dir);
       break;
     case "status":
+      assertLocal(target, command);
       await cmdStatus(dir);
       break;
     case "logs":
+      assertLocal(target, command);
       await cmdLogs(dir, rest);
       break;
     case "service":
+      assertLocal(target, command);
       await cmdService(dir, rest);
       break;
     case "user": {
       if (rest[0] !== "create") throw new CliError("usage: yap user create <name>");
-      await cmdUserCreate(dir, rest.slice(1));
+      await cmdUserCreate(target, dir, rest.slice(1));
       break;
     }
     case "api":
-      await cmdApi(dir, rest);
+      await cmdApi(target, rest);
       break;
     case "users":
     case "keys":
@@ -90,7 +104,7 @@ try {
     case "bundles":
     case "items":
     case "connections":
-      await cmdResource(dir, command, rest);
+      await cmdResource(target, command, rest);
       break;
     case "version":
     case "--version":

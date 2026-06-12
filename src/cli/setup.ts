@@ -13,6 +13,7 @@ import { cmdStart } from "./lifecycle.js";
 import { runningPid, stopInstance } from "./proc.js";
 import { cmdUserCreate } from "./resources.js";
 import { installService, planService, serviceName, uninstallService } from "./service.js";
+import { localTarget } from "./target.js";
 import { CliError } from "./util.js";
 
 export async function cmdInit(dir: string, argv: string[]): Promise<void> {
@@ -86,7 +87,7 @@ export async function cmdCreate(argv: string[]): Promise<void> {
   await cmdInit(dir, initArgs);
   console.log("");
   await cmdStart(dir);
-  await cmdUserCreate(dir, [values.user ?? "admin"]);
+  await cmdUserCreate(localTarget(dir), dir, [values.user ?? "admin"]);
   console.log("");
   console.log(`Instance ready in ${dir}.`);
 }

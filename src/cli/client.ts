@@ -16,6 +16,7 @@ export async function apiRequest(
   path: string,
   key: string,
   body?: unknown,
+  opts: { remote?: boolean } = {},
 ): Promise<ApiResult> {
   let res: Response;
   try {
@@ -28,7 +29,12 @@ export async function apiRequest(
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new CliError(`could not reach ${baseUrl} — is the instance running? (\`yap start\`)`);
+    // `yap start` only makes sense for the instance in the cwd.
+    throw new CliError(
+      opts.remote
+        ? `could not reach ${baseUrl}`
+        : `could not reach ${baseUrl} — is the instance running? (\`yap start\`)`,
+    );
   }
   const text = await res.text();
   let parsed: unknown = text;

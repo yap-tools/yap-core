@@ -108,6 +108,26 @@ yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
 ```
 
+The manage commands also work against an instance running elsewhere — pass
+`--url`/`--key`, or set `YAP_URL`/`YAP_KEY`:
+
+```sh
+export YAP_URL=https://yap.example.com
+export YAP_KEY=yk_...                   # a key minted on that instance
+yap spaces list
+
+yap --url https://yap.example.com --key yk_... api GET /v1/spaces   # one-shot
+```
+
+The key is any access key from the remote instance (`yap keys create` there,
+or the one printed by `yap user create`). Remote mode is deliberately
+stateless and strict: the local `.env` and `.yap/` are never read (a
+credential never travels to a host it wasn't given for), sysadmin-lane
+commands (`users …`, `user create`, `api --sysadmin`) refuse and must run on
+the instance host, and lifecycle commands (`start`, `logs`, `upgrade`, …)
+refuse rather than silently ignoring the flag. A remote health check is just
+`yap api GET /health`.
+
 Three ways to run an instance, by how much you need it to survive:
 
 | | Verbs | Survives logout | Survives reboot/crash |

@@ -8,28 +8,12 @@ import { parseArgs } from "node:util";
 
 import { apiRequest, requireOk } from "./client.js";
 import { readCredentials, writeCredentials } from "./credentials.js";
-import { instanceBaseUrl, instanceSysadminKey, loadInstanceEnv } from "./env.js";
 import { table } from "./table.js";
+import type { Target } from "./target.js";
 import { CliError } from "./util.js";
 
-function baseUrl(dir: string): string {
-  return instanceBaseUrl(loadInstanceEnv(dir));
-}
-
-function userKey(dir: string): string {
-  const creds = readCredentials(dir);
-  if (!creds) {
-    throw new CliError("no CLI credential in .yap/ — run `yap user create <name>` once, or save an access key there");
-  }
-  return creds.accessKey;
-}
-
-function sysKey(dir: string): string {
-  return instanceSysadminKey(loadInstanceEnv(dir));
-}
-
-async function call(dir: string, method: string, path: string, key: string, body?: unknown): Promise<unknown> {
-  return requireOk(await apiRequest(baseUrl(dir), method, path, key, body));
+async function call(target: Target, method: string, path: string, key: string, body?: unknown): Promise<unknown> {
+  return requireOk(await apiRequest(target.baseUrl, method, path, key, body, { remote: target.remote }));
 }
 
 /** List bodies are `{ data: [...] }`; tolerate a bare array for safety. */
@@ -48,7 +32,7 @@ interface CreateUserResponse {
   initialKey: { key: string };
 }
 
-export async function cmdUserCreate(dir: string, argv: string[]): Promise<void> {
+export async function cmdUserCreate(target: Target, dir: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: { "no-save": { type: "boolean" } },
@@ -57,7 +41,7 @@ export async function cmdUserCreate(dir: string, argv: string[]): Promise<void> 
   const name = positionals[0];
   if (!name) throw new CliError("usage: yap user create <name>");
 
-  const body = (await call(dir, "POST", "/v1/users", sysKey(dir), { name })) as CreateUserResponse;
+  const body = (await call(target, "POST", "/v1/users", target.sysKey(), { name })) as CreateUserResponse;
   console.log(`created user ${body.user.name} (${body.user.id}), personal space ${body.personalSpaceId}`);
   console.log("");
   console.log("Access key (shown once — store it wherever this user connects from):");
@@ -70,7 +54,7 @@ export async function cmdUserCreate(dir: string, argv: string[]): Promise<void> 
   }
 }
 
-export async function cmdApi(dir: string, argv: string[]): Promise<void> {
+export async function cmdApi(target: Target, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: { sysadmin: { type: "boolean" } },
@@ -89,8 +73,8 @@ export async function cmdApi(dir: string, argv: string[]): Promise<void> {
       throw new CliError("body must be valid JSON (or `-` to read JSON from stdin)");
     }
   }
-  const key = values.sysadmin ? sysKey(dir) : userKey(dir);
-  const res = await apiRequest(baseUrl(dir), method.toUpperCase(), path, key, body);
+  const key = values.sysadmin ? target.sysKey() : target.userKey();
+  const res = await apiRequest(target.baseUrl, method.toUpperCase(), path, key, body, { remote: target.remote });
   if (typeof res.body === "string") console.log(res.body);
   else printJson(res.body);
   if (res.status >= 400) process.exit(1);
@@ -103,7 +87,7 @@ async function readStdin(): Promise<string> {
 }
 
 /** Ergonomic commands: thin, fixed mappings onto the REST surface. */
-export async function cmdResource(dir: string, group: string, argv: string[]): Promise<void> {
+export async function cmdResource(target: Target, group: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
@@ -125,44 +109,44 @@ export async function cmdResource(dir: string, group: string, argv: string[]): P
 
   switch (`${group} ${sub}`) {
     case "users list":
-      return out(await call(dir, "GET", "/v1/users", sysKey(dir)), ["id", "name", "createdAt"]);
+      return out(await call(target, "GET", "/v1/users", target.sysKey()), ["id", "name", "createdAt"]);
     case "users delete":
-      await call(dir, "DELETE", `/v1/users/${need(args[0], "user id")}`, sysKey(dir));
+      await call(target, "DELETE", `/v1/users/${need(args[0], "user id")}`, target.sysKey());
       return console.log("deleted");
 
     case "keys list":
-      return out(await call(dir, "GET", "/v1/keys", userKey(dir)), ["id", "name", "createdAt", "lastUsedAt"]);
+      return out(await call(target, "GET", "/v1/keys", target.userKey()), ["id", "name", "createdAt", "lastUsedAt"]);
     case "keys create":
-      return printJson(await call(dir, "POST", "/v1/keys", userKey(dir), { name: need(args[0], "key name") }));
+      return printJson(await call(target, "POST", "/v1/keys", target.userKey(), { name: need(args[0], "key name") }));
     case "keys rotate":
-      return printJson(await call(dir, "POST", `/v1/keys/${need(args[0], "key id")}/rotate`, userKey(dir)));
+      return printJson(await call(target, "POST", `/v1/keys/${need(args[0], "key id")}/rotate`, target.userKey()));
     case "keys delete":
-      await call(dir, "DELETE", `/v1/keys/${need(args[0], "key id")}`, userKey(dir));
+      await call(target, "DELETE", `/v1/keys/${need(args[0], "key id")}`, target.userKey());
       return console.log("deleted");
 
     case "spaces list":
-      return out(await call(dir, "GET", "/v1/spaces", userKey(dir)), ["id", "name", "personal", "description"]);
+      return out(await call(target, "GET", "/v1/spaces", target.userKey()), ["id", "name", "personal", "description"]);
     case "spaces show":
-      return printJson(await call(dir, "GET", `/v1/spaces/${need(args[0], "space id")}`, userKey(dir)));
+      return printJson(await call(target, "GET", `/v1/spaces/${need(args[0], "space id")}`, target.userKey()));
     case "spaces create":
       return printJson(
-        await call(dir, "POST", "/v1/spaces", userKey(dir), {
+        await call(target, "POST", "/v1/spaces", target.userKey(), {
           name: need(args[0], "space name"),
           ...(values.description ? { description: values.description } : {}),
         }),
       );
     case "spaces delete":
-      await call(dir, "DELETE", `/v1/spaces/${need(args[0], "space id")}`, userKey(dir));
+      await call(target, "DELETE", `/v1/spaces/${need(args[0], "space id")}`, target.userKey());
       return console.log("deleted");
 
     case "bundles list":
-      return out(await call(dir, "GET", `/v1/spaces/${need(args[0], "space id")}/bundles`, userKey(dir)), [
+      return out(await call(target, "GET", `/v1/spaces/${need(args[0], "space id")}/bundles`, target.userKey()), [
         "id",
         "name",
         "description",
       ]);
     case "bundles show":
-      return printJson(await call(dir, "GET", `/v1/bundles/${need(args[0], "bundle id")}`, userKey(dir)));
+      return printJson(await call(target, "GET", `/v1/bundles/${need(args[0], "bundle id")}`, target.userKey()));
 
     case "items query": {
       const bundleId = need(args[0], "bundle id");
@@ -174,16 +158,16 @@ export async function cmdResource(dir: string, group: string, argv: string[]): P
         if (values.desc) params.set("direction", "desc");
       }
       if (values.limit) params.set("limit", values.limit);
-      return printJson(await call(dir, "GET", `/v1/bundles/${bundleId}/items?${params}`, userKey(dir)));
+      return printJson(await call(target, "GET", `/v1/bundles/${bundleId}/items?${params}`, target.userKey()));
     }
     case "items get": {
       const bundleId = need(args[0], "bundle id");
       const ids = need(args[1], "comma-separated item ids");
-      return printJson(await call(dir, "GET", `/v1/bundles/${bundleId}/items?ids=${ids}`, userKey(dir)));
+      return printJson(await call(target, "GET", `/v1/bundles/${bundleId}/items?ids=${ids}`, target.userKey()));
     }
 
     case "connections list":
-      return out(await call(dir, "GET", "/v1/oauth/grants", userKey(dir)), [
+      return out(await call(target, "GET", "/v1/oauth/grants", target.userKey()), [
         "id",
         "client.name",
         "scope",
@@ -191,7 +175,7 @@ export async function cmdResource(dir: string, group: string, argv: string[]): P
         "lastUsedAt",
       ]);
     case "connections revoke":
-      await call(dir, "DELETE", `/v1/oauth/grants/${need(args[0], "grant id")}`, userKey(dir));
+      await call(target, "DELETE", `/v1/oauth/grants/${need(args[0], "grant id")}`, target.userKey());
       return console.log("revoked");
 
     default:
