@@ -55,10 +55,10 @@ Full endpoint map, query operators, datatypes: [reference.md](reference.md)
 
 ## Run an instance
 
-Install the CLI (Node 22+; **not on the npm registry** — prebuilt tarball from GitHub Releases):
+Install the CLI (Node 22+; **not on the npm registry** — prebuilt, dependency-free tarball from GitHub Releases):
 
 ```sh
-npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz
+npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/yap-cli.tgz
 ```
 
 **An instance is a directory.** One-shot setup:

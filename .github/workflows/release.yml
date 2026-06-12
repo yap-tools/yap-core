@@ -1,9 +1,10 @@
 name: release
 
-# Every version tag gets a GitHub Release carrying the prebuilt npm tarball
-# under the constant asset name yap-core.tgz. That asset is what both the
-# global-CLI install one-liner and `yap init`'s server vendoring download —
-# no TypeScript toolchain ever runs on an operator's machine.
+# Every version tag gets a GitHub Release carrying two prebuilt npm tarballs
+# under constant asset names: yap-cli.tgz (the manager-only CLI, zero
+# dependencies — what the install one-liner downloads) and yap-core.tgz (the
+# full server — what `yap init` vendors into each instance). No TypeScript
+# toolchain ever runs on an operator's machine.
 on:
   push:
     tags: ["v*"]
@@ -24,6 +25,7 @@ jobs:
       - run: npm test
       - run: npm pack
       - run: mv yap-core-*.tgz yap-core.tgz
-      - run: gh release create "$GITHUB_REF_NAME" yap-core.tgz --title "Yap $GITHUB_REF_NAME" --generate-notes
+      - run: npm run pack:cli
+      - run: gh release create "$GITHUB_REF_NAME" yap-cli.tgz yap-core.tgz --title "Yap $GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

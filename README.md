@@ -43,11 +43,12 @@ session start).
 
 ## Quickstart
 
-Install the CLI once (Node 22+ is the only prerequisite — releases ship
-prebuilt, no registry and no compiler involved), then create an instance:
+Install the CLI once (Node 22+ is the only prerequisite — the CLI package
+has **zero dependencies**, ships prebuilt, no registry and no compiler
+involved), then create an instance:
 
 ```sh
-npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz
+npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/yap-cli.tgz
 
 mkdir my-yap && cd my-yap
 yap init                  # scaffold + install the server into this directory

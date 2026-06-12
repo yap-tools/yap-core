@@ -12,6 +12,7 @@ import { parseArgs } from "node:util";
 import { instanceBaseUrl, loadInstanceEnv } from "./env.js";
 import { vendoredServerEntry, vendoredServerVersion } from "./install.js";
 import { logPath, runningPid, startInstance, stopInstance, tailLog } from "./proc.js";
+import { CliError } from "./util.js";
 
 function sameFile(a: string, b: string): boolean {
   try {
@@ -34,7 +35,16 @@ export async function cmdServe(dir: string): Promise<void> {
     const code = await new Promise<number>((resolve) => child.on("exit", (c) => resolve(c ?? 1)));
     process.exit(code);
   }
-  await (await import("../serve.js")).serve();
+  // In-process serve exists for repo checkouts. The manager-only CLI package
+  // (yap-cli) deliberately ships without serve.js and the server's deps.
+  let serve: () => Promise<void>;
+  try {
+    serve = (await import("../serve.js")).serve;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw err;
+    throw new CliError("no server installed here — `yap init` first (instances vendor their own server)");
+  }
+  await serve();
 }
 
 export async function cmdStart(dir: string): Promise<void> {

@@ -38,6 +38,7 @@
     "preview:widgets": "tsx watch scripts/preview-widgets.ts",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.build.json",
+    "pack:cli": "rm -rf dist && npm run build && tsx scripts/pack-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
