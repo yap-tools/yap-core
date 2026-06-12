@@ -16,8 +16,9 @@ reasonable window to ship a fix before disclosing publicly.
 
 ## Scope notes for operators
 
-- The sysadmin key and master key live in the environment (or `~/.yap/.env`,
-  written mode 0600 by `yap init`). Anyone with that file owns the instance.
+- The sysadmin key and master key live in the environment (or the instance
+  directory's `.env`, written mode 0600 by `yap init`). Anyone with that file
+  owns the instance.
 - OAuth requires `YAP_BASE_URL` to be an https origin for non-loopback
   deployments; the server warns, but does not refuse, plain http.
 - Hooks deny private/link-local destinations by default and pin DNS at

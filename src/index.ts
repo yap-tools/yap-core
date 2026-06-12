@@ -6,19 +6,25 @@
  */
 import { createRequire } from "node:module";
 
-import { yapHome } from "./cli/home.js";
-import { initYapHome } from "./cli/init.js";
+import { initInstance } from "./cli/init.js";
+
+// `yap … | head` closes stdout early; treat that as a normal end, not a crash.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") process.exit(0);
+  throw err;
+});
 
 const USAGE = `Usage: yap [command]
 
 Commands:
-  (none), serve   Start the server (REST under /v1, MCP at /mcp)
-  init            Create ${yapHome()}/.env with generated keys and data paths
+  (none), serve   Serve the instance in the current directory (REST /v1, MCP /mcp)
+  init            Scaffold a Yap instance here: .env with generated keys + data/
   version         Print the yap version
   help            Show this message
 
-The server reads config from the environment, with an env file as fallback:
-YAP_ENV_FILE if set, else ./.env, else $YAP_HOME/.env (~/.yap/.env).`;
+An instance is a directory. Config comes from the environment, with an env
+file as fallback: YAP_ENV_FILE if set, else ./.env. Run one instance per
+directory; give each its own YAP_PORT.`;
 
 const command = process.argv[2];
 switch (command) {
@@ -28,20 +34,19 @@ switch (command) {
     break;
   }
   case "init": {
-    const home = yapHome();
-    const result = initYapHome(home);
+    const result = initInstance(process.cwd());
     if (!result.created) {
       console.error(`yap: ${result.envPath} already exists — not overwriting.`);
       console.error("Edit it directly, or remove it and run `yap init` again to start fresh.");
       process.exit(1);
     }
-    console.log(`Created ${result.envPath} (config + generated keys, data under ${home}/data).`);
+    console.log(`Scaffolded a Yap instance in this directory (.env with generated keys, data under ./data).`);
     console.log("");
     console.log(`Your sysadmin key (shown once here; it stays readable in the .env file):`);
     console.log(`  ${result.sysadminKey}`);
     console.log("");
     console.log("Next steps:");
-    console.log("  yap                       # start the server on http://localhost:8787");
+    console.log("  yap                       # serve this instance on http://localhost:8787");
     console.log("  curl -s -X POST localhost:8787/v1/users \\");
     console.log(`    -H "Authorization: Bearer ${result.sysadminKey}" \\`);
     console.log(`    -H "Content-Type: application/json" -d '{"name": "Ada"}'`);

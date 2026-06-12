@@ -1,5 +1,5 @@
 import { createBlobStore } from "./blob/index.js";
-import { resolveEnvFile, yapHome } from "./cli/home.js";
+import { resolveEnvFile } from "./cli/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
 import { sweepOrphans } from "./core/files.js";
 import { createDb } from "./db/index.js";
@@ -8,8 +8,8 @@ import { buildServer } from "./server.js";
 
 export async function serve(): Promise<void> {
   // Load an env file before reading config, if one exists: explicit
-  // YAP_ENV_FILE, else ./.env (checkout dev), else $YAP_HOME/.env (from
-  // `yap init`). Uses Node's built-in parser — no dependency. Real environment
+  // YAP_ENV_FILE, else the instance directory's ./.env (from `yap init` or a
+  // checkout). Uses Node's built-in parser — no dependency. Real environment
   // variables already set take precedence over .env entries, so injected
   // secrets in a deployment always win over a file on disk.
   const envFile = resolveEnvFile();
@@ -22,7 +22,7 @@ export async function serve(): Promise<void> {
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`yap: ${err.message}`);
-      console.error(`Run \`yap init\` to generate a config at ${yapHome()}/.env, or set the variable in the environment.`);
+      console.error("Run `yap init` in this directory to scaffold an instance, or set the variable in the environment.");
       process.exit(1);
     }
     throw err;

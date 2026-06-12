@@ -49,16 +49,27 @@ builds, and links the `yap` command):
 ```sh
 npm install -g github:yap-tools/yap-core
 
-yap init     # creates ~/.yap/.env with generated keys + data paths
-yap          # start the server
+mkdir my-yap && cd my-yap
+yap init     # scaffolds this directory: .env with generated keys + data/
+yap          # serve the instance
 ```
 
-`yap init` prints your **sysadmin key** and never overwrites an existing
-config. Everything lives under `~/.yap` (override with `YAP_HOME`); upgrade by
-re-running the install command, or pin a release with
-`npm install -g github:yap-tools/yap-core#v0.1.0`.
+**An instance is a directory.** `yap init` writes a `.env` (your generated
+**sysadmin key** and master key — printed once, never overwritten) plus a
+`data/` folder for the database and files, and `yap` serves whichever
+instance directory it runs from. Run as many instances as you like — one
+directory each, each with its own keys, data, and `YAP_PORT`. Upgrade the
+shared CLI by re-running the install command, or pin a single instance to a
+release by installing locally inside it:
 
-Running from a checkout works the same as ever:
+```sh
+cd my-yap
+npm install github:yap-tools/yap-core#v0.1.0
+npx yap      # prefers the local, pinned copy over the global one
+```
+
+Running from a checkout works the same way — the repo root is just an
+instance directory:
 
 ```sh
 npm install
@@ -66,11 +77,10 @@ cp .env.example .env       # then fill in YAP_MASTER_KEY etc.
 npm run dev                # or: npm run build && npm start
 ```
 
-Config comes from the environment, with an env file as fallback — the first
-of `YAP_ENV_FILE`, `./.env`, `$YAP_HOME/.env` that exists is loaded (Node's
-built-in parser, no dependency). Real environment variables override file
-entries, so a deployment can inject secrets via the environment and leave the
-file for local dev.
+Config comes from the environment, with an env file as fallback — `YAP_ENV_FILE`
+if set, else `./.env` (Node's built-in parser, no dependency). Real
+environment variables override file entries, so a deployment can inject
+secrets via the environment and leave the file for local dev.
 
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
@@ -94,8 +104,7 @@ its own logs for exactly that reason).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `YAP_HOME` | `~/.yap` | Home for installed use: `yap init` writes `.env` and data here |
-| `YAP_ENV_FILE` | — | Explicit env-file path (beats `./.env` and `$YAP_HOME/.env`) |
+| `YAP_ENV_FILE` | — | Explicit env-file path (beats the instance directory's `./.env`) |
 | `YAP_SYSADMIN_KEY` | *(required)* | Environment credential for user provisioning over REST |
 | `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: hook-secret encryption + link/token signing |
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
