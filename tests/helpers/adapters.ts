@@ -28,6 +28,7 @@ const ALL_TABLES = [
   "files",
   "user_docs",
   "grants",
+  "bundle_docs",
   "bundles",
   "spaces",
   "oauth_tokens",

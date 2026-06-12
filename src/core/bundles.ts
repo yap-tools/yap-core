@@ -105,12 +105,19 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
     throw invalid("invalid bundle design", { errors });
   }
 
+  const name = input.name.trim();
   const { bundles, itemTypes, properties } = db.tables;
+  const clash = await db.client
+    .select({ id: bundles.id })
+    .from(bundles)
+    .where(and(eq(bundles.spaceId, spaceId), eq(bundles.name, name)));
+  if (clash.length > 0) throw invalid(`a bundle named "${name}" already exists in this space`);
+
   const now = nowIso();
   const bundle: Bundle = {
     id: newId(),
     spaceId,
-    name: input.name.trim(),
+    name,
     description: input.description ?? "",
     docs: input.docs ?? "",
     createdAt: now,
@@ -216,8 +223,18 @@ export async function updateBundle(
   // access but not edit_bundles get an explicit 403 with the deciding row.
   await requireBundleReadAccess(db, userId, ctx);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
-  if (patch.name !== undefined && !patch.name.trim()) throw invalid("bundle name cannot be empty");
   const { bundles } = db.tables;
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw invalid("bundle name cannot be empty");
+    const clash = await db.client
+      .select({ id: bundles.id })
+      .from(bundles)
+      .where(and(eq(bundles.spaceId, ctx.bundle.spaceId), eq(bundles.name, name)));
+    if (clash.some((r) => r.id !== bundleId)) {
+      throw invalid(`a bundle named "${name}" already exists in this space`);
+    }
+  }
   await db.client
     .update(bundles)
     .set({

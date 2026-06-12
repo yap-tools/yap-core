@@ -62,51 +62,83 @@ export const grants = sqliteTable(
   (t) => [index("grants_lookup_idx").on(t.userId, t.resourceId, t.capability)],
 );
 
-export const bundles = sqliteTable("bundles", {
-  id: text("id").primaryKey(),
-  spaceId: text("space_id")
-    .notNull()
-    .references(() => spaces.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  description: text("description").notNull().default(""),
-  docs: text("docs").notNull().default(""),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
+export const bundles = sqliteTable(
+  "bundles",
+  {
+    id: text("id").primaryKey(),
+    spaceId: text("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    docs: text("docs").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("bundles_space_name_idx").on(t.spaceId, t.name)],
+);
 
-export const itemTypes = sqliteTable("item_types", {
-  id: text("id").primaryKey(),
-  bundleId: text("bundle_id")
-    .notNull()
-    .references(() => bundles.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  createdAt: text("created_at").notNull(),
-});
+export const bundleDocs = sqliteTable(
+  "bundle_docs",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    content: text("content").notNull().default(""),
+    autoload: integer("autoload").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("bundle_docs_bundle_name_idx").on(t.bundleId, t.name)],
+);
 
-export const properties = sqliteTable("properties", {
-  id: text("id").primaryKey(),
-  itemTypeId: text("item_type_id")
-    .notNull()
-    .references(() => itemTypes.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  datatype: text("datatype").notNull(), // 'text' | 'number' | 'boolean' | 'date' | 'item' | 'file'
-  required: integer("required").notNull().default(0),
-  multi: integer("multi").notNull().default(0), // holds an ordered list of values
-  config: text("config").notNull().default(""), // JSON: per-datatype constraints ("" = none)
-  sortOrder: integer("sort_order").notNull().default(0),
-});
+export const itemTypes = sqliteTable(
+  "item_types",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [uniqueIndex("item_types_bundle_name_idx").on(t.bundleId, t.name)],
+);
 
-export const items = sqliteTable("items", {
-  id: text("id").primaryKey(),
-  bundleId: text("bundle_id")
-    .notNull()
-    .references(() => bundles.id, { onDelete: "cascade" }),
-  itemTypeId: text("item_type_id")
-    .notNull()
-    .references(() => itemTypes.id, { onDelete: "cascade" }),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
+export const properties = sqliteTable(
+  "properties",
+  {
+    id: text("id").primaryKey(),
+    itemTypeId: text("item_type_id")
+      .notNull()
+      .references(() => itemTypes.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    datatype: text("datatype").notNull(), // 'text' | 'number' | 'boolean' | 'date' | 'item' | 'file'
+    required: integer("required").notNull().default(0),
+    multi: integer("multi").notNull().default(0), // holds an ordered list of values
+    config: text("config").notNull().default(""), // JSON: per-datatype constraints ("" = none)
+    sortOrder: integer("sort_order").notNull().default(0),
+  },
+  (t) => [index("properties_item_type_idx").on(t.itemTypeId)],
+);
+
+export const items = sqliteTable(
+  "items",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    itemTypeId: text("item_type_id")
+      .notNull()
+      .references(() => itemTypes.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [index("items_bundle_idx").on(t.bundleId), index("items_item_type_idx").on(t.itemTypeId)],
+);
 
 export const itemValues = sqliteTable(
   "item_values",
@@ -127,35 +159,43 @@ export const itemValues = sqliteTable(
   ],
 );
 
-export const files = sqliteTable("files", {
-  id: text("id").primaryKey(),
-  bundleId: text("bundle_id")
-    .notNull()
-    .references(() => bundles.id, { onDelete: "cascade" }),
-  spaceId: text("space_id").notNull(),
-  ownerId: text("owner_id").notNull(),
-  status: text("status").notNull(), // 'reserved' | 'finalized'
-  name: text("name").notNull().default(""),
-  mimeType: text("mime_type").notNull().default(""),
-  size: integer("size").notNull().default(0),
-  storageKey: text("storage_key").notNull(),
-  uploadConsumed: integer("upload_consumed").notNull().default(0),
-  createdAt: text("created_at").notNull(),
-  finalizedAt: text("finalized_at"),
-});
+export const files = sqliteTable(
+  "files",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    spaceId: text("space_id").notNull(),
+    ownerId: text("owner_id").notNull(),
+    status: text("status").notNull(), // 'reserved' | 'finalized'
+    name: text("name").notNull().default(""),
+    mimeType: text("mime_type").notNull().default(""),
+    size: integer("size").notNull().default(0),
+    storageKey: text("storage_key").notNull(),
+    uploadConsumed: integer("upload_consumed").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    finalizedAt: text("finalized_at"),
+  },
+  (t) => [index("files_bundle_idx").on(t.bundleId)],
+);
 
-export const hooks = sqliteTable("hooks", {
-  id: text("id").primaryKey(),
-  bundleId: text("bundle_id")
-    .notNull()
-    .references(() => bundles.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  description: text("description").notNull().default(""),
-  params: text("params").notNull().default("[]"), // JSON: declared parameter specs
-  transportEncrypted: text("transport_encrypted").notNull(), // AES-GCM blob, never returned
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
+export const hooks = sqliteTable(
+  "hooks",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    params: text("params").notNull().default("[]"), // JSON: declared parameter specs
+    transportEncrypted: text("transport_encrypted").notNull(), // AES-GCM blob, never returned
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("hooks_bundle_name_idx").on(t.bundleId, t.name)],
+);
 
 /** OAuth clients (RFC 7591 dynamic registration). Public clients only — no
  * secret column by design; PKCE is the proof of possession. */
@@ -229,14 +269,18 @@ export const oauthTokens = sqliteTable(
   (t) => [uniqueIndex("oauth_tokens_token_hash_idx").on(t.tokenHash), index("oauth_tokens_grant_idx").on(t.grantId)],
 );
 
-export const userDocs = sqliteTable("user_docs", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  content: text("content").notNull().default(""),
-  autoload: integer("autoload").notNull().default(0),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
+export const userDocs = sqliteTable(
+  "user_docs",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    content: text("content").notNull().default(""),
+    autoload: integer("autoload").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("user_docs_user_name_idx").on(t.userId, t.name)],
+);

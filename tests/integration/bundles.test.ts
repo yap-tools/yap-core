@@ -77,6 +77,17 @@ describeEachAdapter("bundles over REST", (adapter) => {
       expect(res.status).toBe(400);
     });
 
+    it("rejects a duplicate bundle name in the same space", async () => {
+      const first = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "dupe" });
+      expect(first.status).toBe(201);
+      const second = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "dupe" });
+      expect(second.status).toBe(400);
+      expect(second.body.error.message).toContain("already exists");
+      const other = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "dupe-renamed" });
+      const renamed = await alice.patch(`/v1/bundles/${other.body.id}`, { name: "dupe" });
+      expect(renamed.status).toBe(400);
+    });
+
     it("updates and deletes bundles with edit_bundles", async () => {
       const created = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "temp" });
       const patched = await alice.patch(`/v1/bundles/${created.body.id}`, { description: "tmp" });
