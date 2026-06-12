@@ -224,8 +224,8 @@ export async function updateBundle(
   await requireBundleReadAccess(db, userId, ctx);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
   const { bundles } = db.tables;
-  if (patch.name !== undefined) {
-    const name = patch.name.trim();
+  const name = patch.name !== undefined ? patch.name.trim() : undefined;
+  if (name !== undefined) {
     if (!name) throw invalid("bundle name cannot be empty");
     const clash = await db.client
       .select({ id: bundles.id })
@@ -238,7 +238,7 @@ export async function updateBundle(
   await db.client
     .update(bundles)
     .set({
-      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       updatedAt: nowIso(),
     })

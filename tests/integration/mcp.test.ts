@@ -326,5 +326,25 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect((await aliceRest.delete(`/v1/user-docs/${created.body.id}`)).status).toBe(200);
       expect((await aliceRest.get(`/v1/user-docs/${created.body.id}`)).status).toBe(404);
     });
+
+    it("rejects renaming a user doc to a name already used by another doc", async () => {
+      const docA = await aliceRest.post("/v1/user-docs", { name: "rename-doc-a", content: "a" });
+      expect(docA.status).toBe(201);
+      const docB = await aliceRest.post("/v1/user-docs", { name: "rename-doc-b", content: "b" });
+      expect(docB.status).toBe(201);
+
+      const clash = await aliceRest.patch(`/v1/user-docs/${docB.body.id}`, { name: "rename-doc-a" });
+      expect(clash.status).toBe(400);
+      expect(clash.body.error.message).toContain("already exists");
+    });
+
+    it("allows renaming a user doc to its own current name (self-rename is a no-op)", async () => {
+      const created = await aliceRest.post("/v1/user-docs", { name: "self-rename-doc", content: "x" });
+      expect(created.status).toBe(201);
+
+      const selfRenamed = await aliceRest.patch(`/v1/user-docs/${created.body.id}`, { name: "self-rename-doc" });
+      expect(selfRenamed.status).toBe(200);
+      expect(selfRenamed.body.name).toBe("self-rename-doc");
+    });
   });
 });

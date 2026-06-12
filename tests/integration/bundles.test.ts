@@ -86,6 +86,9 @@ describeEachAdapter("bundles over REST", (adapter) => {
       const other = await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "dupe-renamed" });
       const renamed = await alice.patch(`/v1/bundles/${other.body.id}`, { name: "dupe" });
       expect(renamed.status).toBe(400);
+      // Self-rename: patching a bundle to its own current name must succeed.
+      const selfRenamed = await alice.patch(`/v1/bundles/${first.body.id}`, { name: "dupe" });
+      expect(selfRenamed.status).toBe(200);
     });
 
     it("updates and deletes bundles with edit_bundles", async () => {

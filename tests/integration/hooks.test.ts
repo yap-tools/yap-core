@@ -187,6 +187,37 @@ describeEachAdapter("hooks", (adapter) => {
       expect(res.status).toBe(400);
       expect(res.body.error.message).toMatch(/host cannot contain parameters|valid URL/);
     });
+
+    it("rejects renaming a hook to a name already used by another hook in the same bundle", async () => {
+      // Create two hooks in the same bundle.
+      const hookA = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "rename-target-a",
+        transport: { url: `http://127.0.0.1:${targetPort}/a`, method: "GET" },
+      });
+      expect(hookA.status).toBe(201);
+      const hookB = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "rename-target-b",
+        transport: { url: `http://127.0.0.1:${targetPort}/b`, method: "GET" },
+      });
+      expect(hookB.status).toBe(201);
+
+      // Renaming B to A's name must be rejected.
+      const clash = await alice.patch(`/v1/hooks/${hookB.body.id}`, { name: "rename-target-a" });
+      expect(clash.status).toBe(400);
+      expect(clash.body.error.message).toContain("already exists");
+    });
+
+    it("allows renaming a hook to its own current name (self-rename is a no-op)", async () => {
+      const created = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "self-rename-hook",
+        transport: { url: `http://127.0.0.1:${targetPort}/self`, method: "GET" },
+      });
+      expect(created.status).toBe(201);
+
+      const selfRenamed = await alice.patch(`/v1/hooks/${created.body.id}`, { name: "self-rename-hook" });
+      expect(selfRenamed.status).toBe(200);
+      expect(selfRenamed.body.name).toBe("self-rename-hook");
+    });
   });
 
   describe("firing (fire_hooks, via call)", () => {

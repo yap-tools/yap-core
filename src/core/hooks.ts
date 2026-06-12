@@ -167,13 +167,22 @@ export async function updateHook(
   await requireCapability(db, userId, "edit_hooks", bundleCapabilityCtx(ctx));
   if (patch.params) validateParamSpecs(patch.params);
   if (patch.transport) await validateTransport(patch.transport, env);
-  if (patch.name !== undefined && !patch.name.trim()) throw invalid("hook name cannot be empty");
+  const name = patch.name !== undefined ? patch.name.trim() : undefined;
+  if (name !== undefined && !name) throw invalid("hook name cannot be empty");
 
   const { hooks } = db.tables;
+  if (name !== undefined) {
+    const clash = await db.client
+      .select({ id: hooks.id })
+      .from(hooks)
+      .where(and(eq(hooks.bundleId, hook.bundleId), eq(hooks.name, name)));
+    if (clash.some((r) => r.id !== hookId)) throw invalid(`a hook named "${name}" already exists in this bundle`);
+  }
+
   await db.client
     .update(hooks)
     .set({
-      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       ...(patch.params !== undefined ? { params: JSON.stringify(patch.params) } : {}),
       ...(patch.transport !== undefined

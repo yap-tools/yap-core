@@ -100,12 +100,20 @@ export async function updateUserDoc(
 ): Promise<UserDoc> {
   assertAccountWrite();
   await getUserDoc(db, userId, docId);
-  if (patch.name !== undefined && !patch.name.trim()) throw invalid("user doc name cannot be empty");
+  const name = patch.name !== undefined ? patch.name.trim() : undefined;
+  if (name !== undefined && !name) throw invalid("user doc name cannot be empty");
   const { userDocs } = db.tables;
+  if (name !== undefined) {
+    const clash = await db.client
+      .select({ id: userDocs.id })
+      .from(userDocs)
+      .where(and(eq(userDocs.userId, userId), eq(userDocs.name, name)));
+    if (clash.some((r) => r.id !== docId)) throw invalid(`a user doc named "${name}" already exists`);
+  }
   await db.client
     .update(userDocs)
     .set({
-      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...(patch.content !== undefined ? { content: patch.content } : {}),
       ...(patch.autoload !== undefined ? { autoload: patch.autoload ? 1 : 0 } : {}),
       updatedAt: nowIso(),
