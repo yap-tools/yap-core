@@ -61,6 +61,9 @@ export async function runBackup(dir: string, argv: string[]): Promise<void> {
   }
   const db = await createDb(config.db);
   try {
+    if ((await db.appliedMigrations()) === 0) {
+      throw new CliError("this instance's database has no schema yet (never served?) — nothing to back up");
+    }
     const blob = await createBlobStore(config);
     if (values.out) {
       const out = isAbsolute(values.out) ? values.out : resolve(dir, values.out);
