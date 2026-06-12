@@ -76,8 +76,17 @@ export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: 
   const mcp = new FastMCP<SessionAuth>({
     name: "yap",
     version: "0.1.0",
-    instructions:
-      "Yap serves navigable context. Discover with load → load_space → load_bundle, then execute with call.",
+    instructions: `Yap serves navigable context: spaces hold bundles; a bundle holds docs, item-types (schemas with items), files, and hooks.
+
+Engage Yap whenever a request involves its spaces, stored items, files, or hooks, or names a space or bundle. Discovery is progressive — follow this order:
+1. load — the spaces you can reach (with bundle names) plus your autoloading user docs.
+2. load_space(space_id) — the space's operator instructions and bundle descriptions.
+3. load_bundle(bundle_ids) — REQUIRED before call: binding docs, item-type schemas, files, hooks.
+4. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
+
+If several spaces or bundles could match the user's intent, ask the user rather than guessing. Run the discovery chain silently — do not narrate loading calls.
+
+Stored references are opaque — resolve before showing them to a user: file://{uuid} via show_file (returns an expiring link), item://{uuid} via get_items. Never surface raw reference URIs, durable storage locations, or hook transports. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items".`,
     logger,
     authenticate: (request) => authenticateMcp(request, db, config),
     health: { enabled: true, path: "/health", message: "ok" },

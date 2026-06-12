@@ -64,7 +64,7 @@ function grantCapabilities(params: Record<string, unknown>): string[] {
 export const secondTier: Record<string, SecondTierTool> = {
   query_items: {
     description:
-      "Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction}), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in. For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array).",
+      'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction}), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
     capability: "read_items",
     handler: async (env, params) => {
       const page = await itemsCore.queryItems(env.db, env.userId, env.bundleId, {
@@ -86,7 +86,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   create_items: {
     description:
-      "Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values, e.g. {tags: [\"a\",\"b\"]}).",
+      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}].',
     capability: "edit_items",
     handler: async (env, params) => ({
       result: await itemsCore.createItems(env.db, env.userId, env.bundleId, {

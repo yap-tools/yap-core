@@ -97,7 +97,10 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(work).toBeTruthy();
       expect(work.keywords).toContain("todos");
       expect(work.role).toContain("read_items");
+      // Bundle names ride along in load so intent can be routed in one call.
+      expect(work.bundles).toContain("todos");
       expect(result.spaces.some((s: any) => s.personal)).toBe(true);
+      expect(result.world.time.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(result.tools.call.second_tier.query_items.capability).toBe("read_items");
     });
 

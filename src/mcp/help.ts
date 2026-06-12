@@ -37,9 +37,10 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 
 ## How to work
 
-1. **load** — discover your spaces (id, name, description, keywords, role).
-   Match the user's intent against this metadata instead of opening
-   everything. Autoloading user docs arrive here too.
+1. **load** — discover your spaces (id, name, description, keywords, role,
+   and the names of the bundles inside). Match the user's intent against this
+   metadata instead of opening everything; if several spaces could match, ask
+   the user. Autoloading user docs and the current time arrive here too.
 2. **load_space(space_id)** — the space's instructions and its bundles.
 3. **load_bundle(bundle_ids)** — required before calling into a bundle:
    returns docs (follow them), item-type schemas, files, and hooks.

@@ -25,6 +25,7 @@ import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
+import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, secondTier, type PerCallResult } from "./call.js";
@@ -98,7 +99,7 @@ export function registerMcpTools(server: YapServer): void {
   mcp.addTool({
     name: "load",
     description:
-      "Entry point. Returns the spaces you can reach (id, name, description, keywords, and your role — use this metadata to match the user's intent before descending), your autoloading user docs, and the space-level tool specs.",
+      "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or hooks, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → call. Run the chain silently — do not narrate loading calls.",
     annotations: { readOnlyHint: true, title: "Load context" },
     execute: async (_args, ctx) => {
       try {
@@ -108,6 +109,11 @@ export function registerMcpTools(server: YapServer): void {
         );
         const spaces = [];
         for (const space of reachable) {
+          // Bundle names ride along so one load call is enough to route the
+          // user's intent to a space; descriptions stay in load_space.
+          const { items: visibleBundles } = await drainPages((cursor) =>
+            listBundles(db, userId, space.id, { cursor, limit: 200 }),
+          );
           spaces.push({
             id: space.id,
             name: space.name,
@@ -115,12 +121,16 @@ export function registerMcpTools(server: YapServer): void {
             keywords: space.keywords,
             personal: space.personal === 1,
             role: await effectiveCapabilities(db, userId, { space: toSpaceRef(space) }),
+            bundles: visibleBundles.map((b) => b.name),
           });
         }
         const autoloaded = await userDocsCore.autoloadedUserDocs(db, userId);
         const allDocs = await userDocsCore.listUserDocs(db, userId);
         return asJson({
           ...(truncated ? { truncated: "more spaces exist than shown; use the REST API to page through all" } : {}),
+          // An anchor for date-relative requests ("due this week") on hosts
+          // that don't inject the current date themselves.
+          world: { time: { iso: nowIso() } },
           spaces,
           user_docs: {
             autoloaded,
@@ -142,7 +152,7 @@ export function registerMcpTools(server: YapServer): void {
   mcp.addTool({
     name: "load_space",
     description:
-      "Given a space id, returns the space's context (operator instructions to follow), the bundles it contains (id, name, description — pick the ones likely to hold the answer), and your role in the space.",
+      "Step 2 of the discovery chain. Given a space id, returns the space's context (operator instructions to follow), the bundles it contains (id, name, description — pick the ones likely to hold the answer), and your role in the space. Next: load_bundle with the bundle ids you intend to use. Do not narrate this call.",
     parameters: z.object({ space_id: z.string() }),
     annotations: { readOnlyHint: true, title: "Load space" },
     execute: async (args, ctx) => {
@@ -173,7 +183,7 @@ export function registerMcpTools(server: YapServer): void {
   mcp.addTool({
     name: "load_bundle",
     description:
-      "Required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (binding — read and follow them), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Params: bundle_ids (array).",
+      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (binding — read and follow them), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
     parameters: z.object({ bundle_ids: z.array(z.string()).min(1) }),
     annotations: { readOnlyHint: true, title: "Load bundles" },
     execute: async (args, ctx) => {
@@ -256,7 +266,7 @@ export function registerMcpTools(server: YapServer): void {
   mcp.addTool({
     name: "call",
     description:
-      `The single execution verb: a batch of second-tier operations in one round trip. Each call names a tool, its params, and a target — a bundle (provide bundle_id; load it first with load_bundle) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
+      `The single execution verb: a batch of second-tier operations in one round trip. You MUST call load_bundle on a bundle before calling into it — its docs and schemas are needed to call correctly. Each call names a tool, its params, and a target — a bundle (provide bundle_id) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Every tool is gated by the capability in its spec (returned by load) — check it against your role before calling; on a denial, tell the user which capability they lack rather than retrying. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items". Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
     parameters: callSchema,
     execute: async (args, ctx) => {
       try {
