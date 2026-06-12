@@ -14,7 +14,7 @@ import { z } from "zod";
 
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
-import * as docsCore from "../core/docs.js";
+import * as bundleDocsCore from "../core/bundleDocs.js";
 import { YapError, invalid, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
@@ -419,20 +419,52 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Docs ------------------------------------------------------------------
 
+  app.post(
+    "/v1/bundles/:id/docs",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({ name: z.string(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await bundleDocsCore.createDoc(db, userId, param(c, "id"), body), 201);
+    }),
+  );
+
   app.get(
     "/v1/bundles/:id/docs",
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
-      return c.json(await docsCore.readDocs(db, userId, param(c, "id")));
+      return c.json({ data: await bundleDocsCore.listDocs(db, userId, param(c, "id")) });
     }),
   );
 
-  app.put(
-    "/v1/bundles/:id/docs",
+  app.get(
+    "/v1/bundles/:id/docs/:docRef",
     handle(async (c) => {
       const userId = await requireUser(c, db, config);
-      const body = parseBody(z.object({ docs: z.string() }), await jsonBody(c));
-      return c.json(await docsCore.updateDocs(db, userId, param(c, "id"), body.docs));
+      return c.json(await bundleDocsCore.getDoc(db, userId, param(c, "id"), param(c, "docRef")));
+    }),
+  );
+
+  app.patch(
+    "/v1/bundles/:id/docs/:docRef",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      const body = parseBody(
+        z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await bundleDocsCore.updateDoc(db, userId, param(c, "id"), param(c, "docRef"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/bundles/:id/docs/:docRef",
+    handle(async (c) => {
+      const userId = await requireUser(c, db, config);
+      await bundleDocsCore.deleteDoc(db, userId, param(c, "id"), param(c, "docRef"));
+      return c.json({ deleted: true });
     }),
   );
 

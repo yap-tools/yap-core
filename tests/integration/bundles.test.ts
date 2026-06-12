@@ -32,7 +32,6 @@ describeEachAdapter("bundles over REST", (adapter) => {
       const res = await alice.post(`/v1/spaces/${spaceId}/bundles`, {
         name: "todos",
         description: "Task tracking",
-        docs: "Always set status.",
         itemTypes: [
           {
             name: "todo",
@@ -45,7 +44,6 @@ describeEachAdapter("bundles over REST", (adapter) => {
       });
       expect(res.status).toBe(201);
       const bundle = await alice.get(`/v1/bundles/${res.body.id}`);
-      expect(bundle.body.docs).toBe("Always set status.");
       expect(bundle.body.itemTypes).toHaveLength(1);
       expect(bundle.body.itemTypes[0].properties.map((p: any) => p.name)).toEqual(["title", "status"]);
     });
@@ -105,26 +103,61 @@ describeEachAdapter("bundles over REST", (adapter) => {
     let bundleId: string;
 
     beforeAll(async () => {
-      bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "documented", docs: "v1" })).body.id;
+      bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "documented" })).body.id;
     });
 
-    it("reads and replaces the bundle docs", async () => {
-      expect((await alice.get(`/v1/bundles/${bundleId}/docs`)).body.docs).toBe("v1");
-      const put = await alice.put(`/v1/bundles/${bundleId}/docs`, { docs: "v2 — follow these rules" });
-      expect(put.status).toBe(200);
-      expect((await alice.get(`/v1/bundles/${bundleId}/docs`)).body.docs).toBe("v2 — follow these rules");
+    it("creates, lists, reads, updates, and deletes named docs", async () => {
+      const created = await alice.post(`/v1/bundles/${bundleId}/docs`, {
+        name: "style-guide",
+        content: "Prefer short sentences.",
+      });
+      expect(created.status).toBe(201);
+      expect(created.body.autoload).toBe(0);
+      await alice.post(`/v1/bundles/${bundleId}/docs`, {
+        name: "instructions",
+        content: "Always set status.",
+        autoload: true,
+      });
+
+      const list = await alice.get(`/v1/bundles/${bundleId}/docs`);
+      expect(list.body.data.map((d: any) => d.name)).toEqual(["style-guide", "instructions"]);
+      expect(list.body.data[0].content).toBeUndefined();
+
+      const byName = await alice.get(`/v1/bundles/${bundleId}/docs/style-guide`);
+      expect(byName.body.content).toBe("Prefer short sentences.");
+      const byId = await alice.get(`/v1/bundles/${bundleId}/docs/${created.body.id}`);
+      expect(byId.body.name).toBe("style-guide");
+
+      const patched = await alice.patch(`/v1/bundles/${bundleId}/docs/style-guide`, {
+        content: "Prefer short sentences. Use headings.",
+        autoload: true,
+      });
+      expect(patched.body.autoload).toBe(1);
+      expect(patched.body.content).toContain("headings");
+
+      expect((await alice.delete(`/v1/bundles/${bundleId}/docs/style-guide`)).status).toBe(200);
+      expect((await alice.get(`/v1/bundles/${bundleId}/docs/style-guide`)).status).toBe(404);
     });
 
-    it("gates docs writes on edit_docs separately from reads", async () => {
+    it("rejects a duplicate doc name in the same bundle", async () => {
+      const dup = await alice.post(`/v1/bundles/${bundleId}/docs`, { name: "instructions" });
+      expect(dup.status).toBe(400);
+      expect(dup.body.error.message).toContain("already exists");
+    });
+
+    it("gates doc writes on edit_docs separately from reads", async () => {
       await alice.post(`/v1/bundles/${bundleId}/grants`, {
         userId: bobId,
         capabilities: ["read_items"],
         effect: "allow",
       });
       expect((await bob.get(`/v1/bundles/${bundleId}/docs`)).status).toBe(200);
-      const denied = await bob.put(`/v1/bundles/${bundleId}/docs`, { docs: "hostile" });
+      expect((await bob.get(`/v1/bundles/${bundleId}/docs/instructions`)).status).toBe(200);
+      const denied = await bob.post(`/v1/bundles/${bundleId}/docs`, { name: "hostile" });
       expect(denied.status).toBe(403);
       expect(denied.body.error.details.capability).toBe("edit_docs");
+      expect((await bob.patch(`/v1/bundles/${bundleId}/docs/instructions`, { content: "x" })).status).toBe(403);
+      expect((await bob.delete(`/v1/bundles/${bundleId}/docs/instructions`)).status).toBe(403);
     });
   });
 
