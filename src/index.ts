@@ -1,64 +1,74 @@
-import { existsSync } from "node:fs";
+#!/usr/bin/env node
+/**
+ * The `yap` command. No arguments starts the server; `init` scaffolds config
+ * and keys under the yap home (~/.yap or YAP_HOME). Kept dependency-free —
+ * two subcommands don't justify an argument parser.
+ */
+import { createRequire } from "node:module";
 
-import { createBlobStore } from "./blob/index.js";
-import { loadConfig } from "./config.js";
-import { sweepOrphans } from "./core/files.js";
-import { createDb } from "./db/index.js";
-import { createLogger } from "./logger.js";
-import { buildServer } from "./server.js";
+import { yapHome } from "./cli/home.js";
+import { initYapHome } from "./cli/init.js";
 
-// Load a local .env (from the working directory) before reading config, if one
-// exists. Uses Node's built-in parser — no dependency. Real environment
-// variables already set take precedence over .env entries, so injected secrets
-// in a deployment always win over a checked-out file.
-const envFile = process.env.YAP_ENV_FILE ?? ".env";
-if (existsSync(envFile)) process.loadEnvFile(envFile);
+const USAGE = `Usage: yap [command]
 
-const logger = createLogger();
-const config = loadConfig();
-const db = await createDb(config.db);
-await db.migrate();
-const blob = await createBlobStore(config);
+Commands:
+  (none), serve   Start the server (REST under /v1, MCP at /mcp)
+  init            Create ${yapHome()}/.env with generated keys and data paths
+  version         Print the yap version
+  help            Show this message
 
-// Minted upload/download/widget links are absolute and built from baseUrl.
-// If the server binds publicly but baseUrl still defaults to localhost, those
-// links point a remote client at its own machine — warn loudly.
-const boundPublic = config.host !== "127.0.0.1" && config.host !== "localhost" && config.host !== "::1";
-if (!process.env.YAP_BASE_URL && boundPublic) {
-  logger.warn(
-    `YAP_BASE_URL is unset while binding to ${config.host}; minted file/widget links will use ${config.baseUrl} ` +
-      `and will not work for remote clients. Set YAP_BASE_URL to this server's externally reachable origin.`,
-  );
-}
+The server reads config from the environment, with an env file as fallback:
+YAP_ENV_FILE if set, else ./.env, else $YAP_HOME/.env (~/.yap/.env).`;
 
-// baseUrl doubles as the OAuth issuer identity. OAuth 2.1 requires TLS except
-// on loopback, so a plain-http issuer on a reachable host means remote OAuth
-// clients (Claude included) will refuse or leak the flow. Warn, don't refuse —
-// LAN and tunnel setups are legitimate during bring-up.
-const issuer = new URL(config.baseUrl);
-if (issuer.protocol === "http:" && !["127.0.0.1", "[::1]", "::1", "localhost"].includes(issuer.hostname)) {
-  logger.warn(
-    `YAP_BASE_URL (${config.baseUrl}) is plain http on a non-loopback host; OAuth requires https for remote ` +
-      `clients. Put a TLS-terminating proxy in front and set YAP_BASE_URL to its https origin.`,
-  );
-}
-
-const server = buildServer(config, db, blob, logger);
-await server.start();
-logger.info(`yap listening on ${config.baseUrl} (REST under /v1, MCP at /mcp)`);
-
-const sweeper = setInterval(() => {
-  sweepOrphans({ db, blob, config }, config.orphanMaxAgeMs).catch((err) =>
-    logger.error("orphan sweep failed", err),
-  );
-}, config.orphanSweepIntervalMs);
-sweeper.unref();
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, async () => {
-    clearInterval(sweeper);
-    await server.stop();
-    await db.close();
-    process.exit(0);
-  });
+const command = process.argv[2];
+switch (command) {
+  case undefined:
+  case "serve": {
+    await (await import("./serve.js")).serve();
+    break;
+  }
+  case "init": {
+    const home = yapHome();
+    const result = initYapHome(home);
+    if (!result.created) {
+      console.error(`yap: ${result.envPath} already exists — not overwriting.`);
+      console.error("Edit it directly, or remove it and run `yap init` again to start fresh.");
+      process.exit(1);
+    }
+    console.log(`Created ${result.envPath} (config + generated keys, data under ${home}/data).`);
+    console.log("");
+    console.log(`Your sysadmin key (shown once here; it stays readable in the .env file):`);
+    console.log(`  ${result.sysadminKey}`);
+    console.log("");
+    console.log("Next steps:");
+    console.log("  yap                       # start the server on http://localhost:8787");
+    console.log("  curl -s -X POST localhost:8787/v1/users \\");
+    console.log(`    -H "Authorization: Bearer ${result.sysadminKey}" \\`);
+    console.log(`    -H "Content-Type: application/json" -d '{"name": "Ada"}'`);
+    console.log("");
+    console.log("The response includes a personal space and a one-time access key —");
+    console.log("connect any MCP client to http://localhost:8787/mcp with that key.");
+    break;
+  }
+  case "version":
+  case "--version":
+  case "-v": {
+    // Resolves from src/ (tsx) and dist/ (built) alike — both sit one level
+    // below the package root.
+    const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
+    console.log(pkg.version);
+    break;
+  }
+  case "help":
+  case "--help":
+  case "-h": {
+    console.log(USAGE);
+    break;
+  }
+  default: {
+    console.error(`yap: unknown command ${JSON.stringify(command)}`);
+    console.error("");
+    console.error(USAGE);
+    process.exit(1);
+  }
 }

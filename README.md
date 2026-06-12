@@ -27,26 +27,34 @@ session start).
 
 ## Quickstart (onbox)
 
+Install straight from GitHub — no registry involved (Node 22+; npm clones,
+builds, and links the `yap` command):
+
+```sh
+npm install -g github:yap-tools/yap-core
+
+yap init     # creates ~/.yap/.env with generated keys + data paths
+yap          # start the server
+```
+
+`yap init` prints your **sysadmin key** and never overwrites an existing
+config. Everything lives under `~/.yap` (override with `YAP_HOME`); upgrade by
+re-running the install command, or pin a release with
+`npm install -g github:yap-tools/yap-core#v0.1.0`.
+
+Running from a checkout works the same as ever:
+
 ```sh
 npm install
-npm run build
-
-YAP_SYSADMIN_KEY="change-me-at-least-16-chars" \
-YAP_MASTER_KEY="$(openssl rand -base64 32)" \
-npm start
-```
-
-Or keep the vars in a file — the server loads a local `.env` automatically on
-startup (Node's built-in parser, no dependency):
-
-```sh
 cp .env.example .env       # then fill in YAP_MASTER_KEY etc.
-npm run dev                # or: npm start
+npm run dev                # or: npm run build && npm start
 ```
 
-Real environment variables override `.env` entries, so a deployment can inject
-secrets via the environment and leave `.env` for local dev. Point at a
-different file with `YAP_ENV_FILE=path/to/file`.
+Config comes from the environment, with an env file as fallback — the first
+of `YAP_ENV_FILE`, `./.env`, `$YAP_HOME/.env` that exists is loaded (Node's
+built-in parser, no dependency). Real environment variables override file
+entries, so a deployment can inject secrets via the environment and leave the
+file for local dev.
 
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
@@ -70,6 +78,8 @@ its own logs for exactly that reason).
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `YAP_HOME` | `~/.yap` | Home for installed use: `yap init` writes `.env` and data here |
+| `YAP_ENV_FILE` | — | Explicit env-file path (beats `./.env` and `$YAP_HOME/.env`) |
 | `YAP_SYSADMIN_KEY` | *(required)* | Environment credential for user provisioning over REST |
 | `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: hook-secret encryption + link/token signing |
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
