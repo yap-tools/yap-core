@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 
 import { exportBackup } from "../../src/backup/export.js";
 import { readManifest } from "../../src/backup/format.js";
+import { importArchive } from "../../src/backup/import.js";
 import { createBlobStore } from "../../src/blob/index.js";
 import type { YapConfig } from "../../src/config.js";
 import type { Db } from "../../src/db/index.js";
@@ -132,4 +133,131 @@ describeEachAdapter("backup export", (adapter: Adapter) => {
     ).rejects.toThrow(/no schema/);
     await db.close();
   });
+});
+
+describeEachAdapter("backup import", (adapter: Adapter) => {
+  it("round-trips all rows and blobs into a fresh database", async () => {
+    const db = await adapter.makeDb();
+    const work = tmp();
+    await seed(db, join(work, "blobs"));
+    const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+    const out = join(work, "out.tar.gz");
+    await exportBackup({ db, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+    await db.close();
+
+    const db2 = await adapter.makeFreshDb();
+    const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+    const result = await importArchive({ db: db2, blob: blob2, archivePath: out });
+    expect(result.tables.users).toBe(1);
+
+    const users = await db2.snapshotRead(async (read) => read("users"));
+    expect(users).toEqual([{ id: "u1", name: "ada", created_at: "2026-01-01T00:00:00Z" }]);
+    const files = await db2.snapshotRead(async (read) => read("files"));
+    expect(files).toHaveLength(1);
+    expect(await blob2.stat("k/f1")).toMatchObject({ size: 5 });
+
+    // schema sits at the archive's index; a normal migrate() completes it
+    await db2.migrate();
+    expect(await db2.appliedMigrations()).toBe(db2.journalLength());
+    await db2.close();
+  });
+
+  it("refuses a non-empty target without force and replaces it with force", async () => {
+    const work = tmp();
+    const db = await adapter.makeDb();
+    await seed(db, join(work, "blobs"));
+    const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+    const out = join(work, "out.tar.gz");
+    await exportBackup({ db, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+    await db.close();
+
+    const target = await adapter.makeDb();
+    await target.insertRows("users", [{ id: "old", name: "old", created_at: "x" }]);
+    const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+    await expect(importArchive({ db: target, blob: blob2, archivePath: out })).rejects.toThrow(/not empty/);
+
+    await importArchive({ db: target, blob: blob2, archivePath: out, force: true });
+    const users = await target.snapshotRead(async (read) => read("users"));
+    expect(users.map((u) => u.id)).toEqual(["u1"]);
+    await target.close();
+  });
+
+  it("restores an old-schema export and migrates forward", async () => {
+    const work = tmp();
+    const db = await adapter.makeFreshDb();
+    await db.migrateTo(0);
+    await db.insertRows("users", [{ id: "u1", name: "old", created_at: "x" }]);
+    const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+    const out = join(work, "old.tar.gz");
+    const manifest = await exportBackup({ db, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+    expect(manifest.db.migrationIndex).toBe(0);
+    await db.close();
+
+    const db2 = await adapter.makeFreshDb();
+    const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+    await importArchive({ db: db2, blob: blob2, archivePath: out });
+    expect(await db2.appliedMigrations()).toBe(1);
+    await db2.migrate();
+    expect(await db2.appliedMigrations()).toBe(db2.journalLength());
+    const users = await db2.snapshotRead(async (read) => read("users"));
+    expect(users[0].id).toBe("u1");
+    await db2.close();
+  });
+
+  it("rejects an archive newer than this build's journal", async () => {
+    const work = tmp();
+    const db = await adapter.makeDb();
+    await seed(db, join(work, "blobs"));
+    const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+    const out = join(work, "out.tar.gz");
+    const manifest = await exportBackup({ db, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+    await db.close();
+
+    const { writeArchiveRaw } = await import("../../src/backup/format.js");
+    const future = join(work, "future.tar.gz");
+    await writeArchiveRaw(
+      future,
+      { ...manifest, db: { ...manifest.db, migrationIndex: 9999 }, entries: [] },
+      [],
+    );
+    const db2 = await adapter.makeFreshDb();
+    const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+    await expect(importArchive({ db: db2, blob: blob2, archivePath: future })).rejects.toThrow(/upgrade yap-core/);
+    await db2.close();
+  });
+});
+
+// Cross-dialect restores: a sqlite archive into pg (and back) — the whole
+// point of the normalized format. Runs when a pg test database is available.
+const PG_URL = process.env.YAP_TEST_PG_URL;
+it.runIf(PG_URL)("cross-dialect: sqlite export restores into pg and back", async () => {
+  const { createDb } = await import("../../src/db/index.js");
+  const work = tmp();
+  const sqliteDb = await createDb({ dialect: "sqlite", path: ":memory:" });
+  await sqliteDb.migrate();
+  await seed(sqliteDb, join(work, "blobs"));
+  const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+  const out = join(work, "out.tar.gz");
+  await exportBackup({ db: sqliteDb, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+  await sqliteDb.close();
+
+  const pgDb = await createDb({ dialect: "pg", url: PG_URL! });
+  await pgDb.dropAllTables();
+  const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+  await importArchive({ db: pgDb, blob: blob2, archivePath: out });
+  const users = await pgDb.snapshotRead(async (read) => read("users"));
+  expect(users).toEqual([{ id: "u1", name: "ada", created_at: "2026-01-01T00:00:00Z" }]);
+
+  // and back: pg → sqlite
+  const back = join(work, "back.tar.gz");
+  await exportBackup({ db: pgDb, blob: blob2, trigger: "manual", yapVersion: "0.0.0", outPath: back });
+  await pgDb.dropAllTables();
+  await pgDb.close();
+
+  const sqlite2 = await createDb({ dialect: "sqlite", path: ":memory:" });
+  const blob3 = await createBlobStore(blobConfig(join(work, "blobs3")));
+  await importArchive({ db: sqlite2, blob: blob3, archivePath: back });
+  const users2 = await sqlite2.snapshotRead(async (read) => read("users"));
+  expect(users2.map((u) => u.id)).toEqual(["u1"]);
+  await sqlite2.close();
 });
