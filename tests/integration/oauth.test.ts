@@ -87,6 +87,7 @@ describeEachAdapter("oauth", (adapter) => {
   let app: TestApp;
   let sysadmin: ApiClient;
   let aliceKey: string;
+  let aliceId: string;
   let alice: ApiClient;
   let personalSpaceId: string;
   let bundleId: string;
@@ -95,6 +96,7 @@ describeEachAdapter("oauth", (adapter) => {
     app = await bootTestApp({}, await adapter.makeDb());
     sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const created = await sysadmin.post("/v1/users", { name: "Alice" });
+    aliceId = created.body.user.id;
     aliceKey = created.body.initialKey.key;
     personalSpaceId = created.body.personalSpaceId;
     alice = apiClient(app.baseUrl, aliceKey);
@@ -303,6 +305,15 @@ describeEachAdapter("oauth", (adapter) => {
       expect((await api.get("/v1/spaces")).status).toBe(200);
     });
 
+    it("access tokens report the underlying user through whoami", async () => {
+      const { access_token } = await connectApp(app.baseUrl, aliceKey);
+      const res = await apiClient(app.baseUrl, access_token).get("/v1/whoami");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ id: aliceId, name: "Alice" });
+      expect(Object.keys(res.body).sort()).toEqual(["id", "name"]);
+    });
+
     it("rejects a wrong PKCE verifier and burns the code on first use", async () => {
       const client = await registerClient(app.baseUrl);
       const { verifier, challenge } = pkce();
@@ -505,6 +516,10 @@ describeEachAdapter("oauth", (adapter) => {
     const { access_token } = await connectApp(app.baseUrl, aliceKey);
     const mcp = await connectMcp(app.baseUrl, access_token);
     try {
+      const identity = await mcp.call("whoami");
+      expect(identity).toEqual({ id: aliceId, name: "Alice" });
+      expect(Object.keys(identity).sort()).toEqual(["id", "name"]);
+
       const result = await mcp.call("load");
       expect(result.spaces.some((s: any) => s.id === personalSpaceId)).toBe(true);
     } finally {

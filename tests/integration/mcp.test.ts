@@ -13,6 +13,7 @@ describeEachAdapter("MCP surface", (adapter) => {
   let app: TestApp;
   let sysadmin: ApiClient;
   let aliceKey: string;
+  let aliceId: string;
   let alice: McpTestClient;
   let aliceRest: ApiClient;
   let bobKey: string;
@@ -24,6 +25,7 @@ describeEachAdapter("MCP surface", (adapter) => {
     app = await bootTestApp({}, await adapter.makeDb());
     sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
+    aliceId = a.body.user.id;
     aliceKey = a.body.initialKey.key;
     aliceRest = apiClient(app.baseUrl, aliceKey);
     const b = await sysadmin.post("/v1/users", { name: "Bob" });
@@ -74,6 +76,7 @@ describeEachAdapter("MCP surface", (adapter) => {
     const tools = await alice.client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
     expect(names).toContain("load");
+    expect(names).toContain("whoami");
     expect(names).toContain("load_space");
     expect(names).toContain("load_bundle");
     expect(names).toContain("help");
@@ -88,6 +91,12 @@ describeEachAdapter("MCP surface", (adapter) => {
     // show_file and upload_request are second-tier, not top-level.
     expect(names).not.toContain("show_file");
     expect(names).not.toContain("upload_request");
+  });
+
+  it("whoami returns the current user identity as a top-level tool", async () => {
+    const result = await alice.call("whoami");
+    expect(result).toEqual({ id: aliceId, name: "Alice" });
+    expect(Object.keys(result).sort()).toEqual(["id", "name"]);
   });
 
   describe("the discovery chain", () => {
