@@ -109,10 +109,16 @@ describeEachAdapter("widgets", (adapter) => {
   });
 
   describe("show_widget (the shell)", () => {
-    it("statically declares the shell template for MCP Apps prefetch", async () => {
+    it("statically declares the shell template for MCP Apps prefetch, with a CSP for the origins widgets touch", async () => {
       const tools = await aliceMcp.client.listTools();
       const showWidget = tools.tools.find((t) => t.name === "show_widget")!;
-      expect((showWidget._meta as any)?.ui?.resourceUri).toBe("ui://yap/shell");
+      const ui = (showWidget._meta as any)?.ui;
+      expect(ui?.resourceUri).toBe("ui://yap/shell");
+      // The widget mounts in the shell's own document, so the host must let the
+      // shell reach the server's origin (media bytes, upload PUT/finalize).
+      const origin = new URL(app.baseUrl).origin;
+      expect(ui?.csp?.connectDomains).toContain(origin);
+      expect(ui?.csp?.resourceDomains).toContain(origin);
     });
 
     it("renders any registered widget by name: text content + structuredContent for MCP Apps", async () => {
@@ -125,13 +131,14 @@ describeEachAdapter("widgets", (adapter) => {
       expect(text.widget).toBe("ui://yap/media-card");
       expect(text.params.kind).toBe("image");
       expect(raw.content.every((c: any) => c.type === "text")).toBe(true);
-      // MCP Apps render channel: the host forwards structuredContent to the
-      // shell iframe as ui/notifications/tool-result. It carries the target
-      // widget, its params, and the inlined HTML (so no resources/read needed).
+      // MCP Apps render channel: the host forwards structuredContent to the shell
+      // as ui/notifications/tool-result. It carries the target widget, its params,
+      // and the chosen widget's style + render so the shell mounts it in-place —
+      // no nested iframe (which strict hosts leave blank), no resources/read.
       expect(raw.structuredContent.widget).toBe("ui://yap/media-card");
       expect(raw.structuredContent.params.kind).toBe("image");
-      expect(raw.structuredContent.html).toContain("<!doctype html>");
-      expect(raw.structuredContent.html).toContain("media-card");
+      expect(raw.structuredContent.render).toBe(WIDGETS["media-card"]!.render);
+      expect(raw.structuredContent.style).toBe(WIDGETS["media-card"]!.style);
     });
 
     it("rejects unknown widgets with the registry listed", async () => {

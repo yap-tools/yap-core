@@ -7,6 +7,7 @@
 import { UserError } from "fastmcp";
 import { z } from "zod";
 
+import type { YapConfig } from "../config.js";
 import { runWithTokenAuth } from "../core/authScope.js";
 import {
   DATATYPES,
@@ -78,6 +79,49 @@ const SECOND_TIER_SPECS = Object.fromEntries(
   ]),
 );
 
+/** The origin a presigned S3 (or compatible) link is served from. */
+function blobOrigin(blob: Extract<YapConfig["blob"], { driver: "s3" }>): string | null {
+  try {
+    if (blob.endpoint) {
+      const u = new URL(blob.endpoint);
+      // Path-style keeps the bucket in the path (origin unchanged); virtual-host
+      // hosting prepends the bucket as a subdomain.
+      return blob.forcePathStyle ? u.origin : `${u.protocol}//${blob.bucket}.${u.host}`;
+    }
+    // AWS default endpoints.
+    return blob.forcePathStyle
+      ? `https://s3.${blob.region}.amazonaws.com`
+      : `https://${blob.bucket}.s3.${blob.region}.amazonaws.com`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The static CSP a widget-capable host applies to the show_widget shell. A
+ * widget mounts in the shell's own document, so the shell must be allowed to
+ * reach every origin the registered widgets touch: media-card loads file bytes,
+ * upload-dropzone PUTs bytes and POSTs the finalize call. Per-call origins
+ * aren't knowable here — fastmcp forwards only a static, tool-level _meta (a
+ * result-level _meta is rejected) — but they're fixed per deployment: the
+ * server's own base URL always, plus the S3 store's origin when blobs are
+ * presigned off-origin. Declared in both connect and resource scopes since a
+ * given origin may be fetched (upload) or loaded as media (show_file).
+ */
+function widgetCspDomains(config: YapConfig): string[] {
+  const origins = new Set<string>();
+  try {
+    origins.add(new URL(config.baseUrl).origin);
+  } catch {
+    /* baseUrl is validated at boot; ignore if somehow unparseable */
+  }
+  if (config.blob.driver === "s3") {
+    const s3 = blobOrigin(config.blob);
+    if (s3) origins.add(s3);
+  }
+  return [...origins];
+}
+
 export function registerMcpTools(server: YapServer): void {
   const { mcp, db, config, blob } = server;
   const env = { db, config, blob, baseUrl: config.baseUrl };
@@ -97,6 +141,8 @@ export function registerMcpTools(server: YapServer): void {
     });
 
   // ---- The widget registry: every widget is a ui:// resource -------------------
+
+  const cspDomains = widgetCspDomains(config);
 
   for (const def of Object.values(WIDGETS)) {
     mcp.addResource({
@@ -327,6 +373,18 @@ export function registerMcpTools(server: YapServer): void {
 
   // ---- Display -------------------------------------------------------------------
 
+  // Static tool template for MCP Apps prefetch. The CSP lets the shell reach the
+  // origins the widgets touch — fastmcp only forwards a static, tool-level _meta
+  // (built once from config, not per call). fastmcp's _meta.ui type models only
+  // resourceUri; it forwards _meta verbatim, so building this as a plain object
+  // lets the spec's ui.csp ride along.
+  const showWidgetMeta = {
+    ui: {
+      resourceUri: `${UI_SCHEME_PREFIX}shell`,
+      csp: { connectDomains: cspDomains, resourceDomains: cspDomains },
+    },
+  };
+
   addTool({
     name: "show_widget",
     description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those.`,
@@ -335,7 +393,7 @@ export function registerMcpTools(server: YapServer): void {
       params: z.record(z.string(), z.unknown()).optional(),
     }),
     annotations: { readOnlyHint: true, title: "Show widget" },
-    _meta: { ui: { resourceUri: `${UI_SCHEME_PREFIX}shell` } },
+    _meta: showWidgetMeta,
     execute: async (args) => {
       const name = args.widget.replace(UI_SCHEME_PREFIX, "");
       const def = WIDGETS[name];
@@ -344,13 +402,15 @@ export function registerMcpTools(server: YapServer): void {
       }
       // Two channels, no resource_link (see the note in `call`):
       //  - text content: the {widget, params} JSON, readable by any client.
-      //  - structuredContent: how an MCP Apps host feeds the rendered shell its
-      //    data (delivered to the iframe as ui/notifications/tool-result). We
-      //    inline the resolved widget HTML so the shell needn't resources/read.
+      //  - structuredContent: how an MCP Apps host feeds the shell its data
+      //    (delivered as ui/notifications/tool-result). We inline the chosen
+      //    widget's style + render so the shell mounts it in its own document —
+      //    no nested iframe, which strict hosts refuse to let a widget frame
+      //    spawn (the old blank). resources/read stays the re-mount fallback.
       const params = args.params ?? {};
       return {
         content: [{ type: "text" as const, text: asJson({ widget: def.uri, params }) }],
-        structuredContent: { widget: def.uri, params, html: widgetHtml(def.name, "client") },
+        structuredContent: { widget: def.uri, params, style: def.style, render: def.render },
       };
     },
   });

@@ -111,6 +111,12 @@ const BRIDGE_JS = `
     var s = String(v == null ? "" : v);
     return /^https?:\\/\\//i.test(s) ? esc(s) : "#";
   }
+  // Mirror the bridge onto window so a widget the shell mounts in-place (its
+  // render injected as a top-level <script>, not wrapped in this IIFE) can still
+  // resolve onData/esc/safeUrl/emit/announceHeight by their bare names.
+  window.onData = onData; window.esc = esc; window.safeUrl = safeUrl;
+  window.emit = emit; window.announceHeight = announceHeight;
+  window.request = request; window.send = send;
 `;
 
 const BASE_STYLE = `
@@ -145,65 +151,63 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "shell",
     uri: `${UI_SCHEME_PREFIX}shell`,
     description:
-      "Generic widget shell: reads any registered ui:// widget resource through the host and renders it with the supplied params. The statically-declared template for show_widget.",
+      "Generic widget shell: renders any registered ui:// widget in its own document with the supplied params. The statically-declared template for show_widget.",
     originHostable: false,
-    // The nested widget owns its own container padding, so the shell drops the
-    // body inset to avoid double-padding. Its `.card` keeps padding only so the
-    // rare error fallback stays readable (the nested widget renders in its own
-    // document, unaffected).
-    style: ".shellframe { border: 0; width: 100%; } body { padding: 0; } .card { padding: 14px; }",
+    // Kept only for the rare recovery iframe (see below); the in-place widget
+    // sits directly in the shell body and inherits BASE_STYLE's inset.
+    style: ".shellframe { border: 0; width: 100%; }",
     render: `
-      var rendered = false;
-      var fallbackTimer = null;
-      var sizeListener = null;
       var root = document.getElementById("root");
-      function mount(html, params) {
-        if (!html) { if (!rendered) root.innerHTML = '<div class="card err">shell: empty widget</div>'; return; }
-        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
-        // Drop the previous frame's size listener before mounting a new one so
-        // re-mounts don't accumulate listeners bound to stale iframes.
-        if (sizeListener) { window.removeEventListener("message", sizeListener); }
-        var f = document.createElement("iframe");
-        f.className = "shellframe";
-        f.setAttribute("sandbox", "allow-scripts");
-        f.srcdoc = html;
-        f.onload = function () {
-          f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: params || {} } }, "*");
-        };
-        // The nested widget reports its size to us (its parent); resize the
-        // frame and re-announce our own size up to the host.
-        sizeListener = function (e) {
-          if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
-            f.style.height = e.data.params.height + "px";
-            requestAnimationFrame(announceHeight);
-          }
-        };
-        window.addEventListener("message", sizeListener);
-        root.innerHTML = "";
-        root.appendChild(f);
-        rendered = true;
-      }
+      var rendered = false;
+      function fail(msg) { if (!rendered) root.innerHTML = '<div class="card err">shell: ' + msg + '</div>'; }
       onData(function (d) {
-        if (!d || !d.widget) {
-          // A spurious empty update must not replace a widget we already mounted.
-          if (!rendered) root.innerHTML = '<div class="card err">shell: no widget named</div>';
+        if (!d || !d.widget) { fail("no widget named"); return; }
+        // A spurious re-deliver must not clobber a widget we already mounted.
+        if (rendered) return;
+        // Primary path: show_widget inlines the chosen widget's style + render in
+        // structuredContent. Mount it in THIS document — no nested iframe, which a
+        // strict host (Claude Desktop, Mistral Vibe) won't let a widget frame
+        // spawn (frame-src), leaving the old nesting shell blank.
+        if (d.render) {
+          rendered = true;
+          if (d.style) { var st = document.createElement("style"); st.textContent = d.style; document.head.appendChild(st); }
+          // Re-point the data channel: the widget's onData(cb) must receive its
+          // own params, not this shell envelope.
+          window.onData = function (cb) { cb(d.params || {}); requestAnimationFrame(announceHeight); };
+          // Inline script — runs under the same CSP the shell document already
+          // satisfies (no nested frame, no eval).
+          var s = document.createElement("script");
+          s.textContent = d.render;
+          document.body.appendChild(s);
           return;
         }
-        // The tool result inlines the widget HTML — render it immediately.
-        if (d.html) { mount(d.html, d.params); return; }
-        // From tool-input args (no html), e.g. after a host re-mount: give a
-        // richer tool-result a beat to arrive, else fetch the widget via the host.
-        if (rendered || fallbackTimer) return;
-        var widgetUri = d.widget, params = d.params;
-        fallbackTimer = setTimeout(function () {
-          fallbackTimer = null;
-          if (rendered) return;
-          request("resources/read", { uri: widgetUri })
-            .then(function (r) { mount(r && r.contents && r.contents[0] && r.contents[0].text, params); })
-            .catch(function (err) {
-              if (!rendered) root.innerHTML = '<div class="card err">shell: could not load widget (' + (err && err.message || err) + ')</div>';
+        // Recovery path: a host re-mounted us and replayed only the tool-input
+        // {widget, params} with no structuredContent, so we lack the source.
+        // Fetch the widget's document through the host and frame it (best effort;
+        // a host that suppresses structuredContent on re-mount is the exception).
+        var uri = d.widget.indexOf("://") === -1 ? "${UI_SCHEME_PREFIX}" + d.widget : d.widget;
+        request("resources/read", { uri: uri })
+          .then(function (r) {
+            var html = r && r.contents && r.contents[0] && r.contents[0].text;
+            if (!html || rendered) { if (!html) fail("empty widget"); return; }
+            rendered = true;
+            var f = document.createElement("iframe");
+            f.className = "shellframe";
+            f.setAttribute("sandbox", "allow-scripts");
+            f.srcdoc = html;
+            f.onload = function () {
+              f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: d.params || {} } }, "*");
+            };
+            window.addEventListener("message", function (e) {
+              if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
+                f.style.height = e.data.params.height + "px";
+                requestAnimationFrame(announceHeight);
+              }
             });
-        }, 300);
+            root.innerHTML = "";
+            root.appendChild(f);
+          })
+          .catch(function (err) { fail("could not load widget (" + (err && err.message || err) + ")"); });
       });
     `,
   },

@@ -54,7 +54,7 @@ const CARDS: Card[] = [
   {
     label: "shell → media-card",
     widget: "shell",
-    data: { widget: WIDGETS["media-card"].uri, html: widgetHtml("media-card", "origin", imageData), params: imageData },
+    data: { widget: WIDGETS["media-card"].uri, style: WIDGETS["media-card"].style, render: WIDGETS["media-card"].render, params: imageData },
   },
 ];
 
@@ -123,8 +123,8 @@ function gallery(): string {
   });
 
   // Theme switch: reload each widget with the chosen ?theme so the host theme is
-  // baked into the document (the faithful path, and the only one that reaches
-  // the shell's sandboxed nested frame).
+  // baked into the document (the faithful path — the shell mounts its widget in
+  // its own document, so the theme reaches it directly).
   var seg = document.querySelectorAll(".seg button");
   function setTheme(t) {
     document.documentElement.setAttribute("data-theme", t);
@@ -155,9 +155,7 @@ const HOST_TOKEN_CSS =
  * Inject a theme override the way a host would: a late <style> that pins
  * `color-scheme` (which drives the widgets' light-dark() fallbacks) and, for
  * "host", also supplies a dark host token set so the var()-token path is
- * exercised, not just the fallbacks. Baking it into the document (rather than
- * forcing it from the parent) is also what lets the theme reach the shell's
- * sandboxed, opaque-origin nested iframe.
+ * exercised, not just the fallbacks.
  */
 function themeStyleTag(theme: string): string {
   if (theme === "dark") return "<style>:root{color-scheme:dark}</style>";
@@ -180,12 +178,15 @@ const server = createServer((req, res) => {
     const card = CARDS[Number(widgetMatch[1])];
     if (!card) return send(res, 404, "text/plain", "no such card");
     const theme = url.searchParams.get("theme") ?? "light";
-    // The shell mounts its nested widget in a sandboxed (opaque-origin) iframe
-    // that nothing outside can reach into, so the nested HTML must be themed
-    // here before it's handed to the shell.
+    // The shell mounts its widget in its own (themed) document, so there's no
+    // separate nested frame to theme — just hand the shell the widget's source.
     if (card.widget === "shell") {
-      const nested = themed(widgetHtml("media-card", "origin", imageData), theme);
-      const shellData = { widget: WIDGETS["media-card"].uri, html: nested, params: imageData };
+      const shellData = {
+        widget: WIDGETS["media-card"].uri,
+        style: WIDGETS["media-card"].style,
+        render: WIDGETS["media-card"].render,
+        params: imageData,
+      };
       return send(res, 200, "text/html; charset=utf-8", themed(widgetHtml("shell", "origin", shellData), theme));
     }
     return send(res, 200, "text/html; charset=utf-8", themed(widgetHtml(card.widget, "origin", card.data), theme));
