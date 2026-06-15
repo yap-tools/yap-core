@@ -14,7 +14,7 @@ Do not invent resources like `/notes` or `/todos` — they don't exist. Everythi
 ```
 space                (top level; spaces do not nest)
 └── bundle
-    ├── docs         (named bundle docs; autoloaded instructions and on-demand docs)
+    ├── docs         (named bundle docs; autoloaded binding instructions and read-on-demand docs)
     ├── item-types   (schemas; each holds many items — this is where "todos" live)
     ├── files
     └── hooks        (pre-configured outbound HTTP calls; agents fire, never define)
