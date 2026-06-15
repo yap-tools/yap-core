@@ -21,8 +21,7 @@ import { Agent, fetch as undiciFetch } from "undici";
 import type { YapConfig } from "../config.js";
 import { decryptSecret, encryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
-import { bundleCapabilityCtx, getBundleContext, requireBundleReadAccess } from "./bundles.js";
-import { requireCapability } from "./capabilities.js";
+import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { YapError, invalid, notFound } from "./errors.js";
 import { assertPublicDestination, createPinningLookup, SSRF_PIN_ERROR_CODE, type Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
@@ -114,7 +113,7 @@ export async function createHook(
 ): Promise<HookInfo> {
   const { db } = env;
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_hooks", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_hooks", ctx);
   const name = input.name?.trim();
   if (!name) throw invalid("hook name is required");
   const params = input.params ?? [];
@@ -164,7 +163,7 @@ export async function updateHook(
   const { db } = env;
   const hook = await getHookRow(db, hookId);
   const ctx = await getBundleContext(db, hook.bundleId);
-  await requireCapability(db, userId, "edit_hooks", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_hooks", ctx);
   if (patch.params) validateParamSpecs(patch.params);
   if (patch.transport) await validateTransport(patch.transport, env);
   const name = patch.name !== undefined ? patch.name.trim() : undefined;
@@ -204,7 +203,7 @@ export async function deleteHook(env: HookEnv, userId: string, hookId: string): 
   const { db } = env;
   const hook = await getHookRow(db, hookId);
   const ctx = await getBundleContext(db, hook.bundleId);
-  await requireCapability(db, userId, "edit_hooks", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_hooks", ctx);
   const { hooks } = db.tables;
   await db.client.delete(hooks).where(eq(hooks.id, hookId));
 }
@@ -233,7 +232,7 @@ export async function fireHook(
 ): Promise<FireResult> {
   const { db, config } = env;
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "fire_hooks", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "fire_hooks", ctx);
 
   const { hooks } = db.tables;
   const byId = await db.client

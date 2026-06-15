@@ -17,8 +17,7 @@ import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import { signToken } from "../crypto.js";
 import type { Db } from "../db/index.js";
-import { bundleCapabilityCtx, getBundleContext } from "./bundles.js";
-import { requireCapability } from "./capabilities.js";
+import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { YapError, invalid, notFound } from "./errors.js";
 import { newId, nowIso } from "./util.js";
 
@@ -56,7 +55,7 @@ export async function listFilesUnchecked(db: Db, bundleId: string): Promise<File
 
 export async function listFiles(env: FileEnv, userId: string, bundleId: string): Promise<FileInfo[]> {
   const ctx = await getBundleContext(env.db, bundleId);
-  await requireCapability(env.db, userId, "read_files", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(env.db, userId, "read_files", ctx);
   return listFilesUnchecked(env.db, bundleId);
 }
 
@@ -101,7 +100,7 @@ export async function requestUpload(
 ): Promise<UploadRequestResult> {
   const { db, blob, config } = env;
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_files", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_files", ctx);
 
   const name = cleanFileName(input.name);
   const declaredMime = input.mime_type ?? "";
@@ -167,7 +166,7 @@ export async function completeUpload(
   const { db } = env;
   const file = await getFileRow(db, fileId);
   const ctx = await getBundleContext(db, file.bundleId);
-  await requireCapability(db, userId, "edit_files", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_files", ctx);
   return finalizeUpload(env, fileId, patch);
 }
 
@@ -240,7 +239,7 @@ export async function mintDownloadLink(env: FileEnv, userId: string, fileId: str
   const { db, blob, config } = env;
   const file = await getFileRow(db, fileId);
   const ctx = await getBundleContext(db, file.bundleId);
-  await requireCapability(db, userId, "read_files", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "read_files", ctx);
   if (file.status !== "finalized") throw notFound("file", fileId);
   const url = await blob.downloadUrl(file.storageKey, config.downloadTtlSeconds, {
     fileId: file.id,
@@ -261,7 +260,7 @@ export async function deleteFile(env: FileEnv, userId: string, fileId: string): 
   const { db, blob } = env;
   const file = await getFileRow(db, fileId);
   const ctx = await getBundleContext(db, file.bundleId);
-  await requireCapability(db, userId, "edit_files", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_files", ctx);
   await blob.delete(file.storageKey);
   const { files } = db.tables;
   await db.client.delete(files).where(eq(files.id, fileId));

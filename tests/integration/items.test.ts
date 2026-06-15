@@ -300,14 +300,18 @@ describeEachAdapter("EAV items", (adapter) => {
   });
 
   describe("capability gates", () => {
-    it("read and edit are separate capabilities", async () => {
+    it("a stranger with no access sees the bundle as absent (not_found), not forbidden", async () => {
+      // A principal with no capability on the bundle must not be able to tell
+      // it exists: reads and writes alike return not_found, matching the
+      // bundle resource. (A member who can see the bundle but lacks the
+      // specific capability still gets forbidden — see bundle-existence.test.)
       const { user: stranger } = await createUser(db, { name: "Stranger" });
-      await expect(q().then(() => queryItems(db, stranger.id, bundleId, { itemType: "todo" }))).rejects.toThrow(
-        YapError,
-      );
+      await expect(
+        q().then(() => queryItems(db, stranger.id, bundleId, { itemType: "todo" })),
+      ).rejects.toMatchObject({ code: "not_found" });
       await expect(
         createItems(db, stranger.id, bundleId, { itemType: "todo", items: [{ title: "x", status: "open" }] }),
-      ).rejects.toMatchObject({ code: "forbidden" });
+      ).rejects.toMatchObject({ code: "not_found" });
     });
   });
 });

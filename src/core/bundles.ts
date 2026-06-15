@@ -8,8 +8,8 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
-import { hasAnyCapability, requireCapability } from "./capabilities.js";
-import { invalid, notFound } from "./errors.js";
+import { hasAnyCapability, requireCapability, resolveCapability } from "./capabilities.js";
+import { forbidden, invalid, notFound } from "./errors.js";
 import type { GrantTarget } from "./grants.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
@@ -214,6 +214,33 @@ export async function requireBundleReadAccess(db: Db, userId: string, ctx: Bundl
   if (!(await hasAnyCapability(db, userId, bundleCapabilityCtx(ctx)))) {
     throw notFound("bundle", ctx.bundle.id);
   }
+}
+
+/**
+ * The capability gate for everything *inside* a bundle (items, item-types,
+ * docs, files, hooks). It keeps the bundle's existence hidden the same way the
+ * bundle resource does: a true outsider — reached by no grant and holding no
+ * other capability here — gets a 404, never a 403 that would confirm the
+ * bundle exists. Anyone who can already see the bundle but lacks this one
+ * capability, is explicitly denied it, or is clamped out by a token scope
+ * still gets the informative 403 (carrying the deciding row). Use this instead
+ * of calling requireCapability directly for any bundle-scoped action.
+ */
+export async function requireBundleCapability(
+  db: Db,
+  userId: string,
+  capability: string,
+  ctx: BundleContext,
+): Promise<void> {
+  const capCtx = bundleCapabilityCtx(ctx);
+  const decision = await resolveCapability(db, userId, capability, capCtx);
+  if (decision.allowed) return;
+  // Hide existence only from genuine outsiders: an absence-of-grants denial
+  // (not an explicit deny row or a token-scope clamp) and no other foothold.
+  if (decision.decidedBy === "default_deny" && !(await hasAnyCapability(db, userId, capCtx))) {
+    throw notFound("bundle", ctx.bundle.id);
+  }
+  throw forbidden(`missing capability ${capability}`, { capability, decidedBy: decision.decidedBy });
 }
 
 /** Lists bundles in a space the user can see (any effective capability). */

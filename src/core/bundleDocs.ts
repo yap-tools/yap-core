@@ -7,8 +7,7 @@
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { bundleCapabilityCtx, getBundleContext, requireBundleReadAccess } from "./bundles.js";
-import { requireCapability } from "./capabilities.js";
+import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { invalid, notFound } from "./errors.js";
 import { newId, nowIso } from "./util.js";
 
@@ -105,7 +104,7 @@ export async function createDoc(
   input: { name: string; content?: string; autoload?: boolean },
 ): Promise<BundleDoc> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_docs", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_docs", ctx);
   const name = input.name?.trim();
   if (!name) throw invalid("doc name is required");
   await requireNameFree(db, bundleId, name);
@@ -132,7 +131,7 @@ export async function updateDoc(
   patch: { name?: string; content?: string; autoload?: boolean },
 ): Promise<BundleDoc> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_docs", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_docs", ctx);
   const doc = await resolveDoc(db, bundleId, ref);
   const name = patch.name?.trim();
   if (patch.name !== undefined) {
@@ -154,7 +153,7 @@ export async function updateDoc(
 
 export async function deleteDoc(db: Db, userId: string, bundleId: string, ref: string): Promise<void> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_docs", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_docs", ctx);
   const doc = await resolveDoc(db, bundleId, ref);
   const { bundleDocs } = db.tables;
   await db.client.delete(bundleDocs).where(eq(bundleDocs.id, doc.id));

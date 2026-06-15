@@ -14,12 +14,11 @@ import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
 import {
-  bundleCapabilityCtx,
   getBundleContext,
+  requireBundleCapability,
   resolveItemType,
   type BundleContext,
 } from "./bundles.js";
-import { requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
@@ -465,7 +464,7 @@ export async function createItems(
   input: { itemType: string; items: Record<string, unknown>[] },
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_items", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_items", ctx);
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw invalid("items must be a non-empty array");
   }
@@ -530,7 +529,7 @@ export async function getItems(
   ids: string[],
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "read_items", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "read_items", ctx);
   if (!Array.isArray(ids) || ids.length === 0) throw invalid("ids must be a non-empty array");
   const { items, itemTypes } = db.tables;
   const rows = await db.client
@@ -556,7 +555,7 @@ export async function updateItems(
   updates: { id: string; set: Record<string, unknown> }[],
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_items", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_items", ctx);
   if (!Array.isArray(updates) || updates.length === 0) throw invalid("updates must be a non-empty array");
 
   const { items, itemValues, itemTypes } = db.tables;
@@ -643,7 +642,7 @@ export async function updateItems(
 
 export async function deleteItems(db: Db, userId: string, bundleId: string, ids: string[]): Promise<number> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_items", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_items", ctx);
   if (!Array.isArray(ids) || ids.length === 0) throw invalid("ids must be a non-empty array");
   const { items } = db.tables;
   const existing = await db.client
@@ -665,7 +664,7 @@ export async function queryItems(
   query: ItemQuery,
 ): Promise<Page<MaterializedItem>> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "read_items", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "read_items", ctx);
   return queryItemsUnchecked(db, ctx, query);
 }
 

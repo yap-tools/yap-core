@@ -10,13 +10,12 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/index.js";
 import {
   DATATYPES,
-  bundleCapabilityCtx,
   getBundleContext,
+  requireBundleCapability,
   requireBundleReadAccess,
   type Datatype,
   type PropertyInput,
 } from "./bundles.js";
-import { requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { parseConfig, serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
 import { newId, nowIso } from "./util.js";
@@ -87,7 +86,7 @@ export async function createItemType(
   input: { name: string; properties?: PropertyInput[] },
 ): Promise<ItemTypeWithProperties> {
   const ctx = await getBundleContext(db, bundleId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   const name = input.name?.trim();
   if (!name) throw invalid("item-type name is required");
   const { itemTypes, properties } = db.tables;
@@ -147,7 +146,7 @@ export async function updateItemType(
   patch: { name?: string },
 ): Promise<void> {
   const { itemType, ctx } = await getItemTypeContext(db, itemTypeId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   if (patch.name !== undefined) {
     const name = patch.name.trim();
     if (!name) throw invalid("item-type name cannot be empty");
@@ -164,7 +163,7 @@ export async function updateItemType(
 /** Deletes the schema and (via FK cascade) its properties, items, and values. */
 export async function deleteItemType(db: Db, userId: string, itemTypeId: string): Promise<void> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   const { itemTypes } = db.tables;
   await db.client.delete(itemTypes).where(eq(itemTypes.id, itemTypeId));
 }
@@ -180,7 +179,7 @@ export async function addProperty(
   input: { name: string; datatype: Datatype; required?: boolean; multi?: boolean; config?: PropertyConfig },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   const name = input.name?.trim();
   if (!name) throw invalid("property name is required");
   if (!DATATYPES.includes(input.datatype)) throw invalid(`invalid datatype ${JSON.stringify(input.datatype)}`);
@@ -212,7 +211,7 @@ export async function updateProperty(
   patch: { name?: string; required?: boolean; multi?: boolean; config?: PropertyConfig; sortOrder?: number },
 ): Promise<Property> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   const { properties, itemValues } = db.tables;
   const rows = await db.client
     .select()
@@ -270,7 +269,7 @@ export async function updateProperty(
 /** Deletes the property row; its value rows cascade-delete immediately. */
 export async function deleteProperty(db: Db, userId: string, itemTypeId: string, propertyId: string): Promise<void> {
   const { ctx } = await getItemTypeContext(db, itemTypeId);
-  await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
+  await requireBundleCapability(db, userId, "edit_bundles", ctx);
   const { properties } = db.tables;
   const rows = await db.client
     .select({ id: properties.id })
