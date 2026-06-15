@@ -17,6 +17,7 @@
  */
 import { and, asc, eq } from "drizzle-orm";
 import { Agent, fetch as undiciFetch } from "undici";
+import { z } from "zod";
 
 import type { YapConfig } from "../config.js";
 import { decryptSecret, encryptSecret } from "../crypto.js";
@@ -26,11 +27,39 @@ import { YapError, invalid, notFound } from "./errors.js";
 import { assertPublicDestination, createPinningLookup, SSRF_PIN_ERROR_CODE, type Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
-export interface HookParamSpec {
-  name: string;
-  description?: string;
-  required?: boolean;
-}
+const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
+const PLACEHOLDER = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
+
+// Each hook shape is defined once: the zod schema validates the REST authoring
+// boundary and the TypeScript type is inferred from it, so the public surface
+// and the firing path that consumes it cannot drift (mirrors propertyConfig).
+// The param-name rule is enforced semantically by validateParamSpecs.
+
+export const hookParamSpecSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  required: z.boolean().optional(),
+});
+export type HookParamSpec = z.infer<typeof hookParamSpecSchema>;
+
+export const hookTransportSchema = z.object({
+  url: z.string(),
+  method: z.enum(METHODS),
+  headers: z.record(z.string(), z.string()).optional(),
+  // Raw body with `{{placeholder}}` substitution and NO escaping — the author
+  // owns the encoding. Use for non-JSON bodies (form-encoded, XML, text). For
+  // JSON, prefer body_json, which escapes values so they cannot break or inject
+  // structure.
+  body_template: z.string().optional(),
+  // Structured JSON body: an arbitrary JSON value (usually an object) whose
+  // string leaves may contain `{{placeholder}}` tokens. At fire time the value
+  // is rebuilt and serialized with JSON.stringify, so substituted values are
+  // always escaped and can never escape their string position. Mutually
+  // exclusive with body_template.
+  body_json: z.unknown().optional(),
+});
+export type HookTransport = z.infer<typeof hookTransportSchema>;
 
 export interface HookInfo {
   id: string;
@@ -39,23 +68,12 @@ export interface HookInfo {
   params: HookParamSpec[];
 }
 
-export interface HookTransport {
-  url: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  headers?: Record<string, string>;
-  body_template?: string;
-}
-
 export interface HookEnv {
   db: Db;
   config: YapConfig;
   resolver?: Resolver;
   fetchImpl?: typeof fetch;
 }
-
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
-const PLACEHOLDER = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
 
 /** Agent-visible hook listing: never includes transport. */
 export async function listHooksUnchecked(db: Db, bundleId: string): Promise<HookInfo[]> {
@@ -89,6 +107,9 @@ async function validateTransport(transport: HookTransport, env: HookEnv): Promis
   if (!transport || typeof transport.url !== "string") throw invalid("hook transport.url is required");
   if (!METHODS.includes(transport.method)) {
     throw invalid(`hook transport.method must be one of ${METHODS.join(", ")}`);
+  }
+  if (transport.body_template !== undefined && transport.body_json !== undefined) {
+    throw invalid("hook transport may set either body_template or body_json, not both");
   }
   // The host must be static — placeholders may appear in path/query/body, but
   // never in the part the SSRF guard vouches for.
@@ -215,6 +236,25 @@ function substitute(template: string, values: Record<string, string>, encode: bo
   });
 }
 
+/**
+ * Rebuilds a `body_json` value with placeholders filled in. Substitution
+ * happens only in string leaves (with raw, unescaped values); the caller then
+ * `JSON.stringify`s the result, which escapes every substituted value so it
+ * stays inside its string and cannot inject structure. Numbers, booleans, and
+ * null pass through untouched; object keys are structure, not data, so they
+ * are not substituted.
+ */
+function materializeJsonBody(value: unknown, values: Record<string, string>): unknown {
+  if (typeof value === "string") return substitute(value, values, false);
+  if (Array.isArray(value)) return value.map((item) => materializeJsonBody(item, values));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, leaf] of Object.entries(value)) out[key] = materializeJsonBody(leaf, values);
+    return out;
+  }
+  return value;
+}
+
 export interface FireResult {
   status: number;
   body: string;
@@ -292,12 +332,27 @@ export async function fireHook(
 
   const headers: Record<string, string> = {};
   for (const [name, headerValue] of Object.entries(transport.headers ?? {})) {
-    headers[name] = substitute(headerValue, values, false);
+    const substituted = substitute(headerValue, values, false);
+    // A CR/LF in a substituted value would split the header and inject
+    // additional headers; reject rather than silently mangle.
+    if (/[\r\n]/.test(substituted)) {
+      throw invalid(`hook header "${name}" must not contain a line break after substitution`);
+    }
+    headers[name] = substituted;
   }
-  const body =
-    transport.body_template !== undefined && transport.method !== "GET"
-      ? substitute(transport.body_template, values, false)
-      : undefined;
+
+  let body: string | undefined;
+  if (transport.method !== "GET") {
+    if (transport.body_json !== undefined) {
+      body = JSON.stringify(materializeJsonBody(transport.body_json, values));
+      // Default the content-type for a JSON body unless the author set one.
+      if (!Object.keys(headers).some((h) => h.toLowerCase() === "content-type")) {
+        headers["content-type"] = "application/json";
+      }
+    } else if (transport.body_template !== undefined) {
+      body = substitute(transport.body_template, values, false);
+    }
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.hookTimeoutMs);

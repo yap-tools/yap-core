@@ -188,6 +188,21 @@ describeEachAdapter("hooks", (adapter) => {
       expect(res.body.error.message).toMatch(/host cannot contain parameters|valid URL/);
     });
 
+    it("rejects a transport that sets both body_template and body_json", async () => {
+      const res = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "both-bodies",
+        params: [{ name: "message" }],
+        transport: {
+          url: `http://127.0.0.1:${targetPort}/x`,
+          method: "POST",
+          body_template: `{"text":"{{message}}"}`,
+          body_json: { text: "{{message}}" },
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toMatch(/body_template or body_json|not both/);
+    });
+
     it("rejects renaming a hook to a name already used by another hook in the same bundle", async () => {
       // Create two hooks in the same bundle.
       const hookA = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
@@ -246,6 +261,83 @@ describeEachAdapter("hooks", (adapter) => {
         params: { message: "x", channel: "a b&c=d" },
       });
       expect(received[0]!.url).toBe("/notify?channel=a%20b%26c%3Dd");
+    });
+
+    it("escapes values interpolated into a body_json string leaf", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "notify-json",
+        params: [{ name: "message", required: true }],
+        transport: {
+          url: `http://127.0.0.1:${targetPort}/json`,
+          method: "POST",
+          body_json: { text: "{{message}}" },
+        },
+      });
+      received.length = 0;
+      const tricky = 'say "hi"\n\tand a \\ backslash';
+      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json", params: { message: tricky } });
+      expect(result.ok).toBe(true);
+      expect(received).toHaveLength(1);
+      // Valid JSON whose value round-trips exactly, despite quotes/newline/backslash.
+      expect(JSON.parse(received[0]!.body)).toEqual({ text: tricky });
+      // content-type defaulted because the author set none.
+      expect(String(received[0]!.headers["content-type"])).toMatch(/application\/json/);
+    });
+
+    it("a crafted body_json value cannot inject JSON structure", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "notify-json-inject",
+        params: [{ name: "message", required: true }],
+        transport: {
+          url: `http://127.0.0.1:${targetPort}/json`,
+          method: "POST",
+          body_json: { text: "{{message}}" },
+        },
+      });
+      received.length = 0;
+      const attack = '", "admin": true, "x": "';
+      await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json-inject", params: { message: attack } });
+      const parsed = JSON.parse(received[0]!.body);
+      expect(Object.keys(parsed)).toEqual(["text"]); // no injected field
+      expect(parsed.text).toBe(attack); // the whole value landed as one string
+      expect(parsed.admin).toBeUndefined();
+    });
+
+    it("preserves an explicit content-type when body_json is used", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "notify-json-ct",
+        params: [{ name: "message", required: true }],
+        transport: {
+          url: `http://127.0.0.1:${targetPort}/json`,
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body_json: { text: "{{message}}" },
+        },
+      });
+      received.length = 0;
+      await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json-ct", params: { message: "x" } });
+      expect(received[0]!.headers["content-type"]).toBe("application/json; charset=utf-8");
+    });
+
+    it("rejects CR/LF in a substituted header value (no request reaches the target)", async () => {
+      await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+        name: "header-inject",
+        params: [{ name: "tag", required: true }],
+        transport: {
+          url: `http://127.0.0.1:${targetPort}/hdr`,
+          method: "POST",
+          headers: { "x-tag": "{{tag}}" },
+          body_json: { ok: true },
+        },
+      });
+      received.length = 0;
+      const result = await fireViaMcp(aliceMcp, bundleId, {
+        hook: "header-inject",
+        params: { tag: "good\r\nx-injected: evil" },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error.message).toMatch(/line break|header/i);
+      expect(received).toHaveLength(0); // nothing was sent
     });
 
     it("rejects undeclared parameters (allowlisting is the safety hinge)", async () => {

@@ -737,19 +737,6 @@ export function registerRestRoutes(server: YapServer): void {
 
   const hookEnv: hooksCore.HookEnv = { db, config };
 
-  const hookParamSpecSchema = z.object({
-    name: z.string(),
-    description: z.string().optional(),
-    required: z.boolean().optional(),
-  });
-
-  const hookTransportSchema = z.object({
-    url: z.string(),
-    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-    headers: z.record(z.string(), z.string()).optional(),
-    body_template: z.string().optional(),
-  });
-
   app.post(
     "/v1/bundles/:id/hooks",
     handle(async (c, auth) => {
@@ -758,8 +745,8 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({
           name: z.string(),
           description: z.string().optional(),
-          params: z.array(hookParamSpecSchema).optional(),
-          transport: hookTransportSchema,
+          params: z.array(hooksCore.hookParamSpecSchema).optional(),
+          transport: hooksCore.hookTransportSchema,
         }),
         await jsonBody(c),
       );
@@ -783,8 +770,8 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({
           name: z.string().optional(),
           description: z.string().optional(),
-          params: z.array(hookParamSpecSchema).optional(),
-          transport: hookTransportSchema.optional(),
+          params: z.array(hooksCore.hookParamSpecSchema).optional(),
+          transport: hooksCore.hookTransportSchema.optional(),
         }),
         await jsonBody(c),
       );

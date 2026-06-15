@@ -333,7 +333,10 @@ be the instance's externally reachable origin (https except on loopback).
   secrets) stays encrypted at rest and is never returned by any surface.
   Private/link-local destinations are denied by default, checked at creation,
   again at fire time, and pinned at connect time (the request connects only to
-  the validated address, closing DNS-rebinding).
+  the validated address, closing DNS-rebinding). JSON request bodies use a
+  structured `body_json` whose values are escaped on serialization, so a
+  free-text parameter can never break or inject JSON; `body_template` carries
+  raw (unescaped) bodies for non-JSON formats.
 - **Widgets** (MCP Apps / SEP-1865) are self-contained `ui://` resources
   rendered three ways: result pointers on `call`, the generic `show_widget`
   shell, or origin-hosted pages at signed expiring URLs for hosts that can't
