@@ -14,11 +14,12 @@ Verified against yap-core source. Base URL defaults to `http://localhost:8787`; 
 | `GET/POST /v1/spaces/:id/grants`, `DELETE …/grants/:grantId` | role grants on a space |
 | `GET/POST /v1/bundles/:id/grants`, `DELETE …/grants/:grantId` | role grants on a bundle |
 
-### Docs (one per bundle) & user docs
+### Bundle docs & user docs
 | Method & path | Body |
 |---|---|
-| `GET /v1/bundles/:id/docs` | |
-| `PUT /v1/bundles/:id/docs` | `{"docs": "<markdown>"}` |
+| `GET /v1/bundles/:id/docs` | list named bundle docs |
+| `POST /v1/bundles/:id/docs` | create: `{"name", "content"?, "autoload"?}` |
+| `GET/PATCH/DELETE /v1/bundles/:id/docs/:docRef` | read, update, or delete the target doc by id or name/ref |
 | `GET/POST /v1/user-docs` | create: `{"name", "content"?, "autoload"?}` |
 | `GET/PATCH/DELETE /v1/user-docs/:id` | |
 
