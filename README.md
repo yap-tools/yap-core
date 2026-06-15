@@ -29,7 +29,7 @@ Context is modeled as a filesystem-like tree an agent can descend:
 context (root)
 └── space            (many per system)
     └── bundle       (many per space)
-        ├── docs        (one document; binding operating instructions)
+        ├── docs        (one or more; autoloaded instructions and on-demand docs)
         ├── item-types  (one or more schemas; each holds many items)
         ├── files       (many static files)
         └── hooks       (many named outbound calls)

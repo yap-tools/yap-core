@@ -14,13 +14,13 @@ Do not invent resources like `/notes` or `/todos` — they don't exist. Everythi
 ```
 space                (top level; spaces do not nest)
 └── bundle
-    ├── docs         (ONE markdown doc per bundle — binding instructions)
+    ├── docs         (named bundle docs; autoloaded instructions and on-demand docs)
     ├── item-types   (schemas; each holds many items — this is where "todos" live)
     ├── files
     └── hooks        (pre-configured outbound HTTP calls; agents fire, never define)
 ```
 
-Outside the tree: **user docs** — account-level notes that travel with the user (optionally autoloaded). A free-form note with no bundle context → user doc. Structured data → items of an item-type inside a bundle. If several spaces or bundles could match the user's intent, ask the user rather than guessing.
+Autoloaded bundle docs are where binding operating instructions belong; non-autoloaded bundle docs stay available to read on demand. Outside the tree: **user docs** — account-level notes that travel with the user (optionally autoloaded). A free-form note with no bundle context → user doc. Structured data → items of an item-type inside a bundle. If several spaces or bundles could match the user's intent, ask the user rather than guessing.
 
 ## Connect
 
