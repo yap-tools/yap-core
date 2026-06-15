@@ -49,3 +49,9 @@ These are load-bearing, not preferences:
 - Keep commits focused; write messages that explain why, not just what.
 - A PR should leave `npm run typecheck` and both test matrices green.
 - Update README/`.env.example` when you add or change configuration.
+
+## Releasing
+
+`main` is trunk: merge freely, it's never released automatically. A release is
+a `v*` tag, and only tagged releases reach users. The full process — versioning,
+the bump-then-tag sequence, and the gotchas — lives in [RELEASING.md](RELEASING.md).
