@@ -147,6 +147,14 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Keys (self) ----------------------------------------------------------
 
+  app.get(
+    "/v1/whoami",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(await usersCore.whoami(db, userId));
+    }),
+  );
+
   const createKeySchema = z.object({ name: z.string().optional() });
 
   app.post(

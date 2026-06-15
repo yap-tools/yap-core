@@ -64,6 +64,31 @@ describeEachAdapter("identity & keys", (adapter) => {
     });
   });
 
+  describe("whoami (self)", () => {
+    it("returns only the current user identity for a user access key", async () => {
+      const created = await sysadmin.post("/v1/users", { name: "CurrentUser" });
+      const user = apiClient(app.baseUrl, created.body.initialKey.key);
+
+      const res = await user.get("/v1/whoami");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ id: created.body.user.id, name: created.body.user.name });
+      expect(Object.keys(res.body).sort()).toEqual(["id", "name"]);
+      expect(res.body).not.toHaveProperty("createdAt");
+      expect(res.body).not.toHaveProperty("key");
+      expect(res.body).not.toHaveProperty("keyHash");
+      expect(res.body).not.toHaveProperty("accessToken");
+      expect(res.body).not.toHaveProperty("refreshToken");
+      expect(res.body).not.toHaveProperty("scope");
+    });
+
+    it("rejects missing, invalid, and sysadmin credentials", async () => {
+      expect((await apiClient(app.baseUrl).get("/v1/whoami")).status).toBe(401);
+      expect((await apiClient(app.baseUrl, "yap_invalidinvalidinvalid").get("/v1/whoami")).status).toBe(401);
+      expect((await sysadmin.get("/v1/whoami")).status).toBe(401);
+    });
+  });
+
   describe("access keys (self)", () => {
     let key: string;
     let user: ApiClient;

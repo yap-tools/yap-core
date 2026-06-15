@@ -18,6 +18,11 @@ export interface User {
   createdAt: string;
 }
 
+export interface CurrentUser {
+  id: string;
+  name: string;
+}
+
 export interface CreatedUser {
   user: User;
   personalSpaceId: string;
@@ -78,6 +83,11 @@ export async function getUser(db: Db, userId: string): Promise<User> {
   const rows = await db.client.select().from(users).where(eq(users.id, userId));
   if (rows.length === 0) throw notFound("user", userId);
   return rows[0]!;
+}
+
+export async function whoami(db: Db, userId: string): Promise<CurrentUser> {
+  const user = await getUser(db, userId);
+  return { id: user.id, name: user.name };
 }
 
 /**

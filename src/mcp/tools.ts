@@ -1,8 +1,8 @@
 /**
  * The top-level MCP surface: a small, fixed tool set built around progressive
  * disclosure — load → load_space → load_bundle → call — plus authoring
- * (space_create, bundle_create), help, and the five user-doc tools. Every
- * tool is a thin adapter over the core; capability gates live in the core.
+ * (space_create, bundle_create), identity, help, and the five user-doc tools.
+ * Every tool is a thin adapter over the core; capability gates live in the core.
  */
 import { UserError } from "fastmcp";
 import { z } from "zod";
@@ -28,6 +28,7 @@ import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
+import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
@@ -205,6 +206,20 @@ export function registerMcpTools(server: YapServer): void {
             call: { description: "Execute second-tier operations against bundles.", second_tier: SECOND_TIER_SPECS },
           },
         });
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
+  addTool({
+    name: "whoami",
+    description: "Return the currently authenticated user's minimal identity: id and name.",
+    annotations: { readOnlyHint: true, title: "Who am I" },
+    execute: async (_args, ctx) => {
+      try {
+        const userId = sessionUser(ctx.session);
+        return asJson(await usersCore.whoami(db, userId));
       } catch (err) {
         rethrow(err);
       }
