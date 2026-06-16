@@ -43,6 +43,9 @@ describe("widgetHtml", () => {
     expect(html).toContain("Object.keys(sc).length > 0");
     expect(html).toContain('m.method === "ui/notifications/tool-input"');
     expect(html).toContain('w = "ui://yap/" + w');
+    expect(html).toContain("clearTimeout(fallbackTimer)");
+    expect(html).toContain("fallbackTimer = setTimeout");
     expect(html).toContain('request("resources/read"');
+    expect(html.indexOf("fallbackTimer = setTimeout")).toBeLessThan(html.indexOf('request("resources/read"'));
   });
 });

@@ -159,6 +159,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       var root = document.getElementById("root");
       var rendered = false;
+      var fallbackTimer = null;
       function fail(msg) { if (!rendered) root.innerHTML = '<div class="card err">shell: ' + msg + '</div>'; }
       onData(function (d) {
         if (!d || !d.widget) { fail("no widget named"); return; }
@@ -169,6 +170,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         // strict host (Claude Desktop, Mistral Vibe) won't let a widget frame
         // spawn (frame-src), leaving the old nesting shell blank.
         if (d.render) {
+          if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
           rendered = true;
           if (d.style) { var st = document.createElement("style"); st.textContent = d.style; document.head.appendChild(st); }
           // Re-point the data channel: the widget's onData(cb) must receive its
@@ -183,31 +185,37 @@ export const WIDGETS: Record<string, WidgetDef> = {
         }
         // Recovery path: a host re-mounted us and replayed only the tool-input
         // {widget, params} with no structuredContent, so we lack the source.
-        // Fetch the widget's document through the host and frame it (best effort;
-        // a host that suppresses structuredContent on re-mount is the exception).
+        // Give the richer tool-result a beat to arrive before fetching the
+        // widget's document through the host and framing it (best effort; a host
+        // that suppresses structuredContent on re-mount is the exception).
+        if (fallbackTimer) return;
         var uri = d.widget.indexOf("://") === -1 ? "${UI_SCHEME_PREFIX}" + d.widget : d.widget;
-        request("resources/read", { uri: uri })
-          .then(function (r) {
-            var html = r && r.contents && r.contents[0] && r.contents[0].text;
-            if (!html || rendered) { if (!html) fail("empty widget"); return; }
-            rendered = true;
-            var f = document.createElement("iframe");
-            f.className = "shellframe";
-            f.setAttribute("sandbox", "allow-scripts");
-            f.srcdoc = html;
-            f.onload = function () {
-              f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: d.params || {} } }, "*");
-            };
-            window.addEventListener("message", function (e) {
-              if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
-                f.style.height = e.data.params.height + "px";
-                requestAnimationFrame(announceHeight);
-              }
-            });
-            root.innerHTML = "";
-            root.appendChild(f);
-          })
-          .catch(function (err) { fail("could not load widget (" + (err && err.message || err) + ")"); });
+        fallbackTimer = setTimeout(function () {
+          fallbackTimer = null;
+          if (rendered) return;
+          request("resources/read", { uri: uri })
+            .then(function (r) {
+              var html = r && r.contents && r.contents[0] && r.contents[0].text;
+              if (!html || rendered) { if (!html) fail("empty widget"); return; }
+              rendered = true;
+              var f = document.createElement("iframe");
+              f.className = "shellframe";
+              f.setAttribute("sandbox", "allow-scripts");
+              f.srcdoc = html;
+              f.onload = function () {
+                f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: d.params || {} } }, "*");
+              };
+              window.addEventListener("message", function (e) {
+                if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
+                  f.style.height = e.data.params.height + "px";
+                  requestAnimationFrame(announceHeight);
+                }
+              });
+              root.innerHTML = "";
+              root.appendChild(f);
+            })
+            .catch(function (err) { fail("could not load widget (" + (err && err.message || err) + ")"); });
+        }, 300);
       });
     `,
   },
