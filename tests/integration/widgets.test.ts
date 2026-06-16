@@ -88,6 +88,20 @@ describeEachAdapter("widgets", (adapter) => {
       expect(raw.content.every((c: any) => c.type === "text")).toBe(true);
     });
 
+    it("advertises the widget CSP on the call tool so in-band widgets can reach the server origin", async () => {
+      const tools = await aliceMcp.client.listTools();
+      const call = tools.tools.find((t) => t.name === "call")!;
+      const ui = (call._meta as any)?.ui;
+      // A widget delivered in-band on a call result (upload_request's dropzone,
+      // show_file's media-card) renders under the host's CSP, not show_widget's.
+      // Without the server origin allowlisted here the host blocks the dropzone's
+      // upload PUT (connect-src) and the media-card's image (img-src): the widget
+      // renders but its bytes never load.
+      const origin = new URL(app.baseUrl).origin;
+      expect(ui?.csp?.connectDomains).toContain(origin);
+      expect(ui?.csp?.resourceDomains).toContain(origin);
+    });
+
     it("an in-client widget upload finalizes using the widget data alone", async () => {
       // Replays exactly what the upload-dropzone's inline JS does with _meta.data.
       const raw: any = await aliceMcp.callRaw("call", {

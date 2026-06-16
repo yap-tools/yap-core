@@ -145,6 +145,21 @@ export function registerMcpTools(server: YapServer): void {
 
   const cspDomains = widgetCspDomains(config);
 
+  // A widget can ride in-band on a call result (upload_request's dropzone,
+  // show_file's media-card); the host renders it under the call tool's CSP, not
+  // show_widget's. Advertise the same static, per-deployment origins so the
+  // rendered widget can reach the server (media bytes, upload PUT/finalize) —
+  // without it the host's default CSP blocks the dropzone's connect-src and the
+  // media-card's img-src, so the widget renders but its bytes never load. No
+  // resourceUri: call has no single shell — the widget to render travels
+  // per-result in _meta, so this only supplies the CSP envelope. fastmcp forwards
+  // _meta verbatim but types ui as { resourceUri? }; we annotate resourceUri as a
+  // permitted (here unset) key so the value is assignable, and the csp rides
+  // along — same trick as showWidgetMeta below, minus the resourceUri itself.
+  const callMeta: { ui: { resourceUri?: string; csp: { connectDomains: string[]; resourceDomains: string[] } } } = {
+    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains } },
+  };
+
   for (const def of Object.values(WIDGETS)) {
     mcp.addResource({
       uri: def.uri,
@@ -351,6 +366,7 @@ export function registerMcpTools(server: YapServer): void {
     description:
       `The single execution verb: a batch of second-tier operations in one round trip. You MUST call load_bundle on a bundle before calling into it — its docs and schemas are needed to call correctly. Each call names a tool, its params, and a target — a bundle (provide bundle_id) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Every tool is gated by the capability in its spec (returned by load) — check it against your role before calling; on a denial, tell the user which capability they lack rather than retrying. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items". Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
     parameters: callSchema,
+    _meta: callMeta,
     execute: async (args, ctx) => {
       try {
         const userId = sessionUser(ctx.session);
