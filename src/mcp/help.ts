@@ -34,8 +34,10 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 - **User doc** — account-level guidance attached to you, available across all
   your spaces. Docs flagged autoload are returned by load at session start.
 - **Widget** — an interactive panel some results render inline (file cards,
-  upload dropzones). Delivered as ui:// resources via result metadata,
-  show_widget, or origin-hosted fallback links.
+  upload dropzones). Delivered as ui:// resources. On a widget-capable host,
+  render with show_widget, which carries the CSP the widget needs to reach the
+  server (load file bytes, PUT an upload); the in-band result metadata and
+  origin-hosted links are the fallback for hosts that don't render widgets.
 
 ## How to work
 

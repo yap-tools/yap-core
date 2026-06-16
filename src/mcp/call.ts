@@ -167,7 +167,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   show_file: {
     description:
-      "Display a stored file or URL. Params: ref — a file://{uuid} reference or a direct http(s) URL. Returns a fresh expiring link plus a media-card widget pointer; share the link, never a durable location.",
+      "Display a stored file or URL. Params: ref — a file://{uuid} reference or a direct http(s) URL. Returns a fresh expiring link plus a media-card widget pointer; share the link, never a durable location. On a widget-capable host, render the card with show_widget(widget=\"media-card\", params=<this result>) — show_widget carries the CSP that lets the card load the file bytes; the in-band pointer/link is the fallback for hosts that don't render widgets.",
     capability: "read_files",
     handler: async (env, params) => {
       const result = await filesCore.showFile(env, env.userId, String(params.ref ?? ""));
@@ -179,7 +179,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   upload_request: {
     description:
-      "Phase 1 of the 3-step upload lifecycle (request → upload bytes → complete). Reserves a placeholder file record and returns, in the result JSON: upload_url (short-lived, single-use — PUT the bytes there, then call upload_complete), origin_upload_url (a momentary signed upload page — give this link to a human to upload from a browser; nothing else needed), file_id, and complete_url. A dropzone widget pointer also rides in the result _meta for widget-capable hosts, but the links above work everywhere. Params: name (required), mime_type?, size? (declared, advisory).",
+      "Phase 1 of the 3-step upload lifecycle (request → upload bytes → complete). Reserves a placeholder file record and returns, in the result JSON: upload_url (short-lived, single-use — PUT the bytes there, then call upload_complete), origin_upload_url (a momentary signed upload page — give this link to a human to upload from a browser; nothing else needed), file_id, and complete_url. A dropzone widget pointer also rides in the result _meta for widget-capable hosts, but the links above work everywhere. On a widget-capable host, render the dropzone with show_widget(widget=\"upload-dropzone\", params={file_id, upload_url, complete_url}) — show_widget carries the CSP that lets the dropzone PUT bytes and finalize; otherwise hand a human origin_upload_url. Params: name (required), mime_type?, size? (declared, advisory).",
     capability: "edit_files",
     handler: async (env, params) => {
       const result = await filesCore.requestUpload(env, env.userId, env.bundleId, {

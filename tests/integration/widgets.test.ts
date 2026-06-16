@@ -155,6 +155,25 @@ describeEachAdapter("widgets", (adapter) => {
       expect(raw.structuredContent.style).toBe(WIDGETS["media-card"]!.style);
     });
 
+    it("renders the upload-dropzone via show_widget, anchoring the CSP to a resourceUri", async () => {
+      // The fallback path for hosts that don't honor call's resourceUri-less
+      // _meta.ui.csp: render file widgets through show_widget, whose CSP is
+      // anchored to ui://yap/shell, so the dropzone can PUT/finalize.
+      const tools = await aliceMcp.client.listTools();
+      const ui = (tools.tools.find((t) => t.name === "show_widget")!._meta as any)?.ui;
+      expect(ui?.resourceUri).toBe("ui://yap/shell");
+      expect(ui?.csp?.connectDomains).toContain(new URL(app.baseUrl).origin);
+
+      const raw: any = await aliceMcp.callRaw("show_widget", {
+        widget: "upload-dropzone",
+        params: { file_id: "f1", upload_url: "https://x/u", complete_url: "https://x/c" },
+      });
+      expect(raw.structuredContent.widget).toBe("ui://yap/upload-dropzone");
+      expect(raw.structuredContent.params.upload_url).toBe("https://x/u");
+      expect(raw.structuredContent.render).toBe(WIDGETS["upload-dropzone"]!.render);
+      expect(raw.structuredContent.style).toBe(WIDGETS["upload-dropzone"]!.style);
+    });
+
     it("rejects unknown widgets with the registry listed", async () => {
       await expect(aliceMcp.call("show_widget", { widget: "nope" })).rejects.toThrow(/shell|upload-dropzone/);
     });
