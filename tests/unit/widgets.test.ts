@@ -35,4 +35,14 @@ describe("widgetHtml", () => {
     expect(safeUrl("javascript:alert(1)")).toBe("#");
     expect(safeUrl("data:text/html,<script>")).toBe("#");
   });
+
+  it("the shell ignores empty tool-result replays and keeps tool-input as fallback only", () => {
+    const html = widgetHtml("shell", "client");
+
+    expect(html).toContain('m.method === "ui/notifications/tool-result"');
+    expect(html).toContain("Object.keys(sc).length > 0");
+    expect(html).toContain('m.method === "ui/notifications/tool-input"');
+    expect(html).toContain('w = "ui://yap/" + w');
+    expect(html).toContain('request("resources/read"');
+  });
 });
