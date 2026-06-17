@@ -25,9 +25,9 @@ const USAGE = `Usage: yap <command>
 An instance is a directory; run yap inside it.
 
 Instance:
-  init [--version v] [--port n] [--no-install]   Scaffold here + install the server from GitHub
-  create <dir> [--user n] [--version v] [--port n]   mkdir + init + start + user create, in one go
-  upgrade [version] [--no-restart] [--skip-backup]   Reinstall this instance's server, restart if running
+  init [--version v|branch] [--port n] [--no-install]   Scaffold here + install the server from GitHub
+  create <dir> [--user n] [--version v|branch] [--port n]   mkdir + init + start + user create, in one go
+  upgrade [version|branch] [--no-restart] [--skip-backup]   Reinstall this instance's server, restart if running
 
 Data:
   backup [--out <path>]               Write a portable backup (to the sink, or a file)

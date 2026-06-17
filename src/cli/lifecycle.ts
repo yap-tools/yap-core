@@ -11,7 +11,7 @@ import { instanceBaseUrl, loadInstanceEnv } from "../instance/env.js";
 import { CliError } from "../instance/errors.js";
 import { logPath } from "../instance/layout.js";
 import { runningPid, startInstance, stopInstance, tailLog } from "../instance/proc.js";
-import { execInServer, vendoredServerVersion } from "../instance/server.js";
+import { execInServer, installedGitCommit, readSource, vendoredServerVersion } from "../instance/server.js";
 
 /**
  * Foreground serve. Delegates to the vendored server when the directory has
@@ -57,6 +57,17 @@ export async function cmdStop(dir: string): Promise<void> {
   console.log(`stopped (pid ${pid})`);
 }
 
+/** The server line for `yap status`: just the version for a release, or the
+ * version plus the git ref (and commit, when known) for a branch-tracked one. */
+function describeServer(dir: string): string {
+  const version = vendoredServerVersion(dir);
+  if (!version) return "(not installed)";
+  const source = readSource(dir);
+  if (source.kind !== "git") return version;
+  const sha = installedGitCommit(dir);
+  return `${version} (${source.ref}${sha ? ` @ ${sha}` : ""}, git)`;
+}
+
 export async function cmdStatus(dir: string): Promise<void> {
   const pid = runningPid(dir);
   const baseUrl = instanceBaseUrl(loadInstanceEnv(dir));
@@ -68,7 +79,7 @@ export async function cmdStatus(dir: string): Promise<void> {
     // unreachable
   }
   console.log(`instance   ${dir}`);
-  console.log(`server     ${vendoredServerVersion(dir) ?? "(not installed)"}`);
+  console.log(`server     ${describeServer(dir)}`);
   console.log(`process    ${pid ? `running (pid ${pid})` : "not running (via yap start)"}`);
   console.log(`health     ${health} (${baseUrl}/health)`);
   if (!pid && health === "ok") {

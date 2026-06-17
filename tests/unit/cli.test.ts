@@ -9,14 +9,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { existsSync } from "node:fs";
+
 import { readCredentials, writeCredentials } from "../../src/cli/credentials.js";
 import { initInstance } from "../../src/cli/init.js";
 import { launchdPlist, systemdUnit } from "../../src/cli/service.js";
 import { table } from "../../src/cli/table.js";
 import { instanceBaseUrl, loadInstanceEnv, resolveEnvFile } from "../../src/instance/env.js";
-import { credentialsPath, pidPath } from "../../src/instance/layout.js";
+import { credentialsPath, pidPath, sourcePath } from "../../src/instance/layout.js";
 import { runningPid } from "../../src/instance/proc.js";
-import { installSpec, vendoredServerEntry, vendoredServerVersion } from "../../src/instance/server.js";
+import {
+  classifyVersion,
+  installedGitCommit,
+  installSpec,
+  readSource,
+  vendoredServerEntry,
+  vendoredServerVersion,
+  writeSource,
+} from "../../src/instance/server.js";
 
 const tempDirs: string[] = [];
 function tempDir(): string {
@@ -134,12 +144,74 @@ describe("credentials", () => {
   });
 });
 
-describe("vendored server", () => {
-  it("points at the prebuilt release tarball, latest or pinned", () => {
-    expect(installSpec()).toBe("https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz");
-    expect(installSpec("v0.2.0")).toBe("https://github.com/yap-tools/yap-core/releases/download/v0.2.0/yap-core.tgz");
+describe("classifyVersion", () => {
+  it("treats nothing and latest as the latest release", () => {
+    expect(classifyVersion()).toEqual({ kind: "release" });
+    expect(classifyVersion("latest")).toEqual({ kind: "release" });
   });
 
+  it("treats a v-prefixed semver tag as a pinned release", () => {
+    expect(classifyVersion("v0.6.0")).toEqual({ kind: "release", version: "v0.6.0" });
+  });
+
+  it("treats a branch name or commit as a git ref", () => {
+    expect(classifyVersion("main")).toEqual({ kind: "git", ref: "main" });
+    expect(classifyVersion("feature/widgets")).toEqual({ kind: "git", ref: "feature/widgets" });
+    expect(classifyVersion("a1b2c3d")).toEqual({ kind: "git", ref: "a1b2c3d" });
+  });
+});
+
+describe("installSpec", () => {
+  it("points a release at the prebuilt tarball, latest or pinned", () => {
+    expect(installSpec({ kind: "release" })).toBe(
+      "https://github.com/yap-tools/yap-core/releases/latest/download/yap-core.tgz",
+    );
+    expect(installSpec({ kind: "release", version: "v0.2.0" })).toBe(
+      "https://github.com/yap-tools/yap-core/releases/download/v0.2.0/yap-core.tgz",
+    );
+  });
+
+  it("points a git ref at the repo at that ref", () => {
+    expect(installSpec({ kind: "git", ref: "main" })).toBe(
+      "git+https://github.com/yap-tools/yap-core.git#main",
+    );
+  });
+});
+
+describe("instance source", () => {
+  it("defaults to release, round-trips a git ref, and clearing returns to release", () => {
+    const dir = tempDir();
+    expect(readSource(dir)).toEqual({ kind: "release" });
+
+    writeSource(dir, { kind: "git", ref: "main" });
+    expect(readSource(dir)).toEqual({ kind: "git", ref: "main" });
+    expect(existsSync(sourcePath(dir))).toBe(true);
+
+    writeSource(dir, { kind: "release" });
+    expect(readSource(dir)).toEqual({ kind: "release" });
+    expect(existsSync(sourcePath(dir))).toBe(false);
+  });
+});
+
+describe("installedGitCommit", () => {
+  it("reads the resolved commit from the lockfile in short form, or undefined", () => {
+    const dir = tempDir();
+    expect(installedGitCommit(dir)).toBeUndefined();
+    writeFileSync(
+      join(dir, "package-lock.json"),
+      JSON.stringify({
+        packages: {
+          "node_modules/yap-core": {
+            resolved: "git+https://github.com/yap-tools/yap-core.git#0123456789abcdef0123456789abcdef01234567",
+          },
+        },
+      }),
+    );
+    expect(installedGitCommit(dir)).toBe("0123456");
+  });
+});
+
+describe("vendored server", () => {
   it("detects an installed server and its version", () => {
     const dir = tempDir();
     expect(vendoredServerEntry(dir)).toBeUndefined();

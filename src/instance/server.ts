@@ -6,34 +6,119 @@
  * delegation — running a server-side command by spawning the vendored entry.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CliError } from "./errors.js";
+import { sourcePath, stateDir } from "./layout.js";
 
 export const SERVER_PACKAGE = "yap-core";
 const RELEASES = "https://github.com/yap-tools/yap-core/releases";
+const REPO_GIT = "git+https://github.com/yap-tools/yap-core.git";
 
 /**
- * Prebuilt release tarball, latest by default. Releases ship the packed
- * package under the constant asset name yap-core.tgz, so no GitHub API call
- * (or TypeScript toolchain on the operator's machine) is ever needed.
+ * Where an instance's server comes from: a prebuilt GitHub release (the
+ * default — `latest` when version is undefined, else a pinned tag), or a git
+ * ref (a branch like `main`, or a commit) built from source. The git path
+ * works because yap-core declares `prepare: npm run build`, so `npm install`
+ * of the git URL clones the ref, builds dist/, and vendors it in the same
+ * node_modules/yap-core layout a release produces.
  */
-export function installSpec(version?: string): string {
-  return version ? `${RELEASES}/download/${version}/yap-core.tgz` : `${RELEASES}/latest/download/yap-core.tgz`;
+export type Source = { kind: "release"; version?: string } | { kind: "git"; ref: string };
+
+/**
+ * Classify a CLI version argument. The project tags releases `vMAJOR.MINOR.PATCH`
+ * (see RELEASING.md), so `latest` and any `v`-prefixed value name a release;
+ * anything else (a branch, a commit) is a git ref built from source.
+ */
+export function classifyVersion(value?: string): Source {
+  if (!value || value === "latest") return { kind: "release" };
+  if (/^v\d/.test(value)) return { kind: "release", version: value };
+  return { kind: "git", ref: value };
 }
 
-export async function installServer(dir: string, version?: string): Promise<void> {
+/**
+ * The npm install argument for a source. Releases ship the packed package
+ * under the constant asset name yap-core.tgz, so no GitHub API call (or
+ * TypeScript toolchain) is needed; a git ref installs the repo at that ref.
+ */
+export function installSpec(source: Source): string {
+  if (source.kind === "git") return `${REPO_GIT}#${source.ref}`;
+  return source.version
+    ? `${RELEASES}/download/${source.version}/yap-core.tgz`
+    : `${RELEASES}/latest/download/yap-core.tgz`;
+}
+
+/** A short human label for a source, for install/upgrade output. */
+export function sourceLabel(source: Source): string {
+  if (source.kind === "git") return `from ${source.ref}`;
+  return source.version ?? "latest release";
+}
+
+/**
+ * The instance's saved server source. Written only when it tracks a git ref;
+ * a release install removes the file, so its absence means the release channel
+ * — which keeps every existing instance behaving exactly as before.
+ */
+export function readSource(dir: string): Source {
+  const path = sourcePath(dir);
+  if (!existsSync(path)) return { kind: "release" };
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { ref?: string };
+  return parsed.ref ? { kind: "git", ref: parsed.ref } : { kind: "release" };
+}
+
+export function writeSource(dir: string, source: Source): void {
+  const path = sourcePath(dir);
+  if (source.kind === "git") {
+    mkdirSync(stateDir(dir), { recursive: true });
+    writeFileSync(path, JSON.stringify({ ref: source.ref }, null, 2) + "\n");
+  } else {
+    rmSync(path, { force: true });
+  }
+}
+
+/**
+ * Best-effort, cosmetic: the commit a git-sourced server was built from, short
+ * form, read from the lockfile npm writes. Undefined when unknown — never gate
+ * behavior on it.
+ */
+export function installedGitCommit(dir: string): string | undefined {
+  try {
+    const lock = JSON.parse(readFileSync(join(dir, "package-lock.json"), "utf8")) as {
+      packages?: Record<string, { resolved?: string }>;
+    };
+    const resolved = lock.packages?.[`node_modules/${SERVER_PACKAGE}`]?.resolved;
+    const sha = resolved?.match(/#([0-9a-f]{40})$/)?.[1];
+    return sha?.slice(0, 7);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function installServer(dir: string, source: Source): Promise<void> {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const args = ["install", "--no-fund", "--no-audit", "--loglevel=error", installSpec(version)];
+  const args = ["install", "--no-fund", "--no-audit", "--loglevel=error"];
+  // A git ref is a moving target; bypass npm's cached branch resolution so an
+  // upgrade always builds the current tip rather than a stale clone.
+  if (source.kind === "git") args.push("--prefer-online");
+  args.push(installSpec(source));
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn(npm, args, { cwd: dir, stdio: "inherit" });
     child.on("error", (err) => reject(new CliError(`could not run npm: ${err.message}`)));
     child.on("exit", (code) => {
-      if (code === 0) resolvePromise();
-      else reject(new CliError(`npm install failed (exit ${code}) — rerun \`yap init\` to retry the server install`));
+      if (code === 0) return resolvePromise();
+      reject(
+        new CliError(
+          source.kind === "git"
+            ? `could not build yap-core from ${source.ref} (npm exit ${code}) — is git installed and does the ref exist?`
+            : `npm install failed (exit ${code}) — rerun \`yap init\` to retry the server install`,
+        ),
+      );
     });
   });
+  // Persist the source only after a successful install: a git ref so a bare
+  // `yap upgrade` re-pulls it, or clear it to return to the release channel.
+  writeSource(dir, source);
 }
 
 /** The vendored server's entry point, when one is installed. */

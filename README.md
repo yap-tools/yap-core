@@ -143,6 +143,16 @@ commands — the OS owns supervision; the CLI deliberately is not a process
 manager. `yap upgrade [version]` reinstalls the vendored server and restarts
 a running instance.
 
+**Tracking `main` (dev builds).** The `--version` argument (on `init`,
+`create`, and `upgrade`) also accepts a branch name or commit instead of a
+release tag: `yap init --version main` builds the server from the tip of
+`main` from source and vendors it the same way a release is. This needs `git`
+on the host (npm builds from source, pulling the toolchain transiently). The
+instance remembers the ref, so a bare `yap upgrade` re-pulls the current tip
+of that branch, and `yap status` shows it (`0.6.0 (main @ a1b2c3d, git)`).
+`yap upgrade latest` (or any `vX.Y.Z`) switches back to releases. Intended for
+test instances that need to run ahead of the latest release.
+
 Running from a checkout: the repo root is itself an instance directory
 (`cp .env.example .env`, then `npm run dev` — serve runs in-process when no
 vendored server is present). Config comes from the environment, with an env

@@ -9,7 +9,16 @@ import { parseArgs } from "node:util";
 
 import { CliError } from "../instance/errors.js";
 import { runningPid, stopInstance } from "../instance/proc.js";
-import { execInServer, installServer, serverSupportsBackup, vendoredServerVersion } from "../instance/server.js";
+import {
+  classifyVersion,
+  execInServer,
+  installedGitCommit,
+  installServer,
+  readSource,
+  serverSupportsBackup,
+  sourceLabel,
+  vendoredServerVersion,
+} from "../instance/server.js";
 import { initInstance } from "./init.js";
 import { cmdStart } from "./lifecycle.js";
 import { cmdUserCreate } from "./resources.js";
@@ -35,10 +44,17 @@ export async function cmdInit(dir: string, argv: string[]): Promise<void> {
   console.log(`  ${result.sysadminKey}`);
 
   if (!values["no-install"]) {
+    const source = classifyVersion(values.version);
     console.log("");
-    console.log(`Installing the Yap server into this directory (${values.version ?? "latest release"})…`);
-    await installServer(dir, values.version);
-    console.log(`Installed yap-core ${vendoredServerVersion(dir) ?? ""}`.trimEnd() + ".");
+    console.log(`Installing the Yap server into this directory (${sourceLabel(source)})…`);
+    await installServer(dir, source);
+    const installed = vendoredServerVersion(dir);
+    if (source.kind === "git") {
+      const sha = installedGitCommit(dir);
+      console.log(`Installed yap-core ${sourceLabel(source)}${sha ? ` @ ${sha}` : ""} (reports ${installed}).`);
+    } else {
+      console.log(`Installed yap-core ${installed ?? ""}`.trimEnd() + ".");
+    }
   }
 
   console.log("");
@@ -57,6 +73,11 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
   });
   const before = vendoredServerVersion(dir);
   if (!before) throw new CliError("no server installed here — `yap init` first");
+
+  // An explicit ref switches (and re-pins) the source; a bare upgrade re-pulls
+  // whatever the instance already tracks — the tip of its branch, or the
+  // latest release.
+  const source = positionals[0] ? classifyVersion(positionals[0]) : readSource(dir);
 
   // Portable safety copy of data/ before the code swap, taken by the
   // currently-installed server (which matches the data's schema). Versions
@@ -77,11 +98,21 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
     }
   }
 
-  await installServer(dir, positionals[0]);
+  await installServer(dir, source);
   const after = vendoredServerVersion(dir);
-  console.log(before === after ? `already at ${after}` : `upgraded ${before} → ${after}`);
 
-  if (runningPid(dir) && !values["no-restart"] && before !== after) {
+  // A git ref keeps the same package version across commits, so the version
+  // string can't tell us whether the code moved — assume a branch build always
+  // did, and restart for it.
+  const changed = source.kind === "git" ? true : before !== after;
+  if (source.kind === "git") {
+    const sha = installedGitCommit(dir);
+    console.log(`reinstalled ${sourceLabel(source)}${sha ? ` @ ${sha}` : ""} (reports ${after})`);
+  } else {
+    console.log(before === after ? `already at ${after}` : `upgraded ${before} → ${after}`);
+  }
+
+  if (runningPid(dir) && !values["no-restart"] && changed) {
     console.log("restarting…");
     await stopInstance(dir);
     await cmdStart(dir);
