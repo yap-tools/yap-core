@@ -28,6 +28,26 @@ describe("widgetHtml", () => {
     expect(render).toContain("safeUrl(d.url)");
   });
 
+  it("the media-card renderer handles expired Yap previews without refreshing tokens", () => {
+    const render = WIDGETS["media-card"]!.render;
+    expect(render).toContain('addEventListener("error"');
+    expect(render).toContain("d.expires_in");
+    expect(render).toContain("File preview expired - re-run to refresh");
+    expect(render).not.toContain("fetch(");
+    expect(render).not.toContain("file_id");
+  });
+
+  it("embeds the media-card expired state in origin HTML", () => {
+    const html = widgetHtml("media-card", "origin", {
+      kind: "image",
+      url: "https://x/y",
+      expires_in: 14400,
+      name: "pic.png",
+    });
+    expect(html).toContain("File preview expired - re-run to refresh");
+    expect(html).toContain('addEventListener("error"');
+  });
+
   it("only http(s) URLs survive safeUrl (javascript:/data: are neutralized)", () => {
     // Exercise the bridge helper exactly as it runs in the sandbox.
     const safeUrl = (v: string) => (/^https?:\/\//i.test(v) ? v : "#");

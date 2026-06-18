@@ -295,6 +295,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
       video { width: 100%; aspect-ratio: auto 16 / 9; border-radius: 8px; display: block; }
       .filerow { display: flex; align-items: center; gap: 12px; }
       .fileicon { font-size: 28px; }
+      .preview-expired, .preview-failed { border: 1px solid var(--yap-border); border-radius: 8px; padding: 16px; background: var(--yap-surface); color: var(--yap-fg-muted); font-size: 13px; }
       .dl-line { margin: 12px 0 0; }
       a.dl { color: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 2px; }
     `,
@@ -315,9 +316,19 @@ export const WIDGETS: Record<string, WidgetDef> = {
         // expiry note used to. Omitted only when the URL isn't a usable
         // http(s) link (safeUrl collapses those to "#").
         var dl = url !== "#" ? '<p class="dl-line"><a class="dl" href="' + url + '" download>Download</a></p>' : "";
-        root.innerHTML = '<div class="card">' + inner + dl + "</div>";
+        root.innerHTML = '<div class="card"><div id="preview">' + inner + "</div>" + dl + "</div>";
         var media = root.querySelector("img,video,audio");
-        if (media) media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", announceHeight);
+        if (media) {
+          media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", announceHeight);
+          media.addEventListener("error", function () {
+            var preview = document.getElementById("preview");
+            if (!preview) return;
+            var expiring = d.expires_in !== undefined && d.expires_in !== null;
+            preview.className = expiring ? "preview-expired" : "preview-failed";
+            preview.textContent = expiring ? "File preview expired - re-run to refresh" : "Preview failed to load";
+            requestAnimationFrame(announceHeight);
+          });
+        }
       });
     `,
   },

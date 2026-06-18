@@ -75,6 +75,7 @@ describeEachAdapter("files", (adapter) => {
     expect(shown.ok).toBe(true);
     expect(shown._meta.widget).toBe("ui://yap/media-card");
     expect(shown.result.kind).toBe("file");
+    expect(shown.result.expires_in).toBe(2);
     const download = await fetch(shown.result.url);
     expect(download.status).toBe(200);
     expect(await download.text()).toBe("hello yap");
@@ -230,6 +231,7 @@ describeEachAdapter("files", (adapter) => {
     const shown = await callOne(aliceMcp, "show_file", { ref: "https://example.com/cat.png" });
     expect(shown.ok).toBe(true);
     expect(shown.result.url).toBe("https://example.com/cat.png");
+    expect(shown.result.expires_in).toBeUndefined();
   });
 
   it("file access reuses the capability model: read_files vs edit_files", async () => {
