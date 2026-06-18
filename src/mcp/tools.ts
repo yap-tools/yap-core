@@ -160,6 +160,22 @@ export function registerMcpTools(server: YapServer): void {
     ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains } },
   };
 
+  // A UI resource's CSP must ride on its READ result — widget-capable hosts
+  // (MCPJam's "widget-declared" mode, ChatGPT) read connect/resource domains from
+  // here, not from the tool's _meta. Hosts default-deny, so without this the
+  // sandbox blocks the media-card's image (img-src) and the dropzone's upload
+  // (connect-src): the widget renders but its bytes never load. Both the spec key
+  // (ui.csp, camelCase) and the legacy ChatGPT key (openai/widgetCSP, snake_case)
+  // are declared so every host finds one it understands. Domains are the same
+  // static per-deployment set as the tool CSP: the server origin always, plus the
+  // S3 store origin when blobs are presigned off-origin — that S3 origin is
+  // third-party and may not be honored by hosts that trust only the server origin
+  // (e.g. Claude), the accepted tradeoff of serving file bytes direct from S3.
+  const resourceMeta = {
+    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains } },
+    "openai/widgetCSP": { connect_domains: cspDomains, resource_domains: cspDomains },
+  };
+
   for (const def of Object.values(WIDGETS)) {
     mcp.addResource({
       uri: def.uri,
@@ -168,7 +184,13 @@ export function registerMcpTools(server: YapServer): void {
       // MCP Apps (SEP-1865) requires this exact profile on a UI resource;
       // hosts use it to decide a resource is a renderable app.
       mimeType: "text/html;profile=mcp-app",
-      load: async () => ({ text: widgetHtml(def.name, "client") }),
+      // _meta isn't in fastmcp's ResourceResult type, but its resources/read
+      // handler spreads the load() result verbatim — the cast lets the CSP _meta
+      // ride through to the read result, where the host reads it.
+      load: async () => {
+        const result = { text: widgetHtml(def.name, "client"), _meta: resourceMeta };
+        return result as { text: string };
+      },
     });
   }
 
@@ -414,6 +436,9 @@ export function registerMcpTools(server: YapServer): void {
       resourceUri: `${UI_SCHEME_PREFIX}shell`,
       csp: { connectDomains: cspDomains, resourceDomains: cspDomains },
     },
+    // Flat alias: some hosts read the template link from a flat "ui/resourceUri"
+    // key rather than the nested ui.resourceUri. Declaring both is cheap insurance.
+    "ui/resourceUri": `${UI_SCHEME_PREFIX}shell`,
   };
 
   addTool({

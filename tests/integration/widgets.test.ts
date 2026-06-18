@@ -69,6 +69,30 @@ describeEachAdapter("widgets", (adapter) => {
     });
   });
 
+  describe("resource-level widget CSP (where widget-capable hosts actually read it)", () => {
+    it("carries _meta.ui.csp with the server origin on every widget's read result", async () => {
+      const origin = new URL(app.baseUrl).origin;
+      // Widget-capable hosts (MCPJam's "widget-declared" mode, ChatGPT) read a UI
+      // resource's CSP from its read result, NOT from the tool. Without the server
+      // origin here the sandbox blocks the media-card's image (img-src) and the
+      // dropzone's upload (connect-src): the widget renders but its bytes never load.
+      for (const name of Object.keys(WIDGETS)) {
+        const res = await aliceMcp.client.readResource({ uri: `ui://yap/${name}` });
+        const csp = (res.contents[0] as any)._meta?.ui?.csp;
+        expect(csp?.connectDomains, name).toContain(origin);
+        expect(csp?.resourceDomains, name).toContain(origin);
+      }
+    });
+
+    it("also carries the legacy openai/widgetCSP key (snake_case) for older ChatGPT", async () => {
+      const origin = new URL(app.baseUrl).origin;
+      const res = await aliceMcp.client.readResource({ uri: "ui://yap/media-card" });
+      const legacy = (res.contents[0] as any)._meta?.["openai/widgetCSP"];
+      expect(legacy?.connect_domains).toContain(origin);
+      expect(legacy?.resource_domains).toContain(origin);
+    });
+  });
+
   describe("result-level delivery via call", () => {
     it("carries the widget pointer in-band, and emits ONLY text content (portable to every client)", async () => {
       const raw: any = await aliceMcp.callRaw("call", {
@@ -133,6 +157,13 @@ describeEachAdapter("widgets", (adapter) => {
       const origin = new URL(app.baseUrl).origin;
       expect(ui?.csp?.connectDomains).toContain(origin);
       expect(ui?.csp?.resourceDomains).toContain(origin);
+    });
+
+    it("dual-keys the shell resourceUri (nested ui.resourceUri + flat ui/resourceUri) for host-convention spread", async () => {
+      const tools = await aliceMcp.client.listTools();
+      const meta = tools.tools.find((t) => t.name === "show_widget")!._meta as any;
+      expect(meta?.ui?.resourceUri).toBe("ui://yap/shell");
+      expect(meta?.["ui/resourceUri"]).toBe("ui://yap/shell");
     });
 
     it("renders any registered widget by name: text content + structuredContent for MCP Apps", async () => {
