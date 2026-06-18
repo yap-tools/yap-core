@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { TOOL_RESULT_UNWRAP_JS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -34,5 +34,54 @@ describe("widgetHtml", () => {
     expect(safeUrl("https://example.com/a")).toBe("https://example.com/a");
     expect(safeUrl("javascript:alert(1)")).toBe("#");
     expect(safeUrl("data:text/html,<script>")).toBe("#");
+  });
+});
+
+describe("bridge: tool-result unwrapping", () => {
+  // Evaluate the exact source the bridge embeds, so the test tracks the shipped code.
+  const findSc = new Function(TOOL_RESULT_UNWRAP_JS + " return __yapSc;")() as (p: unknown) => unknown;
+
+  it("reads structuredContent at the top level", () => {
+    expect(findSc({ structuredContent: { widget: "ui://yap/x" } })).toEqual({ widget: "ui://yap/x" });
+  });
+
+  it("digs through nested value envelopes hosts wrap re-delivered results in", () => {
+    // MCPJam re-delivers the result as { value: { structuredContent } } after a
+    // few seconds — sometimes doubly nested. Reading only the top level misses it
+    // and the widget goes blank on re-mount.
+    expect(findSc({ value: { structuredContent: { a: 1 } } })).toEqual({ a: 1 });
+    expect(findSc({ value: { value: { structuredContent: { a: 2 } } } })).toEqual({ a: 2 });
+  });
+
+  it("returns nothing for an envelope that carries no structuredContent", () => {
+    expect(findSc({ value: { type: "json" } })).toBeFalsy();
+    expect(findSc({})).toBeFalsy();
+  });
+});
+
+describe("bridge: spec-compliant handshake", () => {
+  it("ui/initialize carries appInfo and protocolVersion (strict hosts reject the bare form)", () => {
+    const init = widgetHtml("media-card", "client").split('"ui/initialize"')[1]!.slice(0, 300);
+    expect(init).toContain("appInfo");
+    expect(init).toContain("protocolVersion");
+  });
+});
+
+describe("widget recovery mounts in place (no nested iframe)", () => {
+  it("the shell never spawns a nested iframe (strict hosts block frame-src)", () => {
+    const shell = widgetHtml("shell", "client");
+    expect(shell).not.toContain("srcdoc");
+    expect(shell).not.toMatch(/createElement\(\s*["']iframe["']\s*\)/);
+  });
+
+  it("each renderable widget embeds its style+render as recoverable JSON", () => {
+    for (const name of ["media-card", "upload-dropzone"]) {
+      const html = widgetHtml(name, "client");
+      const m = /<script type="application\/json" data-yap-src>(.*?)<\/script>/s.exec(html);
+      expect(m, name).toBeTruthy();
+      const src = JSON.parse(m![1]!);
+      expect(src.render, name).toBe(WIDGETS[name]!.render);
+      expect(src.style, name).toBe(WIDGETS[name]!.style);
+    }
   });
 });

@@ -25,11 +25,21 @@ export interface WidgetDef {
   originHostable: boolean;
 }
 
+/** Dig the tool result's structuredContent out of a (possibly nested) params
+ * envelope. Hosts re-deliver a result wrapped in { value: { … } } — sometimes
+ * several levels deep (MCPJam does this seconds after the first render); reading
+ * only the top level misses it and the widget blanks on re-mount. Exported as
+ * source so the bridge and its unit test share one definition. */
+export const TOOL_RESULT_UNWRAP_JS =
+  `function __yapSc(params){var p=params,sc=p&&p.structuredContent,g=0;` +
+  `while(!sc&&p&&typeof p.value==="object"&&p.value!==null&&g++<5){p=p.value;sc=p.structuredContent;}return sc;}`;
+
 /** Shared bridge, inlined into every widget. */
 const BRIDGE_JS = `
   var MODE = document.documentElement.getAttribute("data-yap-mode") || "client";
   var pending = {};
   var reqId = 1;
+  ${TOOL_RESULT_UNWRAP_JS}
   function send(msg) { try { parent.postMessage(msg, "*"); } catch (e) {} }
   function announceHeight() {
     send({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight } });
@@ -60,11 +70,12 @@ const BRIDGE_JS = `
       return;
     }
     // MCP Apps channel: the host delivers the tool result; our data rides in
-    // structuredContent (see show_widget). Some hosts re-deliver tool-result on
-    // reconnect/refresh with no structuredContent — ignore those so an empty
-    // update can't clobber an already-rendered view.
+    // structuredContent (see show_widget). Some hosts wrap a re-delivered result
+    // in one or more { value: … } envelopes — dig through them. A re-deliver with
+    // no structuredContent is ignored so an empty update can't clobber a rendered
+    // view (the shell's own render guard also protects against that).
     if (m.method === "ui/notifications/tool-result") {
-      var sc = m.params && m.params.structuredContent;
+      var sc = __yapSc(m.params);
       if (sc && typeof sc === "object" && Object.keys(sc).length > 0) {
         window.__yapOnData && window.__yapOnData(sc);
       }
@@ -93,7 +104,14 @@ const BRIDGE_JS = `
     // MCP Apps handshake (ui/initialize -> initialized). A non-MCP-Apps parent
     // (e.g. the shell, when this widget is nested) simply won't answer; we also
     // emit ui/ready so the shell can push data over the internal channel.
-    request("ui/initialize", { appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] } })
+    // appInfo + protocolVersion are required by spec-strict hosts: MCPJam logs
+    // -32603 (and masks it with its own shim) and Claude leaves the widget blank
+    // when they're absent. Bare appCapabilities is not enough.
+    request("ui/initialize", {
+      appInfo: { name: "yap", version: "1" },
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: "2026-01-26",
+    })
       .then(function () { send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }); })
       .catch(function () {});
     send({ jsonrpc: "2.0", method: "ui/ready" });
@@ -153,9 +171,9 @@ export const WIDGETS: Record<string, WidgetDef> = {
     description:
       "Generic widget shell: renders any registered ui:// widget in its own document with the supplied params. The statically-declared template for show_widget.",
     originHostable: false,
-    // Kept only for the rare recovery iframe (see below); the in-place widget
-    // sits directly in the shell body and inherits BASE_STYLE's inset.
-    style: ".shellframe { border: 0; width: 100%; }",
+    // No chrome of its own: the mounted widget sits directly in the shell body
+    // and inherits BASE_STYLE's inset.
+    style: "",
     render: `
       var root = document.getElementById("root");
       var rendered = false;
@@ -182,30 +200,25 @@ export const WIDGETS: Record<string, WidgetDef> = {
           return;
         }
         // Recovery path: a host re-mounted us and replayed only the tool-input
-        // {widget, params} with no structuredContent, so we lack the source.
-        // Fetch the widget's document through the host and frame it (best effort;
-        // a host that suppresses structuredContent on re-mount is the exception).
+        // {widget, params} with no inline render. Read the widget's document
+        // through the host, pull its embedded {style, render} (data-yap-src), and
+        // mount it IN THIS document — never a nested iframe, which strict hosts
+        // (Claude: frame-src 'self' …; MCPJam strict) refuse to spawn, the old blank.
         var uri = d.widget.indexOf("://") === -1 ? "${UI_SCHEME_PREFIX}" + d.widget : d.widget;
         request("resources/read", { uri: uri })
           .then(function (r) {
+            if (rendered) return;
             var html = r && r.contents && r.contents[0] && r.contents[0].text;
-            if (!html || rendered) { if (!html) fail("empty widget"); return; }
+            var doc = html && new DOMParser().parseFromString(html, "text/html");
+            var el = doc && doc.querySelector("[data-yap-src]");
+            var src = el ? JSON.parse(el.textContent) : null;
+            if (!src || !src.render) { fail("empty widget"); return; }
             rendered = true;
-            var f = document.createElement("iframe");
-            f.className = "shellframe";
-            f.setAttribute("sandbox", "allow-scripts");
-            f.srcdoc = html;
-            f.onload = function () {
-              f.contentWindow.postMessage({ jsonrpc: "2.0", method: "ui/render-data", params: { data: d.params || {} } }, "*");
-            };
-            window.addEventListener("message", function (e) {
-              if (e.source === f.contentWindow && e.data && e.data.method === "ui/notifications/size-changed" && e.data.params) {
-                f.style.height = e.data.params.height + "px";
-                requestAnimationFrame(announceHeight);
-              }
-            });
-            root.innerHTML = "";
-            root.appendChild(f);
+            if (src.style) { var st = document.createElement("style"); st.textContent = src.style; document.head.appendChild(st); }
+            window.onData = function (cb) { cb(d.params || {}); requestAnimationFrame(announceHeight); };
+            var s = document.createElement("script");
+            s.textContent = src.render;
+            document.body.appendChild(s);
           })
           .catch(function (err) { fail("could not load widget (" + (err && err.message || err) + ")"); });
       });
@@ -331,6 +344,12 @@ export function widgetHtml(name: string, mode: "client" | "origin", data?: unkno
   if (!def) throw new Error(`unknown widget ${name}`);
   const dataScript =
     mode === "origin" ? `<script>window.__YAP_DATA__ = ${escapeForInlineJson(JSON.stringify(data ?? {}))};</script>` : "";
+  // The widget's own style + render, embedded as inert JSON so the shell can
+  // recover and mount it IN PLACE when a host re-mounts with only tool-input
+  // (no inline render) — no nested iframe, which strict hosts block.
+  const srcScript = `<script type="application/json" data-yap-src>${escapeForInlineJson(
+    JSON.stringify({ style: def.style, render: def.render }),
+  )}</script>`;
   const html = `<!doctype html>
 <html data-yap-mode="${mode}">
 <head>
@@ -342,6 +361,7 @@ export function widgetHtml(name: string, mode: "client" | "origin", data?: unkno
 <body>
 <div id="root"></div>
 ${dataScript}
+${srcScript}
 <script>
 (function () {
 ${BRIDGE_JS}
