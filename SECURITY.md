@@ -9,7 +9,7 @@ grants, encrypted hook secrets), so security reports are taken seriously.
 
 - use GitHub's private vulnerability reporting on this repository
   (*Security → Report a vulnerability*), or
-- email **troels@blck.dk** with a description and reproduction steps.
+- email **contact@continuous.supply** with a description and reproduction steps.
 
 You should get an initial response within a few days. Please give us a
 reasonable window to ship a fix before disclosing publicly.
