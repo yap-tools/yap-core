@@ -9,6 +9,10 @@ import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
 
+import { createRequire } from "node:module";
+
+const pkgVersion = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
+
 describeEachAdapter("MCP surface", (adapter) => {
   let app: TestApp;
   let sysadmin: ApiClient;
@@ -93,10 +97,16 @@ describeEachAdapter("MCP surface", (adapter) => {
     expect(names).not.toContain("upload_request");
   });
 
-  it("whoami returns the current user identity as a top-level tool", async () => {
+  it("reports the package version in the MCP server handshake", async () => {
+    const info = alice.client.getServerVersion();
+    expect(info?.name).toBe("yap");
+    expect(info?.version).toBe(pkgVersion);
+  });
+
+  it("whoami returns the current user identity and the server version as a top-level tool", async () => {
     const result = await alice.call("whoami");
-    expect(result).toEqual({ id: aliceId, name: "Alice" });
-    expect(Object.keys(result).sort()).toEqual(["id", "name"]);
+    expect(result).toEqual({ id: aliceId, name: "Alice", version: pkgVersion });
+    expect(Object.keys(result).sort()).toEqual(["id", "name", "version"]);
   });
 
   describe("the discovery chain", () => {

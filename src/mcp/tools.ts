@@ -124,7 +124,7 @@ function widgetCspDomains(config: YapConfig): string[] {
 }
 
 export function registerMcpTools(server: YapServer): void {
-  const { mcp, db, config, blob } = server;
+  const { mcp, db, config, blob, version } = server;
   const env = { db, config, blob, baseUrl: config.baseUrl };
 
   // Every tool executes inside the session's token-scope context (if the
@@ -251,12 +251,14 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "whoami",
-    description: "Return the currently authenticated user's minimal identity: id and name.",
+    description: "Return the currently authenticated user's minimal identity (id and name) and the running Yap Core version.",
     annotations: { readOnlyHint: true, title: "Who am I" },
     execute: async (_args, ctx) => {
       try {
         const userId = sessionUser(ctx.session);
-        return asJson(await usersCore.whoami(db, userId));
+        // version is a server-surface fact, not user identity — merged here
+        // rather than in core whoami so the core stays a pure DB lookup.
+        return asJson({ ...(await usersCore.whoami(db, userId)), version });
       } catch (err) {
         rethrow(err);
       }

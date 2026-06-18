@@ -8,6 +8,7 @@
  * browser traffic directly (its transport mishandles CORS preflights).
  */
 import type { Server as HttpServer } from "node:http";
+import { createRequire } from "node:module";
 
 import { FastMCP } from "fastmcp";
 
@@ -21,6 +22,11 @@ import { registerMcpTools } from "./mcp/tools.js";
 import { createEdgeServer, getFreeLoopbackPort } from "./rest/edge.js";
 import { registerOAuthRoutes } from "./rest/oauth.js";
 import { registerRestRoutes } from "./rest/routes.js";
+
+/** The running server's version, the single source of truth for the MCP
+ * handshake's serverInfo and whoami. Read from package.json so a version bump
+ * is the only edit — `../package.json` resolves the same from src/ and dist/. */
+const VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 /** MCP session auth payload: identity (plus, on the OAuth lane, the token's
  * delegation) — permissions always come from grants. */
@@ -36,6 +42,8 @@ export interface YapServer {
   db: Db;
   blob: BlobStore;
   logger: YapLogger;
+  /** Package version, surfaced in the MCP handshake and whoami. */
+  version: string;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -89,7 +97,8 @@ async function authenticateMcp(
 export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: YapLogger = createLogger()): YapServer {
   const mcp = new FastMCP<SessionAuth>({
     name: "yap",
-    version: "0.1.0",
+    // fastmcp types version as a semver template literal; ours is a plain string.
+    version: VERSION as `${number}.${number}.${number}`,
     instructions: `Yap serves navigable context: spaces hold bundles; a bundle holds docs, item-types (schemas with items), files, and hooks.
 
 Engage Yap whenever a request involves its spaces, stored items, files, or hooks, or names a space or bundle. Discovery is progressive — follow this order:
@@ -116,6 +125,7 @@ Stored references are opaque — resolve before showing them to a user: file://{
     db,
     blob,
     logger,
+    version: VERSION,
     start: async () => {
       // fastmcp on loopback; the edge proxy owns the public port.
       const internalPort = await getFreeLoopbackPort();

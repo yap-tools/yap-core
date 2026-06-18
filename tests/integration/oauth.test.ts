@@ -5,6 +5,7 @@
  * revocation lever (RFC 7009, connected-app disconnect, key revocation).
  */
 import { createHash, randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { describeEachAdapter } from "../helpers/adapters.js";
@@ -13,6 +14,8 @@ import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js"
 import { connectMcp } from "../helpers/mcp.js";
 
 const REDIRECT_URI = "https://app.example/callback";
+
+const pkgVersion = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
 
 function pkce() {
   const verifier = randomBytes(32).toString("base64url");
@@ -517,8 +520,8 @@ describeEachAdapter("oauth", (adapter) => {
     const mcp = await connectMcp(app.baseUrl, access_token);
     try {
       const identity = await mcp.call("whoami");
-      expect(identity).toEqual({ id: aliceId, name: "Alice" });
-      expect(Object.keys(identity).sort()).toEqual(["id", "name"]);
+      expect(identity).toEqual({ id: aliceId, name: "Alice", version: pkgVersion });
+      expect(Object.keys(identity).sort()).toEqual(["id", "name", "version"]);
 
       const result = await mcp.call("load");
       expect(result.spaces.some((s: any) => s.id === personalSpaceId)).toBe(true);
