@@ -28,6 +28,7 @@ describe("loadConfig", () => {
     expect(config.port).toBe(8787);
     expect(config.baseUrl).toBe("http://localhost:8787");
     expect(config.mimeAllowlist).toBe("*");
+    expect(config.downloadTtlSeconds).toBe(14400);
     expect(config.hookTimeoutMs).toBe(30_000);
   });
 
