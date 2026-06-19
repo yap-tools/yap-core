@@ -27,10 +27,10 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
   type; any multi field {minItems, maxItems}. Query multi fields with the set
   operators has/has_any/has_all/has_none, or a comparison op with a quantifier
   (any/all/none).
-- **Hook** — a named outbound HTTP call owned by a bundle. You see only the
-  hook's name, description, and declared parameters — never its URL, headers,
-  or secrets. Firing requires the fire_hooks capability. Hooks are authored
-  over REST only.
+- **Hook** — a named outbound HTTP call owned by a bundle. You see the hook's
+  id, name, description, and declared parameters — never its URL, headers, or
+  secrets. Fire it via fire_hook by name or id. Firing requires the fire_hooks
+  capability. Hooks are authored over REST only.
 - **User doc** — account-level guidance attached to you, available across all
   your spaces. Docs flagged autoload are returned by load at session start.
 - **Widget** — an interactive panel some results render inline (file cards,

@@ -116,6 +116,8 @@ describeEachAdapter("hooks", (adapter) => {
       const viaMcp = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
       const hooks = viaMcp.bundles[0].hooks;
       expect(hooks[0].name).toBe("notify");
+      // The id is exposed (matches REST and every other entity in load_bundle); the transport is not.
+      expect(hooks[0].id).toBe(listed.body.data[0].id);
       expect(JSON.stringify(hooks)).not.toContain("super-secret-token");
       expect(JSON.stringify(hooks)).not.toContain(String(targetPort));
     });
@@ -353,6 +355,28 @@ describeEachAdapter("hooks", (adapter) => {
       const result = await fireViaMcp(aliceMcp, bundleId, { hook: "notify", params: { channel: "ops" } });
       expect(result.ok).toBe(false);
       expect(result.error.message).toContain('required hook parameter "message"');
+    });
+
+    it("rejects a fire with no hook identifier with a clear, actionable error (not a bare not_found)", async () => {
+      // The flattening mistake: declared values placed at the top level, hook omitted.
+      const result = await fireViaMcp(aliceMcp, bundleId, { params: { message: "x" } });
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe("invalid_request");
+      expect(result.error.message).toMatch(/params\.hook|no hook specified/i);
+    });
+
+    it("fires by the hook id that load_bundle now returns (not just by name)", async () => {
+      const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
+      const notify = loaded.bundles[0].hooks.find((h: any) => h.name === "notify");
+      expect(notify.id).toBeTruthy();
+      received.length = 0;
+      const result = await fireViaMcp(aliceMcp, bundleId, {
+        hook: notify.id,
+        params: { message: "by id", channel: "ops" },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.result.status).toBe(200);
+      expect(received).toHaveLength(1);
     });
 
     it("returns non-2xx upstream results raw — the agent decides what to do", async () => {

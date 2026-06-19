@@ -299,7 +299,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load_bundle",
     description:
-      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the available hooks (name, description, and declared parameters only). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
+      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the available hooks (id, name, description, and declared parameters — never the transport). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
     parameters: z.object({ bundle_ids: z.array(z.string()).min(1) }),
     annotations: { readOnlyHint: true, title: "Load bundles" },
     execute: async (args, ctx) => {
@@ -340,6 +340,7 @@ export function registerMcpTools(server: YapServer): void {
               })),
               files: await listFilesUnchecked(db, bundleId),
               hooks: (await listHooksUnchecked(db, bundleId)).map((h) => ({
+                id: h.id,
                 name: h.name,
                 description: h.description,
                 params: h.params,

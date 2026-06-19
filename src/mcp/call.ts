@@ -224,7 +224,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   fire_hook: {
     description:
-      "Fire a named hook with values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the hook's transport. Synchronous with a fixed timeout, no automatic retries; returns the raw response status and body. Params: hook (name or id), params? ({name: value}).",
+      'Fire a hook with values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the hook\'s transport. Synchronous with a fixed timeout, no automatic retries; returns the raw response status and body. Two params: "hook" — the hook\'s name or id (both are in load_bundle); and "params" — an object of the hook\'s declared parameter values. The declared values go inside the nested params object, NOT alongside hook. Example: {hook: "notify", params: {message: "deploy finished", channel: "ops"}}.',
     capability: "fire_hooks",
     handler: async (env, params) => ({
       result: await hooksCore.fireHook(env, env.userId, env.bundleId, {

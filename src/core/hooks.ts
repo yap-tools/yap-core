@@ -2,7 +2,7 @@
  * Hooks: named, outbound, parameterized HTTP calls owned by a bundle. The
  * security model rests on two asymmetries:
  *
- * - Visibility: agents see only a hook's name, description, and declared
+ * - Visibility: agents see a hook's id, name, description, and declared
  *   parameters. The transport (URL, method, headers, body template, secrets)
  *   is AES-256-GCM-encrypted at rest with the master key from configuration,
  *   decrypted only in memory at fire time, and never returned by any surface.
@@ -274,20 +274,31 @@ export async function fireHook(
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "fire_hooks", ctx);
 
+  // Distinguish "you didn't name a hook" from "that hook doesn't exist". An
+  // empty identifier is the flattening mistake — the caller put the declared
+  // values where the hook name belongs — so name the param shape, don't return
+  // a bare not_found that reads as a wiring problem.
+  const ref = input.hook?.trim();
+  if (!ref) {
+    throw invalid(
+      'no hook specified — set params.hook to the hook\'s name or id (both are in load_bundle) and put the declared values in the nested params object, e.g. {hook: "notify", params: {message: "…"}}',
+    );
+  }
+
   const { hooks } = db.tables;
   const byId = await db.client
     .select()
     .from(hooks)
-    .where(and(eq(hooks.bundleId, bundleId), eq(hooks.id, input.hook)));
+    .where(and(eq(hooks.bundleId, bundleId), eq(hooks.id, ref)));
   const byName =
     byId.length > 0
       ? byId
       : await db.client
           .select()
           .from(hooks)
-          .where(and(eq(hooks.bundleId, bundleId), eq(hooks.name, input.hook)));
+          .where(and(eq(hooks.bundleId, bundleId), eq(hooks.name, ref)));
   const hook = byName[0];
-  if (!hook) throw notFound("hook", input.hook);
+  if (!hook) throw notFound("hook", ref);
 
   // Parameter allowlisting: the safety hinge. Supplied values must match the
   // declared specs exactly — nothing can be added, renamed, or injected.
