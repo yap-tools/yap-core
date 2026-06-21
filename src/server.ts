@@ -44,6 +44,9 @@ export interface YapServer {
   logger: YapLogger;
   /** Package version, surfaced in the MCP handshake and whoami. */
   version: string;
+  /** The run worker, attached by serve.ts once started, so run_agent and the
+   * REST run trigger can nudge it. Absent until the worker is wired in. */
+  agentWorker?: { kick(): void };
   start(): Promise<void>;
   stop(): Promise<void>;
 }

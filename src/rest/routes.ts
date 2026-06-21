@@ -15,6 +15,7 @@ import { z } from "zod";
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as agentsCore from "../core/agents.js";
 import * as agentFilesCore from "../core/agentFiles.js";
+import * as agentRunsCore from "../core/agentRuns.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { YapError, invalid, unauthorized } from "../core/errors.js";
@@ -988,6 +989,56 @@ export function registerRestRoutes(server: YapServer): void {
       const userId = requireUser(auth);
       await agentFilesCore.deleteAgentFile(agentFileEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- Agent runs (trigger over MCP run_agent or here; inspect over REST) ----------
+
+  app.post(
+    "/v1/agents/:id/runs",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const rawText = await c.req.text();
+      let rawBody: unknown = {};
+      if (rawText) {
+        try {
+          rawBody = JSON.parse(rawText);
+        } catch {
+          throw invalid("request body must be valid JSON");
+        }
+      }
+      const body = parseBody(z.object({ args: z.unknown().optional() }), rawBody);
+      const result = await agentRunsCore.triggerRun(db, userId, param(c, "id"), body.args);
+      server.agentWorker?.kick();
+      return c.json(result, 202);
+    }),
+  );
+
+  app.get(
+    "/v1/agents/:id/runs",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json({ data: await agentRunsCore.listRuns(db, userId, param(c, "id")) });
+    }),
+  );
+
+  app.get(
+    "/v1/runs/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(await agentRunsCore.getRun(db, userId, param(c, "id")));
+    }),
+  );
+
+  app.get(
+    "/v1/runs/:id/logs",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const logsKey = await agentRunsCore.getRunLogsKey(db, userId, param(c, "id"));
+      if (!logsKey) return c.text("");
+      const stream = await blob.getStream(logsKey);
+      c.header("content-type", "text/plain; charset=utf-8");
+      return c.body(Readable.toWeb(stream) as ReadableStream);
     }),
   );
 

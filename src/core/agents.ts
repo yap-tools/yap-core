@@ -104,18 +104,24 @@ export async function getAgentRow(db: Db, agentId: string): Promise<AgentRow> {
 }
 
 /**
- * Authoring gate, mirroring requireBundleCapability: insiders lacking
- * edit_agents get 403; genuine outsiders (no standing in the space) get 404 so
- * the agent's existence stays hidden.
+ * Capability gate over an agent's space, mirroring requireBundleCapability:
+ * insiders lacking the capability get 403; genuine outsiders (no standing in
+ * the space) get 404 so the agent's existence stays hidden.
  */
-async function requireAgentEdit(db: Db, userId: string, space: Space, agentId?: string): Promise<void> {
+async function requireAgentCapability(
+  db: Db,
+  userId: string,
+  space: Space,
+  capability: string,
+  agentId?: string,
+): Promise<void> {
   const ctx = { space: toSpaceRef(space) };
-  const decision = await resolveCapability(db, userId, "edit_agents", ctx);
+  const decision = await resolveCapability(db, userId, capability, ctx);
   if (decision.allowed) return;
   if (decision.decidedBy === "default_deny" && !(await hasAnyCapability(db, userId, ctx))) {
     throw notFound("agent", agentId ?? space.id);
   }
-  throw forbidden("missing capability edit_agents", { capability: "edit_agents", decidedBy: decision.decidedBy });
+  throw forbidden(`missing capability ${capability}`, { capability, decidedBy: decision.decidedBy });
 }
 
 /** Read gate: any standing in the space (owner or any grant). */
@@ -126,11 +132,19 @@ async function requireAgentRead(db: Db, userId: string, space: Space, agentId?: 
 }
 
 /** Load an agent and assert the user may author it (edit_agents). Shared by
- * the agent, file-attachment, and run trigger paths. */
+ * the agent and file-attachment paths. */
 export async function loadAgentForEdit(db: Db, userId: string, agentId: string): Promise<AgentRow> {
   const row = await getAgentRow(db, agentId);
   const space = await getSpaceRow(db, row.spaceId);
-  await requireAgentEdit(db, userId, space, agentId);
+  await requireAgentCapability(db, userId, space, "edit_agents", agentId);
+  return row;
+}
+
+/** Load an agent and assert the user may run it (run_agents). */
+export async function loadAgentForRun(db: Db, userId: string, agentId: string): Promise<AgentRow> {
+  const row = await getAgentRow(db, agentId);
+  const space = await getSpaceRow(db, row.spaceId);
+  await requireAgentCapability(db, userId, space, "run_agents", agentId);
   return row;
 }
 

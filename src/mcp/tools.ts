@@ -8,6 +8,7 @@ import { UserError } from "fastmcp";
 import { z } from "zod";
 
 import type { YapConfig } from "../config.js";
+import { triggerRun } from "../core/agentRuns.js";
 import { runWithTokenAuth } from "../core/authScope.js";
 import {
   DATATYPES,
@@ -491,6 +492,25 @@ export function registerMcpTools(server: YapServer): void {
         const userId = sessionUser(ctx.session);
         const space = await createSpace(db, userId, args);
         return asJson({ id: space.id, name: space.name });
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
+  // Running is the ONLY agent capability over MCP — authoring is REST-only.
+  addTool({
+    name: "run_agent",
+    description:
+      "Trigger an on-demand run of a stored agent (requires the run_agents capability in the agent's space). The run executes asynchronously in an isolated container, acting with the agent's own bound key — not yours — so it reaches exactly what that key grants. Returns immediately with a run id; inspect status, output, and logs over REST (GET /v1/runs/{run_id}). Params: agent_id; args? (a JSON value that REPLACES the agent's stored args for this run only).",
+    parameters: z.object({ agent_id: z.string(), args: z.unknown().optional() }),
+    annotations: { title: "Run agent" },
+    execute: async (params, ctx) => {
+      try {
+        const userId = sessionUser(ctx.session);
+        const result = await triggerRun(db, userId, params.agent_id, params.args);
+        server.agentWorker?.kick();
+        return asJson(result);
       } catch (err) {
         rethrow(err);
       }

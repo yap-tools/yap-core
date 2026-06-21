@@ -9,7 +9,7 @@
 import { and, asc, eq } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { loadAgentForRead } from "./agents.js";
+import { loadAgentForRead, loadAgentForRun } from "./agents.js";
 import { notFound } from "./errors.js";
 import { nowIso, newId } from "./util.js";
 
@@ -94,6 +94,21 @@ export async function enqueueRun(
     finishedAt: null,
   });
   return { run_id: id, status: "queued" };
+}
+
+/**
+ * Trigger an on-demand run: requires run_agents on the agent's space, records
+ * the effective args, and queues the run. The run then acts with the agent's
+ * bound key — a separate authority from the caller's.
+ */
+export async function triggerRun(
+  db: Db,
+  userId: string,
+  agentId: string,
+  args?: unknown,
+): Promise<{ run_id: string; status: "queued" }> {
+  await loadAgentForRun(db, userId, agentId);
+  return enqueueRun(db, agentId, { trigger: "manual", triggeredBy: userId, args });
 }
 
 export async function listRuns(db: Db, userId: string, agentId: string): Promise<RunInfo[]> {
