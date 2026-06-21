@@ -25,6 +25,11 @@ export const CONTENT_CAPABILITIES = [
   "edit_files",
   "fire_hooks",
   "edit_hooks",
+  // Agents are space-scoped resources; authoring (edit_agents, REST-only) and
+  // running (run_agents) are granted like content capabilities and flow into
+  // the member role mask via the spread below.
+  "edit_agents",
+  "run_agents",
 ] as const;
 
 /** Container capabilities manage the space itself; they cascade mechanically
