@@ -86,6 +86,23 @@ export interface YapConfig {
   orphanSweepIntervalMs: number;
   /** Reserved file records older than this are swept. */
   orphanMaxAgeMs: number;
+  agent: AgentConfig;
+}
+
+/** Agent run execution. Docker is an optional, run-time-only dependency. */
+export interface AgentConfig {
+  /** Container engine binary (shelled out to). */
+  dockerBin: string;
+  /** Hard wall-clock cap per run; the container is killed past it. */
+  runTimeoutMs: number;
+  /** Passed to `docker run --cpus`. */
+  runCpus: string;
+  /** Passed to `docker run --memory` (in MB). */
+  runMemoryMb: number;
+  /** Optional directory of operator-registered runtime descriptors. */
+  runtimesDir?: string;
+  /** Persisted run output is truncated to this many bytes. */
+  maxOutputBytes: number;
 }
 
 export class ConfigError extends Error {}
@@ -234,5 +251,13 @@ export function loadConfig(env: Env = process.env): YapConfig {
     hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),
+    agent: {
+      dockerBin: env.YAP_AGENT_DOCKER_BIN || "docker",
+      runTimeoutMs: intEnv(env, "YAP_AGENT_RUN_TIMEOUT_MS", 600_000),
+      runCpus: env.YAP_AGENT_RUN_CPUS || "1",
+      runMemoryMb: intEnv(env, "YAP_AGENT_RUN_MEMORY_MB", 512),
+      runtimesDir: env.YAP_AGENT_RUNTIMES_DIR || undefined,
+      maxOutputBytes: intEnv(env, "YAP_AGENT_MAX_OUTPUT_BYTES", 65536),
+    },
   };
 }
