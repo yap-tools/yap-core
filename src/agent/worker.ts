@@ -66,6 +66,9 @@ export async function processOneRun(deps: WorkerDeps): Promise<boolean> {
   if (!run) return false;
 
   const logsKey = `runs/${run.id}/logs`;
+  // Hoisted so the catch-all can redact them out of any error message.
+  let yapKey = "";
+  let accessToken = "";
   try {
     const agent = await getAgentRow(db, run.agentId);
 
@@ -87,15 +90,19 @@ export async function processOneRun(deps: WorkerDeps): Promise<boolean> {
       return true;
     }
 
-    let accessToken: string;
     try {
       ({ accessToken } = await resolveAccessToken({ db, config, getRuntime: lookup }, agent.runtime));
-    } catch (err) {
-      await completeRun(db, run.id, { status: "failed", error: "stale_credential", output: (err as Error).message });
+    } catch {
+      // The raw error can carry blob/provider secrets — never persist it.
+      await completeRun(db, run.id, {
+        status: "failed",
+        error: "stale_credential",
+        output: "runtime credential is stale or unavailable — re-authorize the runtime",
+      });
       return true;
     }
 
-    const yapKey = decryptAgentKey({ db, config }, agent);
+    yapKey = decryptAgentKey({ db, config }, agent);
 
     // Stage attached files read-only into a throwaway host directory.
     const stageDir = mkdtempSync(join(tmpdir(), `yap-run-${run.id}-`));
@@ -152,7 +159,13 @@ export async function processOneRun(deps: WorkerDeps): Promise<boolean> {
       rmSync(stageDir, { recursive: true, force: true });
     }
   } catch (err) {
-    await completeRun(db, run.id, { status: "failed", error: "container_error", output: (err as Error).message });
+    // By here the secrets may be set (error after token resolution); redact them
+    // from the message before persisting.
+    await completeRun(db, run.id, {
+      status: "failed",
+      error: "container_error",
+      output: redactSecrets((err as Error).message, [yapKey, accessToken]),
+    });
   }
   return true;
 }

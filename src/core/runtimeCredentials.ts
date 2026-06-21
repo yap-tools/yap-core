@@ -196,28 +196,22 @@ export async function refreshNow(env: RuntimeCredEnv, name: string): Promise<{ s
  */
 export async function resolveAccessToken(env: RuntimeCredEnv, name: string): Promise<{ accessToken: string }> {
   const runtime = resolveRuntime(env, name);
-  const row = await loadRow(env.db, name);
-  if (!row) {
-    throw new YapError("invalid_request", `no credential for runtime "${name}" — run: yap agent-runtime ${name} authorize`);
-  }
-  // A token is reusable only while the credential is active AND unexpired; a
-  // credential explicitly marked stale always goes through refresh.
-  const current = runtime.materialize(decodeBlob(env, row));
-  if (row.status === "active" && current.expiresAt !== undefined && current.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
-    return { accessToken: current.accessToken };
-  }
+  // Fully serialized per runtime so the read-token-or-refresh decision can't
+  // race a concurrent store/revoke/refresh. With the single in-process worker
+  // this adds no real contention.
   return withRuntimeLock(name, async () => {
-    // Re-read inside the lock: a concurrent waiter may have just refreshed.
-    const fresh = await loadRow(env.db, name);
-    if (!fresh) {
-      throw new YapError("invalid_request", `no credential for runtime "${name}"`);
+    const row = await loadRow(env.db, name);
+    if (!row) {
+      throw new YapError("invalid_request", `no credential for runtime "${name}" — run: yap agent-runtime ${name} authorize`);
     }
-    const reread = runtime.materialize(decodeBlob(env, fresh));
-    if (fresh.status === "active" && reread.expiresAt !== undefined && reread.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
-      return { accessToken: reread.accessToken };
+    // A token is reusable only while the credential is active AND unexpired; a
+    // credential explicitly marked stale always goes through refresh.
+    const current = runtime.materialize(decodeBlob(env, row));
+    if (row.status === "active" && current.expiresAt !== undefined && current.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
+      return { accessToken: current.accessToken };
     }
     try {
-      const result = await runtime.refresh(decodeBlob(env, fresh));
+      const result = await runtime.refresh(decodeBlob(env, row));
       await persist(env, name, result.blob, "active");
       return { accessToken: result.accessToken };
     } catch {

@@ -90,7 +90,8 @@ function boundedCollector(max: number) {
         buf += chunk;
         bytes += add;
       } else {
-        buf += chunk.slice(0, max - bytes);
+        // Slice by bytes, not characters, so the cap is honoured for multibyte.
+        buf += Buffer.from(chunk, "utf8").subarray(0, max - bytes).toString("utf8");
         bytes = max;
         truncated = true;
       }
