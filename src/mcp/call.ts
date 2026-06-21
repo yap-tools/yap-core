@@ -351,7 +351,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   add_property: {
     description:
-      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern}; number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type); any multi field {minItems,maxItems}.",
+      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern, enum} (enum restricts to a fixed set of strings); number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type); any multi field {minItems,maxItems}.",
     capability: "edit_bundles",
     handler: async (env, params) => ({
       result: itemTypesCore.propertyView(

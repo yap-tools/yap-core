@@ -40,6 +40,15 @@ describe("normalizeValue (write-time validation → stored text)", () => {
     expect(() => normalizeValue(prop("date"), 1718000000000)).toThrow(YapError);
   });
 
+  it("text enum: accepts a listed value, rejects an unlisted one", () => {
+    const cfg = { enum: ["low", "medium", "high"] };
+    expect(normalizeValue(prop("text"), "low", cfg)).toBe("low");
+    expect(normalizeValue(prop("text"), "high", cfg)).toBe("high");
+    expect(() => normalizeValue(prop("text"), "urgent", cfg)).toThrow(/must be one of: low, medium, high/);
+    // matching is exact and case-sensitive
+    expect(() => normalizeValue(prop("text"), "Low", cfg)).toThrow(YapError);
+  });
+
   it("errors name the property for actionable messages", () => {
     try {
       normalizeValue({ name: "due_date", datatype: "date" }, "nope");

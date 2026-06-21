@@ -278,6 +278,7 @@ A property may declare a **`config`** of constraints, enforced at the core
 | Datatype | `config` | Effect |
 |---|---|---|
 | `text` | `{ pattern }` | value must match the regex (`RegExp.test`; anchor with `^…$` for a full match) |
+| `text` | `{ enum }` | value must be one of the listed strings (exact, case-sensitive); with `multi` it is a multi-select |
 | `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
 | `item` | `{ itemType }` | the referent must be of this item-type |
 | any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
