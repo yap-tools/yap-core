@@ -112,6 +112,9 @@ export function normalizeValue(
       if (config?.pattern !== undefined && !new RegExp(config.pattern).test(value)) {
         throw invalid(`property "${property.name}" must match ${config.pattern}`);
       }
+      if (config?.enum !== undefined && !config.enum.includes(value)) {
+        throw invalid(`property "${property.name}" must be one of: ${config.enum.join(", ")}`);
+      }
       return value;
     }
     case "number": {

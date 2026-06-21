@@ -22,7 +22,7 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
   another item in the same bundle, item://<id> — and file — a reference to a
   finalized file, file://<id>) and may be multi-valued (an ordered list of that
   datatype). A property may declare config constraints, enforced on every
-  write: text {pattern}; number {min, max, decimals} (default 2 decimals,
+  write: text {pattern, enum}; number {min, max, decimals} (default 2 decimals,
   out-of-precision writes rejected); item {itemType} to pin the referent's
   type; any multi field {minItems, maxItems}. Query multi fields with the set
   operators has/has_any/has_all/has_none, or a comparison op with a quantifier

@@ -18,6 +18,10 @@ export interface PropertyConfig {
   /** text: values must match this regular expression (RegExp.test — anchor
    *  with ^…$ for a full match, JSON-Schema-style unanchored otherwise). */
   pattern?: string;
+  /** text: values must be one of these strings (exact, case-sensitive). A
+   *  JSON-Schema-style constraint, not a datatype; with multi it is a
+   *  multi-select. */
+  enum?: string[];
   /** number: inclusive bounds. */
   min?: number;
   max?: number;
@@ -35,6 +39,7 @@ export interface PropertyConfig {
 export const propertyConfigSchema = z
   .object({
     pattern: z.string(),
+    enum: z.array(z.string()),
     min: z.number(),
     max: z.number(),
     decimals: z.number().int().min(0),
@@ -46,7 +51,7 @@ export const propertyConfigSchema = z
 
 /** Which config keys each datatype understands (multi adds minItems/maxItems). */
 const KEYS_BY_DATATYPE: Record<string, (keyof PropertyConfig)[]> = {
-  text: ["pattern"],
+  text: ["pattern", "enum"],
   number: ["min", "max", "decimals"],
   boolean: [],
   date: [],
@@ -90,6 +95,15 @@ export function validatePropertyConfig(datatype: string, multi: boolean, config:
       new RegExp(config.pattern);
     } catch {
       errors.push(`config.pattern is not a valid regular expression`);
+    }
+  }
+  if (config.enum !== undefined) {
+    if (!Array.isArray(config.enum) || config.enum.length === 0) {
+      errors.push(`config.enum must be a non-empty array`);
+    } else if (config.enum.some((v) => typeof v !== "string" || v.trim() === "")) {
+      errors.push(`config.enum entries must be non-empty strings`);
+    } else if (new Set(config.enum).size !== config.enum.length) {
+      errors.push(`config.enum must not contain duplicate values`);
     }
   }
   if (config.decimals !== undefined && (!Number.isInteger(config.decimals) || config.decimals < 0)) {

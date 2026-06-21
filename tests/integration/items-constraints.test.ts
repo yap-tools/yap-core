@@ -59,6 +59,8 @@ describeEachAdapter("property constraints & reference datatypes", (adapter) => {
             { name: "ratio", datatype: "number", config: { decimals: 4 } },
             { name: "plain", datatype: "number" }, // default 2 decimals
             { name: "tags", datatype: "text", multi: true, config: { minItems: 2, maxItems: 3 } },
+            { name: "status", datatype: "text", config: { enum: ["open", "closed"] } },
+            { name: "colors", datatype: "text", multi: true, config: { enum: ["red", "green", "blue"] } },
           ],
         },
         { name: "other", properties: [{ name: "label", datatype: "text" }] },
@@ -107,6 +109,19 @@ describeEachAdapter("property constraints & reference datatypes", (adapter) => {
       // optional, so empty and absent are both fine.
       expect((await mk({ tags: [] }))[0]!.values.tags).toBeUndefined();
       expect((await mk({ sku: "ABC-9" }))[0]!.values.tags).toBeUndefined();
+    });
+  });
+
+  describe("text enum", () => {
+    it("accepts a listed value and rejects an unlisted one", async () => {
+      expect((await mk({ status: "open" }))[0]!.values.status).toBe("open");
+      expect((await mk({ status: "closed" }))[0]!.values.status).toBe("closed");
+      await expect(mk({ status: "pending" })).rejects.toThrow(/must be one of: open, closed/);
+    });
+
+    it("enforces membership per element for a multi enum", async () => {
+      expect((await mk({ colors: ["red", "blue"] }))[0]!.values.colors).toEqual(["red", "blue"]);
+      await expect(mk({ colors: ["red", "purple"] })).rejects.toThrow(/must be one of: red, green, blue/);
     });
   });
 
@@ -213,6 +228,10 @@ describeEachAdapter("property constraints & reference datatypes", (adapter) => {
       await badBundle("bad2", { datatype: "number", config: { min: 10, max: 1 } }, /cannot exceed config\.max/);
       await badBundle("bad3", { datatype: "text", config: { minItems: 1 } }, /not valid for a text property/);
       await badBundle("bad4", { datatype: "number", config: { pattern: "x" } }, /not valid for a number property/);
+      await badBundle("bad5", { datatype: "number", config: { enum: ["x"] } }, /not valid for a number property/);
+      await badBundle("bad6", { datatype: "text", config: { enum: [] } }, /non-empty array/);
+      await badBundle("bad7", { datatype: "text", config: { enum: ["a", "a"] } }, /duplicate/);
+      await badBundle("bad8", { datatype: "text", config: { enum: ["a", ""] } }, /non-empty strings/);
     });
 
     it("validates config on addProperty and updateProperty", async () => {
