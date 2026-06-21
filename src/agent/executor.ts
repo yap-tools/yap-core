@@ -1,0 +1,118 @@
+/**
+ * Run execution behind a small interface so the worker and scheduler never
+ * touch Docker directly. DockerExecutor shells out to the `docker` CLI (no new
+ * runtime dependency); FakeExecutor gives tests a deterministic result.
+ *
+ * Secrets (the injected Yap key and model token) are passed to the container by
+ * NAME only on the command line (`-e KEY`) with the values supplied through the
+ * docker client's own environment — so they never appear in argv / `ps`.
+ */
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+
+export interface RunSpec {
+  /** Container name (derived from the run id) — used to kill on timeout. */
+  name: string;
+  image: string;
+  command: string[];
+  /** Env injected into the container (secrets included). */
+  env: Record<string, string>;
+  /** Files staged on the host, mounted read-only into the container. */
+  files: { hostPath: string; containerPath: string }[];
+  limits: { cpus: string; memoryMb: number; timeoutMs: number };
+}
+
+export interface RunResult {
+  exitCode: number;
+  output: string;
+  logs: string;
+  timedOut?: boolean;
+  /** The container engine binary was not found — maps to runtime_unavailable. */
+  dockerMissing?: boolean;
+}
+
+export interface RuntimeExecutor {
+  run(spec: RunSpec): Promise<RunResult>;
+}
+
+/** Deterministic executor for tests; records the last spec it was given. */
+export class FakeExecutor implements RuntimeExecutor {
+  lastSpec?: RunSpec;
+  constructor(private readonly result: Partial<RunResult> = {}) {}
+  async run(spec: RunSpec): Promise<RunResult> {
+    this.lastSpec = spec;
+    return { exitCode: 0, output: "", logs: "", ...this.result };
+  }
+}
+
+export type SpawnFn = typeof nodeSpawn;
+
+/** The `docker run` argument vector (secrets are env names only, never values). */
+export function buildDockerArgs(spec: RunSpec): string[] {
+  return [
+    "run",
+    "--rm",
+    "--name",
+    spec.name,
+    "--cpus",
+    spec.limits.cpus,
+    "--memory",
+    `${spec.limits.memoryMb}m`,
+    ...Object.keys(spec.env).flatMap((k) => ["-e", k]),
+    ...spec.files.flatMap((f) => ["-v", `${f.hostPath}:${f.containerPath}:ro`]),
+    spec.image,
+    ...spec.command,
+  ];
+}
+
+export class DockerExecutor implements RuntimeExecutor {
+  private readonly dockerBin: string;
+  private readonly spawnImpl: SpawnFn;
+
+  constructor(opts: { dockerBin: string; spawnImpl?: SpawnFn }) {
+    this.dockerBin = opts.dockerBin;
+    this.spawnImpl = opts.spawnImpl ?? nodeSpawn;
+  }
+
+  async run(spec: RunSpec): Promise<RunResult> {
+    const args = buildDockerArgs(spec);
+    const child: ChildProcess = this.spawnImpl(this.dockerBin, args, {
+      env: { ...process.env, ...spec.env },
+    });
+
+    let output = "";
+    let logs = "";
+    child.stdout?.on("data", (d: Buffer | string) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer | string) => (logs += d.toString()));
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      // Best-effort: stop the container the killed client may have left running.
+      try {
+        this.spawnImpl(this.dockerBin, ["kill", spec.name]);
+      } catch {
+        // ignore
+      }
+    }, spec.limits.timeoutMs);
+
+    return await new Promise<RunResult>((resolve) => {
+      child.on("error", (err: NodeJS.ErrnoException) => {
+        clearTimeout(timer);
+        if (err.code === "ENOENT") {
+          resolve({ exitCode: 127, output, logs: `${logs}\n${this.dockerBin} not found`, dockerMissing: true });
+          return;
+        }
+        resolve({ exitCode: 1, output, logs: `${logs}\n${err.message}` });
+      });
+      child.on("close", (code: number | null) => {
+        clearTimeout(timer);
+        resolve({ exitCode: timedOut ? 124 : code ?? 1, output, logs, timedOut });
+      });
+    });
+  }
+}
