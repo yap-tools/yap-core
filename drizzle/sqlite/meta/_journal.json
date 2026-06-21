@@ -43,6 +43,13 @@
       "when": 1781294169251,
       "tag": "0005_friendly_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1782075671937,
+      "tag": "0006_lush_professor_monster",
+      "breakpoints": true
     }
   ]
 }

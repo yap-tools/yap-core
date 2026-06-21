@@ -196,6 +196,59 @@ export const hooks = sqliteTable(
   (t) => [uniqueIndex("hooks_bundle_name_idx").on(t.bundleId, t.name)],
 );
 
+/**
+ * Agents: space-scoped, DB-stored worker definitions, siblings to bundles.
+ * Inert data — name, runtime, model, args, instructions, optional schedule —
+ * plus a bound dedicated access key. The key's plaintext is AES-GCM-encrypted
+ * at rest (accessKeyEncrypted) so the worker can inject it into a run
+ * container; it is never returned by any surface. accessKeyId references the
+ * key row so deleting the agent revokes it.
+ */
+export const agents = sqliteTable(
+  "agents",
+  {
+    id: text("id").primaryKey(),
+    spaceId: text("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    runtime: text("runtime").notNull(),
+    model: text("model").notNull(),
+    args: text("args").notNull().default(""), // JSON value or "" (treated as null)
+    instructions: text("instructions").notNull().default(""),
+    schedule: text("schedule"), // croner cron string, or null
+    accessKeyId: text("access_key_id")
+      .notNull()
+      .references(() => accessKeys.id, { onDelete: "cascade" }),
+    accessKeyEncrypted: text("access_key_encrypted").notNull(), // AES-GCM blob, never returned
+    outputPath: text("output_path"), // reserved: capture-back seam, unused in v1
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("agents_space_name_idx").on(t.spaceId, t.name)],
+);
+
+/** Files attached to an agent and staged read-only into its run container.
+ * Same reserve→finalize lifecycle as `files`, but agent-scoped. */
+export const agentFiles = sqliteTable(
+  "agent_files",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    status: text("status").notNull(), // 'reserved' | 'finalized'
+    name: text("name").notNull().default(""),
+    mimeType: text("mime_type").notNull().default(""),
+    size: integer("size").notNull().default(0),
+    storageKey: text("storage_key").notNull(),
+    uploadConsumed: integer("upload_consumed").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    finalizedAt: text("finalized_at"),
+  },
+  (t) => [index("agent_files_agent_idx").on(t.agentId)],
+);
+
 /** OAuth clients (RFC 7591 dynamic registration). Public clients only — no
  * secret column by design; PKCE is the proof of possession. */
 export const oauthClients = sqliteTable("oauth_clients", {
