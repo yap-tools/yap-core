@@ -4,6 +4,7 @@
  * policy enforcement, immediate blob deletion, and the orphan sweep.
  */
 import { eq } from "drizzle-orm";
+import { request } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { sweepOrphans } from "../../src/core/files.js";
@@ -11,6 +12,11 @@ import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
+
+interface RawPutResponse {
+  status: number;
+  body: any;
+}
 
 describeEachAdapter("files", (adapter) => {
   let app: TestApp;
@@ -28,6 +34,39 @@ describeEachAdapter("files", (adapter) => {
     });
     return res.results[0];
   };
+
+  const rawPut = async (
+    url: string,
+    chunks: Uint8Array[],
+    headers: Record<string, string> = {},
+  ): Promise<RawPutResponse> =>
+    new Promise((resolve, reject) => {
+      const target = new URL(url);
+      const req = request(
+        target,
+        {
+          method: "PUT",
+          headers,
+        },
+        (res) => {
+          const received: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => received.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(received).toString("utf8");
+            let body: any = text;
+            try {
+              body = text ? JSON.parse(text) : null;
+            } catch {
+              // leave as text
+            }
+            resolve({ status: res.statusCode ?? 0, body });
+          });
+        },
+      );
+      req.on("error", reject);
+      for (const chunk of chunks) req.write(chunk);
+      req.end();
+    });
 
   beforeAll(async () => {
     app = await bootTestApp(
@@ -101,12 +140,57 @@ describeEachAdapter("files", (adapter) => {
       .body;
     const tooBig = new Uint8Array(2048);
     expect((await fetch(requested.upload_url, { method: "PUT", body: tooBig })).status).toBe(400);
+    expect((await alice.post(`/v1/files/${requested.file_id}/complete`, {})).status).toBe(400);
     // Declared-size pre-check rejects at request time too.
     const declared = await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, {
       name: "big.bin",
       size: 999999,
     });
     expect(declared.status).toBe(400);
+  });
+
+  it("accepts chunked uploads without content-length when under the configured max", async () => {
+    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "chunked-ok.bin" }))
+      .body;
+    const put = await rawPut(requested.upload_url, [Buffer.from("hello "), Buffer.from("chunked")], {
+      "transfer-encoding": "chunked",
+    });
+    expect(put.status).toBe(200);
+    expect(put.body).toEqual({ uploaded: true, size: 13 });
+
+    const completed = await alice.post(`/v1/files/${requested.file_id}/complete`, {});
+    expect(completed.status).toBe(200);
+    expect(completed.body.size).toBe(13);
+  });
+
+  it("rejects chunked uploads once streaming bytes exceed the configured max", async () => {
+    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "chunked-big.bin" }))
+      .body;
+    const put = await rawPut(requested.upload_url, [new Uint8Array(768), new Uint8Array(257)], {
+      "transfer-encoding": "chunked",
+    });
+    expect(put.status).toBe(400);
+    expect(put.body.error).toEqual({
+      code: "invalid_request",
+      message: "file exceeds the maximum size of 1024 bytes",
+    });
+
+    const completed = await alice.post(`/v1/files/${requested.file_id}/complete`, {});
+    expect(completed.status).toBe(400);
+  });
+
+  it("rejects malformed content-length headers before upload storage", async () => {
+    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "bad-length.bin" }))
+      .body;
+    const put = await rawPut(requested.upload_url, [Buffer.from("x")], { "content-length": "01" });
+    expect(put.status).toBe(400);
+    expect(put.body.error).toEqual({
+      code: "invalid_request",
+      message: "invalid content-length header",
+    });
+
+    const completed = await alice.post(`/v1/files/${requested.file_id}/complete`, {});
+    expect(completed.status).toBe(400);
   });
 
   it("enforces the MIME allowlist when configured", async () => {

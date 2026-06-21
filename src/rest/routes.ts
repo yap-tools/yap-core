@@ -62,6 +62,58 @@ function param(c: Context, name: string): string {
   return value;
 }
 
+function parseContentLength(c: Context, maxBytes: number): number | undefined {
+  const raw = c.req.header("content-length");
+  if (raw === undefined) return undefined;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    throw invalid("invalid content-length header");
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) {
+    throw invalid("invalid content-length header");
+  }
+  if (parsed > maxBytes) {
+    throw invalid(`file exceeds the maximum size of ${maxBytes} bytes`);
+  }
+  return parsed;
+}
+
+function bytesFromChunk(chunk: unknown): Uint8Array {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  if (ArrayBuffer.isView(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  throw invalid("request body must be bytes");
+}
+
+async function readBoundedBody(c: Context, maxBytes: number): Promise<Uint8Array> {
+  const body = c.req.raw.body;
+  if (!body) return new Uint8Array();
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const stream = body as ReadableStream<unknown> & AsyncIterable<unknown>;
+  for await (const rawChunk of stream) {
+    const chunk = bytesFromChunk(rawChunk);
+    const nextTotal = total + chunk.byteLength;
+    if (nextTotal > maxBytes) {
+      await body.cancel().catch(() => {});
+      throw invalid(`file exceeds the maximum size of ${maxBytes} bytes`);
+    }
+    chunks.push(chunk);
+    total = nextTotal;
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 /**
  * fastmcp's HTTP bridge treats any Hono 404 response as "route not matched"
  * and discards its body. Domain-level 404s therefore write directly to the
@@ -718,11 +770,8 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const fileId = param(c, "id");
       requireFileToken(c, "upload", fileId);
-      const declared = Number(c.req.header("content-length") ?? "0");
-      if (declared > config.maxFileSizeBytes) {
-        throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
-      }
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
+      parseContentLength(c, config.maxFileSizeBytes);
+      const bytes = await readBoundedBody(c, config.maxFileSizeBytes);
       const { size } = await filesCore.storeUploadedBytes(fileEnv, fileId, bytes);
       return c.json({ uploaded: true, size });
     }),
