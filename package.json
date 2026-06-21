@@ -1,6 +1,6 @@
 {
   "name": "yap-core",
-  "version": "0.7.3",
+  "version": "0.5.1",
   "description": "Yap: API-first, self-hosted, navigable context for AI agents over MCP and REST.",
   "type": "module",
   "license": "MIT",
