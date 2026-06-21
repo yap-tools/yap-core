@@ -47,6 +47,9 @@ export interface YapServer {
   /** The run worker, attached by serve.ts once started, so run_agent and the
    * REST run trigger can nudge it. Absent until the worker is wired in. */
   agentWorker?: { kick(): void };
+  /** The run scheduler, attached by serve.ts; agent authoring reloads an
+   * agent's job after create/update/delete. Absent until wired in. */
+  agentScheduler?: { reload(agentId: string): Promise<void> };
   start(): Promise<void>;
   stop(): Promise<void>;
 }

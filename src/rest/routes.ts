@@ -896,7 +896,9 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(agentCreateSchema, await jsonBody(c));
-      return c.json(await agentsCore.createAgent(agentEnv, userId, param(c, "id"), body), 201);
+      const created = await agentsCore.createAgent(agentEnv, userId, param(c, "id"), body);
+      await server.agentScheduler?.reload(created.id);
+      return c.json(created, 201);
     }),
   );
 
@@ -921,7 +923,9 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(agentUpdateSchema, await jsonBody(c));
-      return c.json(await agentsCore.updateAgent(agentEnv, userId, param(c, "id"), body));
+      const updated = await agentsCore.updateAgent(agentEnv, userId, param(c, "id"), body);
+      await server.agentScheduler?.reload(param(c, "id"));
+      return c.json(updated);
     }),
   );
 
@@ -930,6 +934,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       await agentsCore.deleteAgent(agentEnv, userId, param(c, "id"));
+      await server.agentScheduler?.reload(param(c, "id"));
       return c.json({ deleted: true });
     }),
   );

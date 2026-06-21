@@ -1,8 +1,15 @@
 import { createRequire } from "node:module";
 
+import { DockerExecutor } from "./agent/executor.js";
+import { loadOperatorRuntimes } from "./agent/runtimes/index.js";
+import { startAgentScheduler } from "./agent/scheduler.js";
+import { startAgentWorker } from "./agent/worker.js";
 import { maybePreMigrationBackup, startBackupScheduler } from "./backup/auto.js";
 import { createBackupSink } from "./backup/sink.js";
 import { createBlobStore } from "./blob/index.js";
+import { getAgentRow } from "./core/agents.js";
+import { enqueueRun } from "./core/agentRuns.js";
+import { getCredentialStatus } from "./core/runtimeCredentials.js";
 import { resolveEnvFile } from "./instance/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
 import { sweepOrphans } from "./core/files.js";
@@ -98,10 +105,36 @@ export async function serve(): Promise<void> {
     );
   }
 
+  // Agents: load any operator-registered runtimes, then start the run worker and
+  // the per-agent scheduler. Docker is only invoked when a run actually fires —
+  // the server boots fine without a container engine.
+  if (config.agent.runtimesDir) await loadOperatorRuntimes(config.agent.runtimesDir, logger);
+  const worker = startAgentWorker({ db, blob, config, executor: new DockerExecutor({ dockerBin: config.agent.dockerBin }) }, logger);
+  server.agentWorker = worker;
+  const agentScheduler = await startAgentScheduler(
+    {
+      db,
+      fire: async (agentId) => {
+        const agent = await getAgentRow(db, agentId);
+        const cred = await getCredentialStatus({ db, config }, agent.runtime);
+        if (cred?.status === "stale") {
+          logger.warn(`skipping scheduled run for agent ${agentId}: runtime "${agent.runtime}" credential is stale`);
+          return;
+        }
+        await enqueueRun(db, agentId, { trigger: "scheduled" });
+        worker.kick();
+      },
+    },
+    logger,
+  );
+  server.agentScheduler = agentScheduler;
+
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, async () => {
       clearInterval(sweeper);
       stopScheduler?.();
+      agentScheduler.stop();
+      await worker.stop();
       await server.stop();
       await db.close();
       process.exit(0);
