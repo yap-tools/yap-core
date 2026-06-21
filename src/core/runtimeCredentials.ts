@@ -140,6 +140,24 @@ export async function listRuntimesWithStatus(
   return out;
 }
 
+/**
+ * Run a runtime's authorize step and store the captured credential. Runs
+ * server-side (the server is on the instance host in local mode), so the
+ * runtime registry — server code the thin CLI never imports — stays here. The
+ * common provider pattern is a human running the provider's own `login`
+ * separately, then this `capture`-ing the on-disk token; a truly interactive
+ * in-process login is a documented future seam.
+ */
+export async function authorizeRuntime(
+  env: RuntimeCredEnv,
+  name: string,
+  log: (msg: string) => void = () => {},
+): Promise<void> {
+  const runtime = resolveRuntime(env, name);
+  const blob = await runtime.authorize({ log });
+  await storeCredential(env, name, blob);
+}
+
 /** Force a headless refresh now, persisting whatever the runtime returns. */
 export async function refreshNow(env: RuntimeCredEnv, name: string): Promise<{ status: "active" | "stale" }> {
   const runtime = resolveRuntime(env, name);

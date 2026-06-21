@@ -7,6 +7,7 @@
  */
 import { createRequire } from "node:module";
 
+import { cmdAgentRuntime } from "./cli/agents.js";
 import { cmdBackup, cmdRestore } from "./cli/backup.js";
 import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
@@ -42,6 +43,7 @@ Run:
 
 Manage (over the instance API, authenticated via .yap/credentials.json):
   user create <name>                  Create a user (sysadmin lane); saves the CLI credential
+  agent-runtime [list] | <name> authorize|refresh|status|revoke   Manage model-provider credentials
   api <METHOD> </path> [body|-] [--sysadmin]   Raw API passthrough — the full /v1 surface
   users list|delete                   keys list|create|rotate|delete
   spaces list|show|create|delete      bundles list <spaceId> | show <id>
@@ -109,6 +111,9 @@ try {
       await cmdUserCreate(target, dir, rest.slice(1));
       break;
     }
+    case "agent-runtime":
+      await cmdAgentRuntime(target, dir, rest);
+      break;
     case "api":
       await cmdApi(target, rest);
       break;

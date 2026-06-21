@@ -25,6 +25,7 @@ import * as hooksCore from "../core/hooks.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
+import * as runtimeCredentialsCore from "../core/runtimeCredentials.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
@@ -986,6 +987,55 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       await agentFilesCore.deleteAgentFile(agentFileEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  // ---- Agent runtimes (sysadmin lane — instance-level model credentials) ----------
+
+  const runtimeCredEnv: runtimeCredentialsCore.RuntimeCredEnv = { db, config };
+
+  app.get(
+    "/v1/agent-runtimes",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      return c.json({ data: await runtimeCredentialsCore.listRuntimesWithStatus(runtimeCredEnv) });
+    }),
+  );
+
+  app.put(
+    "/v1/agent-runtimes/:name/credential",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      const body = parseBody(z.object({ blob: z.record(z.string(), z.unknown()) }), await jsonBody(c));
+      await runtimeCredentialsCore.storeCredential(runtimeCredEnv, param(c, "name"), body.blob);
+      return c.json({ stored: true });
+    }),
+  );
+
+  app.post(
+    "/v1/agent-runtimes/:name/authorize",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      const name = param(c, "name");
+      await runtimeCredentialsCore.authorizeRuntime(runtimeCredEnv, name, (m) => logger.info(`[agent-runtime ${name}] ${m}`));
+      return c.json({ authorized: true });
+    }),
+  );
+
+  app.post(
+    "/v1/agent-runtimes/:name/refresh",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      return c.json(await runtimeCredentialsCore.refreshNow(runtimeCredEnv, param(c, "name")));
+    }),
+  );
+
+  app.delete(
+    "/v1/agent-runtimes/:name/credential",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      await runtimeCredentialsCore.revokeCredential(runtimeCredEnv, param(c, "name"));
       return c.json({ deleted: true });
     }),
   );
