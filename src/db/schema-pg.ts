@@ -238,6 +238,17 @@ export const agentFiles = pgTable(
   (t) => [index("agent_files_agent_idx").on(t.agentId)],
 );
 
+/** One shared, instance-level model-provider credential per runtime. Twin of
+ * the sqlite runtime_credentials table. */
+export const runtimeCredentials = pgTable("runtime_credentials", {
+  id: text("id").primaryKey(),
+  runtime: text("runtime").notNull().unique(),
+  blobEncrypted: text("blob_encrypted").notNull(),
+  status: text("status").notNull().default("active"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 /** OAuth clients (RFC 7591 dynamic registration). Public clients only — no
  * secret column by design; PKCE is the proof of possession. */
 export const oauthClients = pgTable("oauth_clients", {

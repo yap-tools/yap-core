@@ -50,6 +50,13 @@
       "when": 1782075671937,
       "tag": "0006_lush_professor_monster",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1782076405462,
+      "tag": "0007_strong_demogoblin",
+      "breakpoints": true
     }
   ]
 }
