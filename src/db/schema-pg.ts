@@ -238,6 +238,29 @@ export const agentFiles = pgTable(
   (t) => [index("agent_files_agent_idx").on(t.agentId)],
 );
 
+/** Append-only run history for an agent. Twin of the sqlite agent_runs table. */
+export const agentRuns = pgTable(
+  "agent_runs",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    trigger: text("trigger").notNull(),
+    triggeredBy: text("triggered_by"),
+    args: text("args"),
+    exitCode: integer("exit_code"),
+    error: text("error"),
+    output: text("output"),
+    logsKey: text("logs_key"),
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+  },
+  (t) => [index("agent_runs_agent_idx").on(t.agentId, t.createdAt)],
+);
+
 /** One shared, instance-level model-provider credential per runtime. Twin of
  * the sqlite runtime_credentials table. */
 export const runtimeCredentials = pgTable("runtime_credentials", {

@@ -249,6 +249,29 @@ export const agentFiles = sqliteTable(
   (t) => [index("agent_files_agent_idx").on(t.agentId)],
 );
 
+/** Append-only run history for an agent. A run is one container execution. */
+export const agentRuns = sqliteTable(
+  "agent_runs",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    status: text("status").notNull(), // queued | running | succeeded | failed | canceled
+    trigger: text("trigger").notNull(), // manual | scheduled
+    triggeredBy: text("triggered_by"), // userId for manual runs
+    args: text("args"), // effective args (JSON) for this run
+    exitCode: integer("exit_code"),
+    error: text("error"), // typed reason: timeout | stale_credential | runtime_unavailable | container_error
+    output: text("output"), // bounded model result
+    logsKey: text("logs_key"), // blob key for full logs
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+  },
+  (t) => [index("agent_runs_agent_idx").on(t.agentId, t.createdAt)],
+);
+
 /** One shared, instance-level model-provider credential per runtime, reused by
  * every agent on that runtime. The blob (refresh token included) is AES-GCM
  * encrypted at rest; status flips to 'stale' when a headless refresh fails. */

@@ -57,6 +57,13 @@
       "when": 1782076405462,
       "tag": "0007_strong_demogoblin",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1782076939312,
+      "tag": "0008_next_clea",
+      "breakpoints": true
     }
   ]
 }

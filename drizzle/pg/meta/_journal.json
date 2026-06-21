@@ -57,6 +57,13 @@
       "when": 1782076405821,
       "tag": "0007_clever_carmella_unuscione",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782076939672,
+      "tag": "0008_parallel_silver_sable",
+      "breakpoints": true
     }
   ]
 }

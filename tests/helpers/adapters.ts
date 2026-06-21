@@ -28,6 +28,7 @@ const ALL_TABLES = [
   "item_types",
   "hooks",
   "files",
+  "agent_runs",
   "agent_files",
   "agents",
   "runtime_credentials",
