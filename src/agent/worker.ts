@@ -34,8 +34,19 @@ export interface WorkerDeps {
   getRuntime?: (name: string) => Runtime | null;
 }
 
+/** Byte-accurate truncation (the cap is a byte budget, not a char count). */
 function truncate(s: string, maxBytes: number): string {
-  return s.length > maxBytes ? s.slice(0, maxBytes) : s;
+  const buf = Buffer.from(s, "utf8");
+  return buf.byteLength > maxBytes ? buf.subarray(0, maxBytes).toString("utf8") : s;
+}
+
+/** Literal replace-all of each secret with a placeholder — a model (or a
+ * prompt-injected one) can echo its injected key/token to stdout, and run
+ * output and logs are both persisted and API-readable. */
+function redactSecrets(text: string, secrets: string[]): string {
+  let out = text;
+  for (const secret of secrets) if (secret) out = out.split(secret).join("[redacted]");
+  return out;
 }
 
 async function streamToBuffer(stream: AsyncIterable<unknown>): Promise<Buffer> {
@@ -117,8 +128,10 @@ export async function processOneRun(deps: WorkerDeps): Promise<boolean> {
       };
 
       const result = await deps.executor.run(spec);
-      await blob.put(logsKey, new TextEncoder().encode(result.logs ?? ""));
-      const output = truncate(result.output ?? "", config.agent.maxOutputBytes);
+      // Redact the injected key + token before anything is persisted or served.
+      const redact = (s: string): string => redactSecrets(s, [yapKey, accessToken]);
+      await blob.put(logsKey, new TextEncoder().encode(redact(result.logs ?? "")));
+      const output = truncate(redact(result.output ?? ""), config.agent.maxOutputBytes);
 
       if (result.dockerMissing) {
         await completeRun(db, run.id, { status: "failed", error: "runtime_unavailable", output, logsKey });

@@ -160,6 +160,15 @@ async function finalizeAgentUpload(env: AgentFileEnv, fileId: string): Promise<A
     throw invalid(`uploaded file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
   }
   const { agentFiles } = db.tables;
+  // Names map to container mount paths, so two finalized files can't share one.
+  const dup = await db.client
+    .select({ id: agentFiles.id })
+    .from(agentFiles)
+    .where(and(eq(agentFiles.agentId, file.agentId), eq(agentFiles.name, file.name), eq(agentFiles.status, "finalized")));
+  if (dup.length > 0) {
+    await blob.delete(file.storageKey);
+    throw invalid(`a file named "${file.name}" is already attached to this agent`);
+  }
   await db.client
     .update(agentFiles)
     .set({ status: "finalized", size: stat.size, finalizedAt: nowIso() })

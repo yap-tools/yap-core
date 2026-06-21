@@ -46,13 +46,20 @@ export class FakeExecutor implements RuntimeExecutor {
 
 export type SpawnFn = typeof nodeSpawn;
 
-/** The `docker run` argument vector (secrets are env names only, never values). */
+/** The `docker run` argument vector (secrets are env names only, never values).
+ * The run executes model-influenced commands, so drop Linux capabilities and
+ * cap pids in addition to cpu/memory. Network is left on — the container must
+ * reach Yap and the model provider. */
 export function buildDockerArgs(spec: RunSpec): string[] {
   return [
     "run",
     "--rm",
     "--name",
     spec.name,
+    "--cap-drop",
+    "ALL",
+    "--pids-limit",
+    "256",
     "--cpus",
     spec.limits.cpus,
     "--memory",
@@ -62,6 +69,36 @@ export function buildDockerArgs(spec: RunSpec): string[] {
     spec.image,
     ...spec.command,
   ];
+}
+
+const MAX_BUFFER_BYTES = 1_000_000;
+
+/** Accumulates a stream up to a byte cap so unbounded container output can't
+ * exhaust server memory. */
+function boundedCollector(max: number) {
+  let buf = "";
+  let bytes = 0;
+  let truncated = false;
+  return {
+    push(chunk: string): void {
+      if (bytes >= max) {
+        truncated = true;
+        return;
+      }
+      const add = Buffer.byteLength(chunk);
+      if (bytes + add <= max) {
+        buf += chunk;
+        bytes += add;
+      } else {
+        buf += chunk.slice(0, max - bytes);
+        bytes = max;
+        truncated = true;
+      }
+    },
+    value(): string {
+      return truncated ? `${buf}\n[truncated]` : buf;
+    },
+  };
 }
 
 export class DockerExecutor implements RuntimeExecutor {
@@ -79,10 +116,10 @@ export class DockerExecutor implements RuntimeExecutor {
       env: { ...process.env, ...spec.env },
     });
 
-    let output = "";
-    let logs = "";
-    child.stdout?.on("data", (d: Buffer | string) => (output += d.toString()));
-    child.stderr?.on("data", (d: Buffer | string) => (logs += d.toString()));
+    const out = boundedCollector(MAX_BUFFER_BYTES);
+    const log = boundedCollector(MAX_BUFFER_BYTES);
+    child.stdout?.on("data", (d: Buffer | string) => out.push(d.toString()));
+    child.stderr?.on("data", (d: Buffer | string) => log.push(d.toString()));
 
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -92,9 +129,11 @@ export class DockerExecutor implements RuntimeExecutor {
       } catch {
         // already gone
       }
-      // Best-effort: stop the container the killed client may have left running.
+      // Best-effort: stop the container the killed client may have left
+      // running. The kill child's failure is an async 'error' event — swallow
+      // it explicitly, or an unhandled event would crash the process.
       try {
-        this.spawnImpl(this.dockerBin, ["kill", spec.name]);
+        this.spawnImpl(this.dockerBin, ["kill", spec.name]).on("error", () => {});
       } catch {
         // ignore
       }
@@ -104,14 +143,14 @@ export class DockerExecutor implements RuntimeExecutor {
       child.on("error", (err: NodeJS.ErrnoException) => {
         clearTimeout(timer);
         if (err.code === "ENOENT") {
-          resolve({ exitCode: 127, output, logs: `${logs}\n${this.dockerBin} not found`, dockerMissing: true });
+          resolve({ exitCode: 127, output: out.value(), logs: `${log.value()}\n${this.dockerBin} not found`, dockerMissing: true });
           return;
         }
-        resolve({ exitCode: 1, output, logs: `${logs}\n${err.message}` });
+        resolve({ exitCode: 1, output: out.value(), logs: `${log.value()}\n${err.message}` });
       });
       child.on("close", (code: number | null) => {
         clearTimeout(timer);
-        resolve({ exitCode: timedOut ? 124 : code ?? 1, output, logs, timedOut });
+        resolve({ exitCode: timedOut ? 124 : code ?? 1, output: out.value(), logs: log.value(), timedOut });
       });
     });
   }

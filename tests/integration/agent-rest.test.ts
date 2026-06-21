@@ -81,6 +81,30 @@ describeEachAdapter("agents REST", (adapter) => {
       expect((await bob.get(`/v1/agents/${agentId}`)).status).toBe(200);
       expect((await bob.patch(`/v1/agents/${agentId}`, { model: "x" })).status).toBe(403);
     });
+
+    it("setting a schedule requires run_agents, not just edit_agents", async () => {
+      // Bob can author agents but cannot run them.
+      await alice.post(`/v1/spaces/${spaceId}/grants`, { userId: bobId, capabilities: ["edit_agents"], effect: "allow" });
+      const noSchedule = await bob.post(`/v1/spaces/${spaceId}/agents`, { name: "bob-plain", runtime: "mock", model: "m" });
+      expect(noSchedule.status).toBe(201);
+
+      const withSchedule = await bob.post(`/v1/spaces/${spaceId}/agents`, {
+        name: "bob-cron",
+        runtime: "mock",
+        model: "m",
+        schedule: "0 9 * * *",
+      });
+      expect(withSchedule.status).toBe(403);
+      expect(withSchedule.body.error.details.capability).toBe("run_agents");
+
+      // Patching a schedule onto the plain agent is likewise blocked.
+      const patched = await bob.patch(`/v1/agents/${noSchedule.body.id}`, { schedule: "0 9 * * *" });
+      expect(patched.status).toBe(403);
+
+      // Granting run_agents unblocks it.
+      await alice.post(`/v1/spaces/${spaceId}/grants`, { userId: bobId, capabilities: ["run_agents"], effect: "allow" });
+      expect((await bob.patch(`/v1/agents/${noSchedule.body.id}`, { schedule: "0 9 * * *" })).status).toBe(200);
+    });
   });
 
   describe("file attachment", () => {

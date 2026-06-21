@@ -76,6 +76,7 @@ export function cleanFileName(raw: string | undefined): string {
   if (!name) throw invalid("file name is required");
   if (/[\u0000-\u001f\u007f]/.test(name)) throw invalid("file name must not contain control characters");
   if (name.includes("/") || name.includes("\\")) throw invalid("file name must not contain path separators");
+  if (name === "." || name === "..") throw invalid('file name must not be "." or ".."');
   if (name.length > 255) throw invalid("file name is too long (max 255 characters)");
   return name;
 }

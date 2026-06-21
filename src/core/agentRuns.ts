@@ -9,7 +9,7 @@
 import { and, asc, eq } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { loadAgentForRead, loadAgentForRun } from "./agents.js";
+import { getAgentRow, loadAgentForRead, loadAgentForRun } from "./agents.js";
 import { notFound } from "./errors.js";
 import { nowIso, newId } from "./util.js";
 
@@ -77,6 +77,16 @@ export async function enqueueRun(
   opts: { trigger: RunTrigger; triggeredBy?: string; args?: unknown },
 ): Promise<{ run_id: string; status: "queued" }> {
   const { agentRuns } = db.tables;
+  // Effective args: a trigger-time override replaces the agent's stored args;
+  // with no override the run records (and the worker uses) the agent's stored
+  // args. Recorded either way so every run is reproducible. `agent.args` is
+  // already a JSON string ("" = none).
+  let args: string | null;
+  if (opts.args !== undefined) args = JSON.stringify(opts.args);
+  else {
+    const agent = await getAgentRow(db, agentId);
+    args = agent.args === "" ? null : agent.args;
+  }
   const id = newId();
   await db.client.insert(agentRuns).values({
     id,
@@ -84,7 +94,7 @@ export async function enqueueRun(
     status: "queued",
     trigger: opts.trigger,
     triggeredBy: opts.triggeredBy ?? null,
-    args: opts.args === undefined ? null : JSON.stringify(opts.args),
+    args,
     exitCode: null,
     error: null,
     output: null,
@@ -154,13 +164,14 @@ export async function claimNextQueued(db: Db): Promise<RunRow | null> {
     .orderBy(asc(agentRuns.createdAt), asc(agentRuns.id))) as RunRow[];
   const next = queued.find((r) => !busy.has(r.agentId));
   if (!next) return null;
+  const startedAt = nowIso();
   const claimed = await db.client
     .update(agentRuns)
-    .set({ status: "running", startedAt: nowIso() })
+    .set({ status: "running", startedAt })
     .where(and(eq(agentRuns.id, next.id), eq(agentRuns.status, "queued")))
     .returning({ id: agentRuns.id });
   if (claimed.length === 0) return null;
-  return { ...next, status: "running", startedAt: nowIso() };
+  return { ...next, status: "running", startedAt };
 }
 
 export interface CompleteFields {
@@ -171,7 +182,11 @@ export interface CompleteFields {
   logsKey?: string | null;
 }
 
-/** Record a terminal state. Tolerates a vanished row (agent deleted mid-run). */
+/**
+ * Record a terminal state. Guarded to only transition a still-running row, so
+ * a run already reconciled to 'canceled' (e.g. by a restart) cannot be
+ * resurrected; also tolerates a vanished row (agent deleted mid-run).
+ */
 export async function completeRun(db: Db, runId: string, fields: CompleteFields): Promise<void> {
   const { agentRuns } = db.tables;
   await db.client
@@ -184,7 +199,7 @@ export async function completeRun(db: Db, runId: string, fields: CompleteFields)
       logsKey: fields.logsKey ?? null,
       finishedAt: nowIso(),
     })
-    .where(eq(agentRuns.id, runId));
+    .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "running")));
 }
 
 /** Runs still in flight (running) — used at shutdown to cancel them. */

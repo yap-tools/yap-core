@@ -66,10 +66,23 @@ function decodeBlob(env: RuntimeCredEnv, row: CredRow): CredentialBlob {
 
 async function persist(env: RuntimeCredEnv, name: string, blob: CredentialBlob, status: "active" | "stale"): Promise<void> {
   const { runtimeCredentials } = env.db.tables;
-  await env.db.client
-    .update(runtimeCredentials)
-    .set({ blobEncrypted: encryptSecret(JSON.stringify(blob), env.config.masterKey), status, updatedAt: nowIso() })
-    .where(eq(runtimeCredentials.runtime, name));
+  const encrypted = encryptSecret(JSON.stringify(blob), env.config.masterKey);
+  // A refresh may have rotated the provider's refresh token; this blob is then
+  // the ONLY valid one, so a failed write loses the login. Retry a few times
+  // before giving up.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await env.db.client
+        .update(runtimeCredentials)
+        .set({ blobEncrypted: encrypted, status, updatedAt: nowIso() })
+        .where(eq(runtimeCredentials.runtime, name));
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 async function markStale(env: RuntimeCredEnv, name: string): Promise<void> {
@@ -80,27 +93,26 @@ async function markStale(env: RuntimeCredEnv, name: string): Promise<void> {
     .where(eq(runtimeCredentials.runtime, name));
 }
 
-/** Store (or replace) a captured credential blob, encrypted. */
+/** Store (or replace) a captured credential blob, encrypted. Serialized under
+ * the per-runtime lock so it can't race a concurrent refresh. */
 export async function storeCredential(env: RuntimeCredEnv, name: string, blob: CredentialBlob): Promise<void> {
   resolveRuntime(env, name); // reject unknown runtimes early
-  const { runtimeCredentials } = env.db.tables;
-  const now = nowIso();
-  const encrypted = encryptSecret(JSON.stringify(blob), env.config.masterKey);
-  const existing = await loadRow(env.db, name);
-  if (existing) {
-    await env.db.client
-      .update(runtimeCredentials)
-      .set({ blobEncrypted: encrypted, status: "active", updatedAt: now })
-      .where(eq(runtimeCredentials.runtime, name));
-    return;
-  }
-  await env.db.client.insert(runtimeCredentials).values({
-    id: newId(),
-    runtime: name,
-    blobEncrypted: encrypted,
-    status: "active",
-    createdAt: now,
-    updatedAt: now,
+  return withRuntimeLock(name, async () => {
+    const existing = await loadRow(env.db, name);
+    if (existing) {
+      await persist(env, name, blob, "active");
+      return;
+    }
+    const { runtimeCredentials } = env.db.tables;
+    const now = nowIso();
+    await env.db.client.insert(runtimeCredentials).values({
+      id: newId(),
+      runtime: name,
+      blobEncrypted: encryptSecret(JSON.stringify(blob), env.config.masterKey),
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
   });
 }
 
@@ -116,10 +128,12 @@ export async function getCredentialStatus(env: RuntimeCredEnv, name: string): Pr
 }
 
 export async function revokeCredential(env: RuntimeCredEnv, name: string): Promise<void> {
-  const row = await loadRow(env.db, name);
-  if (!row) throw notFound("runtime credential", name);
-  const { runtimeCredentials } = env.db.tables;
-  await env.db.client.delete(runtimeCredentials).where(eq(runtimeCredentials.runtime, name));
+  return withRuntimeLock(name, async () => {
+    const row = await loadRow(env.db, name);
+    if (!row) throw notFound("runtime credential", name);
+    const { runtimeCredentials } = env.db.tables;
+    await env.db.client.delete(runtimeCredentials).where(eq(runtimeCredentials.runtime, name));
+  });
 }
 
 /** Registry descriptors joined with stored credential status, for listing. */
@@ -186,8 +200,10 @@ export async function resolveAccessToken(env: RuntimeCredEnv, name: string): Pro
   if (!row) {
     throw new YapError("invalid_request", `no credential for runtime "${name}" — run: yap agent-runtime ${name} authorize`);
   }
+  // A token is reusable only while the credential is active AND unexpired; a
+  // credential explicitly marked stale always goes through refresh.
   const current = runtime.materialize(decodeBlob(env, row));
-  if (current.expiresAt !== undefined && current.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
+  if (row.status === "active" && current.expiresAt !== undefined && current.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
     return { accessToken: current.accessToken };
   }
   return withRuntimeLock(name, async () => {
@@ -197,18 +213,19 @@ export async function resolveAccessToken(env: RuntimeCredEnv, name: string): Pro
       throw new YapError("invalid_request", `no credential for runtime "${name}"`);
     }
     const reread = runtime.materialize(decodeBlob(env, fresh));
-    if (reread.expiresAt !== undefined && reread.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
+    if (fresh.status === "active" && reread.expiresAt !== undefined && reread.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
       return { accessToken: reread.accessToken };
     }
     try {
       const result = await runtime.refresh(decodeBlob(env, fresh));
       await persist(env, name, result.blob, "active");
       return { accessToken: result.accessToken };
-    } catch (err) {
+    } catch {
+      // Don't surface the provider's raw error — it can carry secrets.
       await markStale(env, name);
       throw new YapError(
         "invalid_request",
-        `runtime "${name}" credential is stale (${(err as Error).message}); re-run: yap agent-runtime ${name} authorize`,
+        `runtime "${name}" credential is stale; re-run: yap agent-runtime ${name} authorize`,
       );
     }
   });

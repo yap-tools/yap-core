@@ -49,6 +49,7 @@ export interface AgentRow {
   schedule: string | null;
   accessKeyId: string;
   accessKeyEncrypted: string;
+  /** Reserved for the future capture-back seam; unused in v1 (always null). */
   outputPath: string | null;
   createdAt: string;
   updatedAt: string;
@@ -171,6 +172,9 @@ export async function createAgent(
   const { db } = env;
   const space = await getSpaceRow(db, spaceId);
   await requireCapability(db, userId, "edit_agents", { space: toSpaceRef(space) });
+  // A schedule makes the agent run autonomously, so configuring one also needs
+  // run authority — otherwise edit_agents alone would escalate into running.
+  if (input.schedule) await requireCapability(db, userId, "run_agents", { space: toSpaceRef(space) });
 
   const name = validateName(input.name);
   const runtime = input.runtime?.trim();
@@ -233,6 +237,11 @@ export async function updateAgent(
 ): Promise<AgentInfo> {
   const { db } = env;
   const row = await loadAgentForEdit(db, userId, agentId);
+  // Setting (not clearing) a schedule needs run authority — see createAgent.
+  if (patch.schedule !== undefined && patch.schedule !== null) {
+    const space = await getSpaceRow(db, row.spaceId);
+    await requireCapability(db, userId, "run_agents", { space: toSpaceRef(space) });
+  }
 
   const name = patch.name !== undefined ? validateName(patch.name) : undefined;
   const runtime = patch.runtime !== undefined ? patch.runtime.trim() : undefined;

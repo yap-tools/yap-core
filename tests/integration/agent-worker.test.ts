@@ -9,7 +9,7 @@ import * as agentFiles from "../../src/core/agentFiles.js";
 import * as agents from "../../src/core/agents.js";
 import * as runs from "../../src/core/agentRuns.js";
 import * as creds from "../../src/core/runtimeCredentials.js";
-import { FakeExecutor } from "../../src/agent/executor.js";
+import { FakeExecutor, type RunSpec, type RuntimeExecutor } from "../../src/agent/executor.js";
 import { processOneRun, type WorkerDeps } from "../../src/agent/worker.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient } from "../helpers/api.js";
@@ -111,6 +111,46 @@ describeEachAdapter("agent worker", (adapter) => {
     const run = await runs.getRun(app.db, aliceId, run_id);
     expect(run.status).toBe("failed");
     expect(run.error).toBe("timeout");
+  });
+
+  it("uses the agent's stored args when no per-run override is given", async () => {
+    const agent = await agents.createAgent(agentEnv(), aliceId, spaceId, {
+      name: "stored-args",
+      runtime: "mock",
+      model: "mock-1",
+      args: { topic: "weekly" },
+    });
+    await runs.enqueueRun(app.db, agent.id, { trigger: "scheduled" });
+    const executor = new FakeExecutor({ exitCode: 0 });
+    await processOneRun(deps(executor));
+    expect(executor.lastSpec!.env.AGENT_ARGS).toBe(JSON.stringify({ topic: "weekly" }));
+  });
+
+  it("redacts the injected key and model token from persisted output and logs", async () => {
+    const agent = await newAgent("leaky");
+    const row = await agents.getAgentRow(app.db, agent.id);
+    const yapKey = agents.decryptAgentKey(agentEnv(), row);
+    // An executor that echoes the injected secrets, as a misbehaving/injected model could.
+    const echo: RuntimeExecutor = {
+      run: async (spec: RunSpec) => ({
+        exitCode: 0,
+        output: `key=${spec.env.YAP_ACCESS_KEY}`,
+        logs: `token=${spec.env.MODEL_TOKEN} key=${spec.env.YAP_ACCESS_KEY}`,
+      }),
+    };
+    const { run_id } = await runs.enqueueRun(app.db, agent.id, { trigger: "manual" });
+    await processOneRun({ db: app.db, blob: app.blob, config: app.config, executor: echo });
+
+    const run = await runs.getRun(app.db, aliceId, run_id);
+    expect(run.output).not.toContain(yapKey);
+    expect(run.output).toContain("[redacted]");
+
+    const logsKey = await runs.getRunLogsKey(app.db, aliceId, run_id);
+    let logs = "";
+    for await (const chunk of await app.blob.getStream(logsKey!)) logs += chunk.toString();
+    expect(logs).not.toContain(yapKey);
+    expect(logs).not.toContain("live-token");
+    expect(logs).toContain("[redacted]");
   });
 
   it("stages finalized files read-only into the container", async () => {
