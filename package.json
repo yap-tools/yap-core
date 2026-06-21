@@ -54,7 +54,7 @@
     "flydrive": "^2.1.0",
     "pg": "^8.21.0",
     "tar-stream": "^3.2.0",
-    "undici": "^7.27.2",
+    "undici": "^7.28.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
