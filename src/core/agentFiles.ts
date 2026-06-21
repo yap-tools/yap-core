@@ -87,7 +87,7 @@ export async function requestAgentUpload(
     finalizedAt: null,
   });
 
-  const uploadUrl = await blob.uploadUrl(storageKey, fileId, config.uploadTtlSeconds);
+  const uploadUrl = await blob.uploadUrl(storageKey, fileId, config.uploadTtlSeconds, { route: "agent-files" });
   const completeToken = signToken({ scope: AGENT_UPLOAD_COMPLETE_SCOPE, fileId }, config.masterKey, config.uploadTtlSeconds);
   const originToken = signToken(
     { scope: "widget", widget: "upload-dropzone", fileId },

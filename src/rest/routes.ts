@@ -13,6 +13,8 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
 import { runWithTokenAuth } from "../core/authScope.js";
+import * as agentsCore from "../core/agents.js";
+import * as agentFilesCore from "../core/agentFiles.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { YapError, invalid, unauthorized } from "../core/errors.js";
@@ -862,6 +864,129 @@ export function registerRestRoutes(server: YapServer): void {
       const hookId = param(c, "id");
       const bundleId = await hooksCore.getHookBundleId(db, hookId);
       return c.json(await hooksCore.fireHook(hookEnv, userId, bundleId, { hook: hookId, params: body.params }));
+    }),
+  );
+
+  // ---- Agents (authoring is REST-only — MCP can only run them) --------------------
+
+  const agentEnv: agentsCore.AgentEnv = { db, config };
+  const agentFileEnv: agentFilesCore.AgentFileEnv = { db, blob, config };
+
+  const agentCreateSchema = z.object({
+    name: z.string(),
+    runtime: z.string(),
+    model: z.string(),
+    args: z.unknown().optional(),
+    instructions: z.string().optional(),
+    schedule: z.string().nullable().optional(),
+  });
+  const agentUpdateSchema = z.object({
+    name: z.string().optional(),
+    runtime: z.string().optional(),
+    model: z.string().optional(),
+    args: z.unknown().optional(),
+    instructions: z.string().optional(),
+    schedule: z.string().nullable().optional(),
+  });
+
+  app.post(
+    "/v1/spaces/:id/agents",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(agentCreateSchema, await jsonBody(c));
+      return c.json(await agentsCore.createAgent(agentEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/spaces/:id/agents",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json({ data: await agentsCore.listAgents(db, userId, param(c, "id")) });
+    }),
+  );
+
+  app.get(
+    "/v1/agents/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(await agentsCore.getAgent(db, userId, param(c, "id")));
+    }),
+  );
+
+  app.patch(
+    "/v1/agents/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(agentUpdateSchema, await jsonBody(c));
+      return c.json(await agentsCore.updateAgent(agentEnv, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/agents/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      await agentsCore.deleteAgent(agentEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  app.post(
+    "/v1/agents/:id/files/upload-request",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({ name: z.string(), mime_type: z.string().optional(), size: z.number().int().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await agentFilesCore.requestAgentUpload(agentFileEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/agents/:id/files",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json({ data: await agentFilesCore.listAgentFiles(db, userId, param(c, "id")) });
+    }),
+  );
+
+  app.post(
+    "/v1/agent-files/:id/complete",
+    handle(async (c, auth) => {
+      const fileId = param(c, "id");
+      const token = c.req.query("token");
+      if (token) {
+        const payload = verifyToken(token, config.masterKey);
+        if (!payload || payload.scope !== agentFilesCore.AGENT_UPLOAD_COMPLETE_SCOPE || payload.fileId !== fileId) {
+          throw new YapError("unauthorized", "invalid or expired completion token");
+        }
+        return c.json(await agentFilesCore.completeAgentUploadSigned(agentFileEnv, fileId));
+      }
+      const userId = requireUser(auth);
+      return c.json(await agentFilesCore.completeAgentUpload(agentFileEnv, userId, fileId));
+    }),
+  );
+
+  app.put(
+    "/v1/agent-files/:id/upload",
+    handle(async (c) => {
+      const fileId = param(c, "id");
+      requireFileToken(c, "upload", fileId);
+      parseContentLength(c, config.maxFileSizeBytes);
+      const bytes = await readBoundedBody(c, config.maxFileSizeBytes);
+      const { size } = await agentFilesCore.storeAgentUploadedBytes(agentFileEnv, fileId, bytes);
+      return c.json({ uploaded: true, size });
+    }),
+  );
+
+  app.delete(
+    "/v1/agent-files/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      await agentFilesCore.deleteAgentFile(agentFileEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
     }),
   );
 

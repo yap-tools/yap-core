@@ -1,7 +1,9 @@
 /**
  * REST/MCP parity: every per-resource role capability is exercisable over MCP,
- * gated by the same capability as REST. Hook authoring (edit_hooks) is the one
- * deliberate exception — defining a hook's transport stays REST-only.
+ * gated by the same capability as REST. The deliberate exceptions are authoring
+ * that carries a credential binding and stays REST-only: hook transports
+ * (edit_hooks) and agent definitions (edit_agents). Running an agent
+ * (run_agents) IS on the MCP surface, via the top-level run_agent tool.
  */
 import { describe, expect, it } from "vitest";
 
@@ -13,16 +15,19 @@ import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js"
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
 
 describe("capability coverage (drift guard)", () => {
-  it("every role capability except edit_hooks is reachable as an MCP tool", () => {
+  it("every role capability except the REST-only authoring pair is reachable as an MCP tool", () => {
     const viaCall = new Set(Object.values(secondTier).map((t) => t.capability));
-    const reachable = new Set<string>([...viaCall, "create_bundles"]); // create_bundles → top-level bundle_create
-    const REST_ONLY = new Set(["edit_hooks"]); // documented exception
+    // Top-level (non-call) tools and the capability each enforces.
+    const viaTopLevel = new Set(["create_bundles", "run_agents"]); // bundle_create, run_agent
+    const reachable = new Set<string>([...viaCall, ...viaTopLevel]);
+    const REST_ONLY = new Set(["edit_hooks", "edit_agents"]); // documented exceptions
     for (const cap of [...CONTENT_CAPABILITIES, ...CONTAINER_CAPABILITIES]) {
       if (REST_ONLY.has(cap)) continue;
       expect(reachable.has(cap), `${cap} should be reachable over MCP`).toBe(true);
     }
-    // The exception really is absent from the MCP surface.
+    // The exceptions really are absent from the call surface.
     expect(viaCall.has("edit_hooks")).toBe(false);
+    expect(viaCall.has("edit_agents")).toBe(false);
   });
 });
 

@@ -35,8 +35,10 @@ export interface BlobStore {
   delete(key: string): Promise<void>;
   /** null when no bytes exist at the key. */
   stat(key: string): Promise<BlobStat | null>;
-  /** Short-lived, single-use upload link for direct-to-storage writes. */
-  uploadUrl(key: string, fileId: string, ttlSeconds: number): Promise<string>;
+  /** Short-lived, single-use upload link for direct-to-storage writes. The fs
+   * adapter routes bytes through an app endpoint; `route` selects which one
+   * (default "files"), so agent files can use their own. S3 ignores it. */
+  uploadUrl(key: string, fileId: string, ttlSeconds: number, opts?: { route?: string }): Promise<string>;
   /** Fresh, expiring download link (minted per request, post-permission-check). */
   downloadUrl(key: string, ttlSeconds: number, opts: DownloadUrlOpts): Promise<string>;
 }
@@ -69,9 +71,9 @@ export async function createBlobStore(config: YapConfig): Promise<BlobStore> {
       driver: "fs",
       ...diskBacked(disk),
       // App-served signed-token endpoints (see rest/routes.ts).
-      uploadUrl: async (_key, fileId, ttlSeconds) => {
+      uploadUrl: async (_key, fileId, ttlSeconds, opts) => {
         const token = signToken({ scope: "upload", fileId }, config.masterKey, ttlSeconds);
-        return `${config.baseUrl}/v1/files/${fileId}/upload?token=${token}`;
+        return `${config.baseUrl}/v1/${opts?.route ?? "files"}/${fileId}/upload?token=${token}`;
       },
       downloadUrl: async (_key, ttlSeconds, opts) => {
         const token = signToken({ scope: "download", fileId: opts.fileId }, config.masterKey, ttlSeconds);
@@ -94,7 +96,8 @@ export async function createBlobStore(config: YapConfig): Promise<BlobStore> {
   return {
     driver: "s3",
     ...diskBacked(disk),
-    // FlyDrive parses numeric expiresIn as seconds.
+    // FlyDrive parses numeric expiresIn as seconds. Direct-to-storage presign —
+    // the app `route` is irrelevant here.
     uploadUrl: async (key, _fileId, ttlSeconds) =>
       disk.getSignedUploadUrl(key, { expiresIn: ttlSeconds }),
     downloadUrl: async (key, ttlSeconds, opts) =>
