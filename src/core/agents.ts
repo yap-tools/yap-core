@@ -125,6 +125,23 @@ async function requireAgentRead(db: Db, userId: string, space: Space, agentId?: 
   }
 }
 
+/** Load an agent and assert the user may author it (edit_agents). Shared by
+ * the agent, file-attachment, and run trigger paths. */
+export async function loadAgentForEdit(db: Db, userId: string, agentId: string): Promise<AgentRow> {
+  const row = await getAgentRow(db, agentId);
+  const space = await getSpaceRow(db, row.spaceId);
+  await requireAgentEdit(db, userId, space, agentId);
+  return row;
+}
+
+/** Load an agent and assert the user may view it (any standing in its space). */
+export async function loadAgentForRead(db: Db, userId: string, agentId: string): Promise<AgentRow> {
+  const row = await getAgentRow(db, agentId);
+  const space = await getSpaceRow(db, row.spaceId);
+  await requireAgentRead(db, userId, space, agentId);
+  return row;
+}
+
 function validateName(raw: string | undefined): string {
   const name = raw?.trim();
   if (!name) throw invalid("agent name is required");
@@ -191,10 +208,7 @@ export async function listAgents(db: Db, userId: string, spaceId: string): Promi
 }
 
 export async function getAgent(db: Db, userId: string, agentId: string): Promise<AgentInfo> {
-  const row = await getAgentRow(db, agentId);
-  const space = await getSpaceRow(db, row.spaceId);
-  await requireAgentRead(db, userId, space, agentId);
-  return toAgentInfo(row);
+  return toAgentInfo(await loadAgentForRead(db, userId, agentId));
 }
 
 export async function updateAgent(
@@ -204,9 +218,7 @@ export async function updateAgent(
   patch: UpdateAgentInput,
 ): Promise<AgentInfo> {
   const { db } = env;
-  const row = await getAgentRow(db, agentId);
-  const space = await getSpaceRow(db, row.spaceId);
-  await requireAgentEdit(db, userId, space, agentId);
+  const row = await loadAgentForEdit(db, userId, agentId);
 
   const name = patch.name !== undefined ? validateName(patch.name) : undefined;
   const runtime = patch.runtime !== undefined ? patch.runtime.trim() : undefined;
@@ -242,9 +254,7 @@ export async function updateAgent(
 
 export async function deleteAgent(env: AgentEnv, userId: string, agentId: string): Promise<void> {
   const { db } = env;
-  const row = await getAgentRow(db, agentId);
-  const space = await getSpaceRow(db, row.spaceId);
-  await requireAgentEdit(db, userId, space, agentId);
+  const row = await loadAgentForEdit(db, userId, agentId);
   const { agents, accessKeys } = db.tables;
   // Remove the agent (cascades agent_files and agent_runs), then destroy its
   // dedicated key — it has no purpose once the agent is gone.
