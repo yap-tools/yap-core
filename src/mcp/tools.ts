@@ -421,7 +421,8 @@ export function registerMcpTools(server: YapServer): void {
         // negotiated version to a tool, so we can't gate it; text-only content
         // is portable to every client. Capable hosts still render via the
         // in-band _meta and show_widget's tool-level _meta.ui template.
-        return { content: [{ type: "text" as const, text: asJson({ results }) }] };
+        const durationMs = results.reduce((sum, r) => sum + r.durationMs, 0);
+        return { content: [{ type: "text" as const, text: asJson({ durationMs, results }) }] };
       } catch (err) {
         rethrow(err);
       }
