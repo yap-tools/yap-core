@@ -400,6 +400,7 @@ export function registerMcpTools(server: YapServer): void {
         if (!(await canReachSpace(db, userId, space))) {
           throw new YapError("not_found", `space ${args.space_id} not found`);
         }
+        const t0 = performance.now();
         const results: PerCallResult[] = [];
         for (const call of args.calls) {
           results.push(
@@ -421,7 +422,7 @@ export function registerMcpTools(server: YapServer): void {
         // negotiated version to a tool, so we can't gate it; text-only content
         // is portable to every client. Capable hosts still render via the
         // in-band _meta and show_widget's tool-level _meta.ui template.
-        const durationMs = results.reduce((sum, r) => sum + r.durationMs, 0);
+        const durationMs = Math.round(performance.now() - t0);
         return { content: [{ type: "text" as const, text: asJson({ durationMs, results }) }] };
       } catch (err) {
         rethrow(err);
