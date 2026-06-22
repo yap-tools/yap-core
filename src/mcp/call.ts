@@ -10,6 +10,7 @@ import type { Db } from "../db/index.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import type { BundleDoc } from "../core/bundleDocs.js";
+import type { EditOp } from "../core/textEdits.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as hooksCore from "../core/hooks.js";
@@ -101,14 +102,14 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates (array of {id, set: {propertyName: value | null}}; null clears an optional property).",
+      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). A property must not appear in both set and edits for the same item. Applied all-or-nothing per item.",
     capability: "edit_items",
     handler: async (env, params) => ({
       result: await itemsCore.updateItems(
         env.db,
         env.userId,
         env.bundleId,
-        params.updates as { id: string; set: Record<string, unknown> }[],
+        params.updates as { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }[],
       ),
     }),
   },
@@ -148,6 +149,16 @@ export const secondTier: Record<string, SecondTierTool> = {
         content: params.content as string | undefined,
         autoload: params.autoload as boolean | undefined,
       })),
+    }),
+  },
+  patch_doc: {
+    description:
+      "Surgically edit a bundle doc without replacing the entire content. Applied in order, all-or-nothing. Params: doc (name or id), edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all occurrences), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive).",
+    capability: "edit_docs",
+    handler: async (env, params) => ({
+      result: docView(
+        await bundleDocsCore.patchDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""), params.edits as EditOp[]),
+      ),
     }),
   },
   delete_doc: {

@@ -34,6 +34,7 @@ import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, secondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
+import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
 function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -614,6 +615,24 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const userId = sessionUser(ctx.session);
         const { id, ...patch } = args;
         return asJson(await userDocsCore.updateUserDoc(db, userId, id, patch));
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
+  addTool({
+    name: "patch_user_doc",
+    description:
+      "Surgically edit a user doc without replacing the entire content. Applied in order, all-or-nothing. Params: id, edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive).",
+    parameters: z.object({
+      id: z.string(),
+      edits: z.array(editOpSchema).min(1),
+    }),
+    execute: async (args, ctx) => {
+      try {
+        const userId = sessionUser(ctx.session);
+        return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits as EditOp[]));
       } catch (err) {
         rethrow(err);
       }

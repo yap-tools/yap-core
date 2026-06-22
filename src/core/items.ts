@@ -23,6 +23,7 @@ import { invalid, notFound } from "./errors.js";
 import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { countDecimals, NUMBER_DEFAULT_DECIMALS, parseConfig, type PropertyConfig } from "./propertyConfig.js";
+import { applyEdits, type EditOp } from "./textEdits.js";
 import { newId, nowIso } from "./util.js";
 
 /** Element-wise comparison operators. On a multi-valued property they apply
@@ -555,7 +556,7 @@ export async function updateItems(
   db: Db,
   userId: string,
   bundleId: string,
-  updates: { id: string; set: Record<string, unknown> }[],
+  updates: { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }[],
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_items", ctx);
@@ -584,13 +585,17 @@ export async function updateItems(
       errors.push(`updates[${i}]: item ${update.id} not found in bundle`);
       continue;
     }
-    if (typeof update.set !== "object" || update.set === null) {
+    if (update.set !== undefined && (typeof update.set !== "object" || update.set === null)) {
       errors.push(`updates[${i}]: set must be an object`);
+      continue;
+    }
+    if (!update.set && !update.edits) {
+      errors.push(`updates[${i}]: at least one of set or edits is required`);
       continue;
     }
     const props = propsByType.get(item.itemTypeId)!;
     const plan = { itemId: item.id, ops: [] as { prop: Property; rows: { value: string; position: number }[] }[] };
-    for (const [name, value] of Object.entries(update.set)) {
+    for (const [name, value] of Object.entries(update.set ?? {})) {
       try {
         const prop = propertyByName(props, name);
         const rows = normalizeProperty(prop, value);
@@ -602,6 +607,36 @@ export async function updateItems(
         }
       } catch (err) {
         errors.push(`updates[${i}]: ${(err as Error).message}`);
+      }
+    }
+    for (const [name, editOps] of Object.entries(update.edits ?? {})) {
+      try {
+        const prop = propertyByName(props, name);
+        if (prop.datatype !== "text") {
+          errors.push(
+            `updates[${i}]: edits for "${name}": surgical edits only work on text properties (got ${prop.datatype})`,
+          );
+          continue;
+        }
+        if (prop.multi) {
+          errors.push(`updates[${i}]: edits for "${name}": surgical edits are not supported on multi-valued properties`);
+          continue;
+        }
+        if (update.set && name in update.set) {
+          errors.push(`updates[${i}]: property "${name}" appears in both set and edits`);
+          continue;
+        }
+        const valueRow = await db.client
+          .select()
+          .from(itemValues)
+          .where(and(eq(itemValues.itemId, item.id), eq(itemValues.propertyId, prop.id)))
+          .limit(1);
+        const currentText = valueRow[0]?.value ?? "";
+        const newText = applyEdits(currentText, editOps);
+        normalizeValue(prop, newText, parseConfig(prop.config));
+        plan.ops.push({ prop, rows: [{ value: newText, position: 0 }] });
+      } catch (err) {
+        errors.push(`updates[${i}]: edits for "${name}": ${(err as Error).message}`);
       }
     }
     plans.push(plan);

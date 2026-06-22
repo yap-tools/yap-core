@@ -9,6 +9,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { invalid, notFound } from "./errors.js";
+import { applyEdits, type EditOp } from "./textEdits.js";
 import { newId, nowIso } from "./util.js";
 
 export interface BundleDocInfo {
@@ -148,6 +149,22 @@ export async function updateDoc(
       updatedAt: nowIso(),
     })
     .where(eq(bundleDocs.id, doc.id));
+  return toDoc(await resolveDoc(db, bundleId, doc.id));
+}
+
+export async function patchDoc(
+  db: Db,
+  userId: string,
+  bundleId: string,
+  ref: string,
+  ops: EditOp[],
+): Promise<BundleDoc> {
+  const ctx = await getBundleContext(db, bundleId);
+  await requireBundleCapability(db, userId, "edit_docs", ctx);
+  const doc = await resolveDoc(db, bundleId, ref);
+  const content = applyEdits(doc.content, ops);
+  const { bundleDocs } = db.tables;
+  await db.client.update(bundleDocs).set({ content, updatedAt: nowIso() }).where(eq(bundleDocs.id, doc.id));
   return toDoc(await resolveDoc(db, bundleId, doc.id));
 }
 

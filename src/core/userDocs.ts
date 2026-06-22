@@ -9,6 +9,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/index.js";
 import { assertAccountWrite } from "./authScope.js";
 import { invalid, notFound } from "./errors.js";
+import { applyEdits, type EditOp } from "./textEdits.js";
 import { newId, nowIso } from "./util.js";
 
 export interface UserDocInfo {
@@ -119,6 +120,15 @@ export async function updateUserDoc(
       updatedAt: nowIso(),
     })
     .where(eq(userDocs.id, docId));
+  return getUserDoc(db, userId, docId);
+}
+
+export async function patchUserDoc(db: Db, userId: string, docId: string, ops: EditOp[]): Promise<UserDoc> {
+  assertAccountWrite();
+  const doc = await getUserDoc(db, userId, docId);
+  const content = applyEdits(doc.content, ops);
+  const { userDocs } = db.tables;
+  await db.client.update(userDocs).set({ content, updatedAt: nowIso() }).where(eq(userDocs.id, docId));
   return getUserDoc(db, userId, docId);
 }
 

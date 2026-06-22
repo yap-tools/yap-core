@@ -24,6 +24,7 @@ import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
+import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import { headerSafeFilename } from "../core/util.js";
@@ -514,10 +515,29 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(
-        z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        z.object({
+          name: z.string().optional(),
+          content: z.string().optional(),
+          autoload: z.boolean().optional(),
+          edits: z.array(editOpSchema).min(1).optional(),
+        }),
         await jsonBody(c),
       );
-      return c.json(await bundleDocsCore.updateDoc(db, userId, param(c, "id"), param(c, "docRef"), body));
+      if (body.content !== undefined && body.edits !== undefined) {
+        throw invalid("content and edits are mutually exclusive");
+      }
+      const bundleId = param(c, "id");
+      const docRef = param(c, "docRef");
+      if (body.edits !== undefined) {
+        return c.json(await bundleDocsCore.patchDoc(db, userId, bundleId, docRef, body.edits as EditOp[]));
+      }
+      return c.json(
+        await bundleDocsCore.updateDoc(db, userId, bundleId, docRef, {
+          name: body.name,
+          content: body.content,
+          autoload: body.autoload,
+        }),
+      );
     }),
   );
 
@@ -671,10 +691,19 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/items/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      const body = parseBody(z.object({ set: z.record(z.string(), z.unknown()) }), await jsonBody(c));
+      const body = parseBody(
+        z.object({
+          set: z.record(z.string(), z.unknown()).optional(),
+          edits: z.record(z.string(), z.array(editOpSchema).min(1)).optional(),
+        }),
+        await jsonBody(c),
+      );
+      if (!body.set && !body.edits) throw invalid("at least one of set or edits is required");
       const itemId = param(c, "id");
       const bundleId = await itemsCore.getItemBundleId(db, itemId);
-      const updated = await itemsCore.updateItems(db, userId, bundleId, [{ id: itemId, set: body.set }]);
+      const updated = await itemsCore.updateItems(db, userId, bundleId, [
+        { id: itemId, set: body.set, edits: body.edits as Record<string, EditOp[]> | undefined },
+      ]);
       return c.json(updated[0]);
     }),
   );
@@ -914,10 +943,27 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(
-        z.object({ name: z.string().optional(), content: z.string().optional(), autoload: z.boolean().optional() }),
+        z.object({
+          name: z.string().optional(),
+          content: z.string().optional(),
+          autoload: z.boolean().optional(),
+          edits: z.array(editOpSchema).min(1).optional(),
+        }),
         await jsonBody(c),
       );
-      return c.json(await userDocsCore.updateUserDoc(db, userId, param(c, "id"), body));
+      if (body.content !== undefined && body.edits !== undefined) {
+        throw invalid("content and edits are mutually exclusive");
+      }
+      if (body.edits !== undefined) {
+        return c.json(await userDocsCore.patchUserDoc(db, userId, param(c, "id"), body.edits as EditOp[]));
+      }
+      return c.json(
+        await userDocsCore.updateUserDoc(db, userId, param(c, "id"), {
+          name: body.name,
+          content: body.content,
+          autoload: body.autoload,
+        }),
+      );
     }),
   );
 
