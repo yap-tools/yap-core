@@ -58,7 +58,7 @@ function applyOp(text: string, op: EditOp, idx: number): string {
       }
       const first = text.indexOf(op.search);
       if (first === -1) throw invalid(`${lbl}: search string not found`);
-      const second = text.indexOf(op.search, first + 1);
+      const second = text.indexOf(op.search, first + op.search.length);
       if (second !== -1) {
         throw invalid(`${lbl}: search string matches more than once; use all: true to replace all occurrences`);
       }

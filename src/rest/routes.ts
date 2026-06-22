@@ -698,7 +698,7 @@ export function registerRestRoutes(server: YapServer): void {
         }),
         await jsonBody(c),
       );
-      if (!body.set && !body.edits) throw invalid("at least one of set or edits is required");
+      if (Object.keys(body.set ?? {}).length === 0 && Object.keys(body.edits ?? {}).length === 0) throw invalid("at least one of set or edits is required");
       const itemId = param(c, "id");
       const bundleId = await itemsCore.getItemBundleId(db, itemId);
       const updated = await itemsCore.updateItems(db, userId, bundleId, [

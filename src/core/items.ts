@@ -589,7 +589,7 @@ export async function updateItems(
       errors.push(`updates[${i}]: set must be an object`);
       continue;
     }
-    if (!update.set && !update.edits) {
+    if (Object.keys(update.set ?? {}).length === 0 && Object.keys(update.edits ?? {}).length === 0) {
       errors.push(`updates[${i}]: at least one of set or edits is required`);
       continue;
     }
