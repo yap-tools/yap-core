@@ -50,15 +50,24 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
    returns docs (autoloaded ones in full — follow them; list and fetch the rest
    with read_docs), item-type schemas, files, and hooks.
 4. **call(space_id, calls)** — execute. Batch related operations in one
-   round trip; each call succeeds or fails independently. A call targets a
-   bundle (provide bundle_id) or the space (omit bundle_id). Second-tier tools:
-   items (query/get/create/update/delete), docs (read/create/update/delete), files
-   (list_files, show_file, upload_request, upload_complete, delete_file),
+   round trip; each call succeeds or fails independently. Results include
+   durationMs per call and as a total. A call targets a bundle (provide
+   bundle_id) or the space (omit bundle_id). Second-tier tools:
+   items (query/get/create/update/delete), docs (get/read/create/update/patch/delete),
+   files (list_files, show_file, upload_request, upload_complete, delete_file),
    hooks (fire_hook), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles
    (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
    (update_bundle/delete_bundle, create/update/delete_item_type,
    add/update/delete_property, edit_bundles).
+
+   **get_doc** fetches a single doc by name or id. **patch_doc** (and the
+   first-tier patch_user_doc / get_user_doc) apply surgical edits without
+   replacing the full content — ops: prepend, append, search_replace (exact
+   match by default; all: true to replace all), insert_before, insert_after,
+   delete (anchor ops: splice at the raw character offset, include newlines
+   yourself), replace_lines, delete_lines (1-based inclusive, line-aware).
+   update_items also accepts an edits key alongside set for text properties.
 
 Hook *authoring* is the one management action not available over MCP — defining
 a hook's destination and secrets is REST-only by design; agents only fire

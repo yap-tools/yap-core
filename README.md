@@ -240,15 +240,15 @@ metadata and descending only into the relevant branch:
 - **`call`** → the single execution verb: a batch of second-tier operations,
   each targeting a bundle (`bundle_id`) or the call's space (omit it) and
   succeeding/failing independently. Data & content: `query_items`, `get_items`,
-  `create_items`, `update_items`, `delete_items`, `read_docs`, `create_doc`,
-  `update_doc`, `delete_doc`,
+  `create_items`, `update_items`, `delete_items`, `get_doc`, `read_docs`,
+  `create_doc`, `update_doc`, `patch_doc`, `delete_doc`,
   `list_files`, `show_file`, `upload_request`, `upload_complete`, `delete_file`,
   `fire_hook`. Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
 - **`help`**, **`show_widget`**, **`space_create`**, **`bundle_create`**, and
-  five user-doc tools (`list/load/create/update/delete_user_doc`)
+  seven user-doc tools (`list/load/get/create/update/patch/delete_user_doc`)
 
 **Surface parity:** every per-resource role capability — content and container
 (`manage_space`, `manage_roles`, `edit_bundles`, …) — is exercisable from

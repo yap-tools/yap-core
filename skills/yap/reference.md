@@ -19,9 +19,9 @@ Verified against yap-core source. Base URL defaults to `http://localhost:8787`; 
 |---|---|
 | `GET /v1/bundles/:id/docs` | list named bundle docs |
 | `POST /v1/bundles/:id/docs` | create: `{"name", "content"?, "autoload"?}` |
-| `GET/PATCH/DELETE /v1/bundles/:id/docs/:docRef` | read, update, or delete the target doc by id or name/ref |
+| `GET/PATCH/DELETE /v1/bundles/:id/docs/:docRef` | read, update (`{"name"?, "content"?, "autoload"?}`), or delete by id or name; PATCH also accepts `{"edits": [EditOp, ...]}` for surgical edits instead of full content replacement |
 | `GET/POST /v1/user-docs` | create: `{"name", "content"?, "autoload"?}` |
-| `GET/PATCH/DELETE /v1/user-docs/:id` | |
+| `GET/PATCH/DELETE /v1/user-docs/:id` | PATCH: `{"name"?, "content"?, "autoload"?}` or `{"edits": [EditOp, ...]}` |
 
 ### Item-types & properties
 | Method & path | Body |
@@ -49,8 +49,23 @@ Schemas are freely mutable (EAV): renames touch no values, removals drop values,
 |---|---|
 | `POST /v1/bundles/:id/items` | `{"itemType": "Todo", "items": [{...}, ...]}` → 201 |
 | `GET /v1/bundles/:id/items?itemType=T` | query; or `?ids=a,b,c` to fetch by id |
-| `PATCH /v1/items/:id` | `{"set": {"prop": value}}` |
+| `PATCH /v1/items/:id` | `{"set"?: {"prop": value}, "edits"?: {"textProp": [EditOp, ...]}}` — at least one required; `set` replaces values, `edits` applies surgical ops to text properties |
 | `DELETE /v1/items/:id` | |
+
+**EditOp** — surgical edit operations (used in `edits` on doc and item PATCH endpoints, and in the MCP `patch_doc` / `patch_user_doc` / `update_items` tools):
+
+| `op` | Required fields | Notes |
+|---|---|---|
+| `prepend` / `append` | `content` | |
+| `search_replace` | `search`, `replace`, `all`? | Error if not exactly one match; `all: true` replaces all occurrences |
+| `insert_before` / `insert_after` | `target`, `content` | Anchor ops: splice at the raw character offset — include newlines in `content` yourself |
+| `delete` | `target` | Anchor op — removes first occurrence of `target` |
+| `replace_lines` | `from`, `to`, `content` | 1-based inclusive line range; line-aware |
+| `delete_lines` | `from`, `to` | 1-based inclusive line range; line-aware |
+
+Ops are applied sequentially; if any fails, the entire update is rejected.
+
+**MCP-only doc tools** (via `call`): `get_doc {doc}` — read a single bundle doc by name or id. `patch_doc {doc, edits}` — surgical edits on a bundle doc. First-tier: `get_user_doc {id}`, `patch_user_doc {id, edits}`.
 
 Query parameters: `itemType` (required unless `ids=`; use the exact name from the item-types listing), `filters` (URL-encoded JSON array), `sort=<property>`, `direction=asc|desc`, `cursor`, `limit`.
 
