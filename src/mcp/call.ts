@@ -425,6 +425,7 @@ export interface PerCallResult {
   bundle_id: string | null;
   tool: string;
   ok: boolean;
+  durationMs: number;
   result?: unknown;
   error?: { code: string; message: string; details?: unknown };
   _meta?: { widget: string; data: Record<string, unknown> };
@@ -442,6 +443,7 @@ export async function executeCall(
   bundleSpaceLookup: (bundleId: string) => Promise<string | null>,
 ): Promise<PerCallResult> {
   const base = { bundle_id: call.bundle_id ?? null, tool: call.tool };
+  const t0 = performance.now();
   try {
     const tool = secondTier[call.tool];
     if (!tool) {
@@ -466,15 +468,17 @@ export async function executeCall(
     }
     const callEnv: CallEnv = { ...env, spaceId, bundleId: targetsBundle ? call.bundle_id! : "" };
     const { result, _meta } = await tool.handler(callEnv, call.params ?? {});
-    return { ...base, ok: true, result, ...(_meta ? { _meta } : {}) };
+    return { ...base, ok: true, durationMs: Math.round(performance.now() - t0), result, ...(_meta ? { _meta } : {}) };
   } catch (err) {
+    const durationMs = Math.round(performance.now() - t0);
     if (err instanceof YapError) {
       return {
         ...base,
         ok: false,
+        durationMs,
         error: { code: err.code, message: err.message, ...(err.details !== undefined ? { details: err.details } : {}) },
       };
     }
-    return { ...base, ok: false, error: { code: "internal", message: (err as Error).message } };
+    return { ...base, ok: false, durationMs, error: { code: "internal", message: (err as Error).message } };
   }
 }
