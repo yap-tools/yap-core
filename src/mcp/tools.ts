@@ -641,7 +641,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
   addTool({
     name: "patch_user_doc",
     description:
-      "Surgically edit a user doc without replacing the entire content. Applied in order, all-or-nothing. Params: id, edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive).",
+      "Surgically edit a user doc without replacing the entire content. Applied in order, all-or-nothing. Params: id, edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
     parameters: z.object({
       id: z.string(),
       edits: z.array(editOpSchema).min(1),

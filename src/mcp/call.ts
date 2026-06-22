@@ -102,7 +102,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). A property must not appear in both set and edits for the same item. Applied all-or-nothing per item.",
+      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. Applied all-or-nothing per item.",
     capability: "edit_items",
     handler: async (env, params) => ({
       result: await itemsCore.updateItems(
@@ -160,7 +160,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   patch_doc: {
     description:
-      "Surgically edit a bundle doc without replacing the entire content. Applied in order, all-or-nothing. Params: doc (name or id), edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all occurrences), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive).",
+      "Surgically edit a bundle doc without replacing the entire content. Applied in order, all-or-nothing. Params: doc (name or id), edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all occurrences), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
     capability: "edit_docs",
     handler: async (env, params) => ({
       result: docView(
