@@ -28,6 +28,14 @@ describe("widgetHtml", () => {
     expect(render).toContain("safeUrl(d.url)");
   });
 
+  it("the media-card download link opens outside the widget frame", () => {
+    const render = WIDGETS["media-card"]!.render;
+    expect(render).toContain("safeUrl(d.url)");
+    expect(render).toContain("download");
+    expect(render).toContain('target="_blank"');
+    expect(render).toContain('rel="noopener noreferrer"');
+  });
+
   it("the media-card renderer handles expired Yap previews without refreshing tokens", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain('addEventListener("error"');
