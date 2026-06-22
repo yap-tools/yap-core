@@ -583,6 +583,21 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
   });
 
   addTool({
+    name: "get_user_doc",
+    description: "Read a single user doc by id. Returns id, name, content, autoload, createdAt, updatedAt.",
+    parameters: z.object({ id: z.string() }),
+    annotations: { readOnlyHint: true, title: "Get user doc" },
+    execute: async (args, ctx) => {
+      try {
+        const userId = sessionUser(ctx.session);
+        return asJson(await userDocsCore.getUserDoc(db, userId, args.id));
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
+  addTool({
     name: "create_user_doc",
     description:
       "Create a user doc. Set autoload: true to have it surface at the start of every session (via load). Params: name, content?, autoload?.",

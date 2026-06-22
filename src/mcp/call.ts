@@ -120,6 +120,13 @@ export const secondTier: Record<string, SecondTierTool> = {
       result: { deleted: await itemsCore.deleteItems(env.db, env.userId, env.bundleId, params.ids as string[]) },
     }),
   },
+  get_doc: {
+    description: "Read a single bundle doc by name or id. Returns id, name, content, autoload, createdAt, updatedAt. Params: doc (name or id).",
+    capability: "(bundle read access)",
+    handler: async (env, params) => ({
+      result: docView(await bundleDocsCore.getDoc(env.db, env.userId, env.bundleId, String(params.doc ?? ""))),
+    }),
+  },
   read_docs: {
     description:
       "Read bundle doc content. Params: refs? (array of doc ids or names; omit to read every doc). load_bundle lists what exists and inlines the autoloaded ones — use this for the rest.",
