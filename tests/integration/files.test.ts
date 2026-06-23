@@ -119,6 +119,13 @@ describeEachAdapter("files", (adapter) => {
     expect(download.status).toBe(200);
     expect(await download.text()).toBe("hello yap");
     expect(download.headers.get("content-type")).toContain("text/plain");
+    // The preview url renders inline; show_file also returns a dedicated
+    // attachment link (download_url) so the media-card's Download action saves
+    // the file instead of previewing it.
+    expect(download.headers.get("content-disposition")).toMatch(/^inline/);
+    const forced = await fetch(shown.result.download_url);
+    expect(forced.status).toBe(200);
+    expect(forced.headers.get("content-disposition")).toMatch(/^attachment/);
 
     // The link stops working after its TTL (configured to 2s here).
     await new Promise((r) => setTimeout(r, 2200));

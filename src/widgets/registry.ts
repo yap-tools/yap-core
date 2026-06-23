@@ -312,11 +312,28 @@ export const WIDGETS: Record<string, WidgetDef> = {
         else if (d.kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
           '</div><div class="muted">' + esc(d.mime_type || "") + '</div></div></div>';
-        // A plain-text download link for every file type, sitting where the
-        // expiry note used to. Omitted only when the URL isn't a usable
-        // http(s) link (safeUrl collapses those to "#").
-        var dl = url !== "#" ? '<p class="dl-line"><a class="dl" href="' + url + '" download target="_blank" rel="noopener noreferrer">Download</a></p>' : "";
+        // A download link for every file type, sitting where the expiry note
+        // used to. Uses the server's dedicated attachment link (download_url) so
+        // it saves the file rather than rendering inline; a direct, non-stored
+        // URL has no download_url, so fall back to the inline url. Omitted when
+        // neither is a usable http(s) link (safeUrl collapses those to "#").
+        var dlRaw = String(d.download_url != null ? d.download_url : (d.url != null ? d.url : ""));
+        var dlUrl = safeUrl(d.download_url != null ? d.download_url : d.url);
+        var dl = dlUrl !== "#" ? '<p class="dl-line"><a class="dl" href="' + dlUrl + '" download target="_blank" rel="noopener noreferrer">Download</a></p>' : "";
         root.innerHTML = '<div class="card"><div id="preview">' + inner + "</div>" + dl + "</div>";
+        // Strict MCP Apps sandboxes (e.g. Claude) drop a target=_blank anchor, so
+        // ask the host to open the link via ui/open-link. The anchor still works
+        // on permissive hosts and is the fallback if the host has no ui/open-link;
+        // origin-hosted pages (window.__YAP_DATA__) have no host and navigate natively.
+        var dlEl = root.querySelector("a.dl");
+        if (dlEl && dlUrl !== "#" && !window.__YAP_DATA__) {
+          dlEl.addEventListener("click", function (e) {
+            e.preventDefault();
+            request("ui/open-link", { url: dlRaw }).catch(function () {
+              try { window.open(dlRaw, "_blank", "noopener,noreferrer"); } catch (_e) {}
+            });
+          });
+        }
         var media = root.querySelector("img,video,audio");
         if (media) {
           media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", announceHeight);
