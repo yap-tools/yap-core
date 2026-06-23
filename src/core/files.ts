@@ -234,8 +234,14 @@ export interface MintedLink {
   size: number;
 }
 
-/** Mints a fresh expiring link after re-confirming read_files. Every time. */
-export async function mintDownloadLink(env: FileEnv, userId: string, fileId: string): Promise<MintedLink> {
+/** Mints a fresh expiring link after re-confirming read_files. Every time.
+ *  Pass { download: true } for an attachment (save) link instead of inline. */
+export async function mintDownloadLink(
+  env: FileEnv,
+  userId: string,
+  fileId: string,
+  opts: { download?: boolean } = {},
+): Promise<MintedLink> {
   const { db, blob, config } = env;
   const file = await getFileRow(db, fileId);
   const ctx = await getBundleContext(db, file.bundleId);
@@ -245,6 +251,7 @@ export async function mintDownloadLink(env: FileEnv, userId: string, fileId: str
     fileId: file.id,
     name: file.name,
     mimeType: file.mimeType,
+    download: opts.download ?? false,
   });
   return {
     url,
@@ -278,6 +285,8 @@ export function fileKind(mimeType: string): ShowFileKind {
 export interface ShowFileResult {
   kind: ShowFileKind;
   url: string;
+  /** Attachment (save) link for the Download action; absent for direct URLs. */
+  download_url?: string;
   expires_in?: number;
   name?: string;
   mime_type?: string;
@@ -295,6 +304,7 @@ export async function showFile(env: FileEnv, userId: string, ref: string): Promi
   if (ref.startsWith("file://")) {
     const fileId = ref.slice("file://".length);
     const minted = await mintDownloadLink(env, userId, fileId);
+    const download = await mintDownloadLink(env, userId, fileId, { download: true });
     const viewToken = signToken(
       { scope: "widget", widget: "media-card", fileId },
       env.config.masterKey,
@@ -303,6 +313,7 @@ export async function showFile(env: FileEnv, userId: string, ref: string): Promi
     return {
       kind: fileKind(minted.mime_type),
       url: minted.url,
+      download_url: download.url,
       expires_in: minted.expires_in,
       name: minted.name,
       mime_type: minted.mime_type,
@@ -341,14 +352,13 @@ export async function viewPageData(env: FileEnv, fileId: string): Promise<ShowFi
   const { db, blob, config } = env;
   const file = await getFileRow(db, fileId);
   if (file.status !== "finalized") throw notFound("file", fileId);
-  const url = await blob.downloadUrl(file.storageKey, config.downloadTtlSeconds, {
-    fileId: file.id,
-    name: file.name,
-    mimeType: file.mimeType,
-  });
+  const opts = { fileId: file.id, name: file.name, mimeType: file.mimeType };
+  const url = await blob.downloadUrl(file.storageKey, config.downloadTtlSeconds, opts);
+  const download_url = await blob.downloadUrl(file.storageKey, config.downloadTtlSeconds, { ...opts, download: true });
   return {
     kind: fileKind(file.mimeType),
     url,
+    download_url,
     name: file.name,
     mime_type: file.mimeType,
     size: file.size,

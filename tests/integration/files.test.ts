@@ -119,10 +119,11 @@ describeEachAdapter("files", (adapter) => {
     expect(download.status).toBe(200);
     expect(await download.text()).toBe("hello yap");
     expect(download.headers.get("content-type")).toContain("text/plain");
-    // Default disposition renders inline; ?download=1 forces an attachment so
-    // the media-card's Download link saves the file instead of previewing it.
+    // The preview url renders inline; show_file also returns a dedicated
+    // attachment link (download_url) so the media-card's Download action saves
+    // the file instead of previewing it.
     expect(download.headers.get("content-disposition")).toMatch(/^inline/);
-    const forced = await fetch(`${shown.result.url}&download=1`);
+    const forced = await fetch(shown.result.download_url);
     expect(forced.status).toBe(200);
     expect(forced.headers.get("content-disposition")).toMatch(/^attachment/);
 

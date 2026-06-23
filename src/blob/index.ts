@@ -26,6 +26,8 @@ export interface DownloadUrlOpts {
   fileId: string;
   name: string;
   mimeType: string;
+  /** Force an attachment (download) disposition instead of an inline preview. */
+  download?: boolean;
 }
 
 export interface BlobStore {
@@ -75,7 +77,9 @@ export async function createBlobStore(config: YapConfig): Promise<BlobStore> {
       },
       downloadUrl: async (_key, ttlSeconds, opts) => {
         const token = signToken({ scope: "download", fileId: opts.fileId }, config.masterKey, ttlSeconds);
-        return `${config.baseUrl}/v1/files/${opts.fileId}/download?token=${token}`;
+        const url = `${config.baseUrl}/v1/files/${opts.fileId}/download?token=${token}`;
+        // The /download route reads ?download=1 to switch to attachment.
+        return opts.download ? `${url}&download=1` : url;
       },
     };
   }
@@ -97,11 +101,15 @@ export async function createBlobStore(config: YapConfig): Promise<BlobStore> {
     // FlyDrive parses numeric expiresIn as seconds.
     uploadUrl: async (key, _fileId, ttlSeconds) =>
       disk.getSignedUploadUrl(key, { expiresIn: ttlSeconds }),
+    // The presign bakes the response disposition in (extra query params would
+    // break the SigV4 signature), so inline vs attachment is decided here.
     downloadUrl: async (key, ttlSeconds, opts) =>
       disk.getSignedUrl(key, {
         expiresIn: ttlSeconds,
         contentType: opts.mimeType || undefined,
-        contentDisposition: opts.name ? `attachment; filename="${headerSafeFilename(opts.name)}"` : undefined,
+        contentDisposition: opts.name
+          ? `${opts.download ? "attachment" : "inline"}; filename="${headerSafeFilename(opts.name)}"`
+          : undefined,
       }),
   };
 }
