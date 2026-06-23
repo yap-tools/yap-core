@@ -28,10 +28,16 @@ describe("widgetHtml", () => {
     expect(render).toContain("safeUrl(d.url)");
   });
 
-  it("the media-card download link opens outside the widget frame", () => {
+  it("the media-card download forces an attachment and opens it via the host bridge", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain("safeUrl(d.url)");
-    expect(render).toContain("download");
+    // Force a real file download (Content-Disposition: attachment) rather than
+    // an inline render in the opened tab.
+    expect(render).toContain("download=1");
+    // Strict MCP Apps sandboxes swallow target=_blank; the click routes through
+    // the host's ui/open-link so the link opens in the user's browser.
+    expect(render).toContain("ui/open-link");
+    // The anchor stays as the fallback for permissive hosts and origin pages.
     expect(render).toContain('target="_blank"');
     expect(render).toContain('rel="noopener noreferrer"');
   });

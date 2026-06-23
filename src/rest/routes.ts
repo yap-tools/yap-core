@@ -814,7 +814,10 @@ export function registerRestRoutes(server: YapServer): void {
       const { stream, name, mimeType, size } = await filesCore.openDownloadStream(fileEnv, fileId);
       c.header("content-type", mimeType || "application/octet-stream");
       c.header("content-length", String(size));
-      c.header("content-disposition", `inline; filename="${headerSafeFilename(name)}"`);
+      // Default to inline so images/audio/video preview in place; ?download=1
+      // forces an attachment so a Download action saves the file instead.
+      const disposition = c.req.query("download") ? "attachment" : "inline";
+      c.header("content-disposition", `${disposition}; filename="${headerSafeFilename(name)}"`);
       return c.body(Readable.toWeb(stream) as ReadableStream);
     }),
   );
