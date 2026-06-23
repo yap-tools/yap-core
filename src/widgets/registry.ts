@@ -315,7 +315,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         // A plain-text download link for every file type, sitting where the
         // expiry note used to. Omitted only when the URL isn't a usable
         // http(s) link (safeUrl collapses those to "#").
-        var dl = url !== "#" ? '<p class="dl-line"><a class="dl" href="' + url + '" download>Download</a></p>' : "";
+        var dl = url !== "#" ? '<p class="dl-line"><a class="dl" href="' + url + '" download target="_blank" rel="noopener noreferrer">Download</a></p>' : "";
         root.innerHTML = '<div class="card"><div id="preview">' + inner + "</div>" + dl + "</div>";
         var media = root.querySelector("img,video,audio");
         if (media) {
