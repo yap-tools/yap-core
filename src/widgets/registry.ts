@@ -327,10 +327,12 @@ export const WIDGETS: Record<string, WidgetDef> = {
           }
           if (statusCode === 413 || /maximum size|exceeds|too large|file size|payload too large/.test(low)) {
             var size = file && file.size ? " Selected file size: " + formatBytes(file.size) + "." : "";
-            return { message: "The selected file is too large." + size + (msg ? " " + msg : ""), retry: true };
+            var next = stage === "finalize" ? " Request a fresh upload link to choose another file." : "";
+            return { message: "The selected file is too large." + size + (msg ? " " + msg : "") + next, retry: stage !== "finalize" };
           }
           if (statusCode === 415 || /mime type|file type|content type|unsupported media type|not allowed/.test(low)) {
-            return { message: "The selected file type is not accepted (" + fileTypeLabel(file) + ")." + allowedLabel(parsed.details), retry: true };
+            var typeNext = stage === "finalize" ? " Request a fresh upload link to choose another file." : "";
+            return { message: "The selected file type is not accepted (" + fileTypeLabel(file) + ")." + allowedLabel(parsed.details) + typeNext, retry: stage !== "finalize" };
           }
           if (stage === "finalize") {
             return { message: prefix + " The bytes uploaded, but the file could not be finalized; request a fresh upload link and try again.", retry: false };
@@ -415,6 +417,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         }
         resetProgress();
         pick.addEventListener("click", function () { if (!busy && !locked) input.click(); });
+        input.addEventListener("click", function () { input.value = ""; });
         input.addEventListener("change", function () { if (input.files[0]) upload(input.files[0]); });
         ["dragover", "dragenter"].forEach(function (ev) {
           zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add("over"); });

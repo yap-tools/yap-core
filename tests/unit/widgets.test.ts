@@ -83,6 +83,8 @@ describe("widgetHtml", () => {
     expect(render).toContain("The selected file is too large");
     expect(render).toContain("The selected file type is not accepted");
     expect(render).toContain("Request a fresh upload link and try again");
+    expect(render).toContain("Request a fresh upload link to choose another file.");
+    expect(render).toContain('retry: stage !== "finalize"');
   });
 
   it("embeds the media-card expired state in origin HTML", () => {
