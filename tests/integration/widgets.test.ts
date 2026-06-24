@@ -203,6 +203,9 @@ describeEachAdapter("widgets", (adapter) => {
       expect(raw.structuredContent.params.upload_url).toBe("https://x/u");
       expect(raw.structuredContent.render).toBe(WIDGETS["upload-dropzone"]!.render);
       expect(raw.structuredContent.style).toBe(WIDGETS["upload-dropzone"]!.style);
+      expect(raw.structuredContent.render).toContain('id="progress"');
+      expect(raw.structuredContent.render).toContain("This upload link has expired or is no longer valid");
+      expect(raw.structuredContent.style).toContain(".bar");
     });
 
     it("rejects unknown widgets with the registry listed", async () => {
@@ -265,6 +268,8 @@ describeEachAdapter("widgets", (adapter) => {
       expect(page.headers.get("content-type")).toContain("text/html");
       const html = await page.text();
       expect(html).toContain('data-yap-mode="origin"');
+      expect(html).toContain('class="progress"');
+      expect(html).toContain("Finalizing");
 
       // Simulate exactly what the page's inline JS does with its embedded data.
       const data = extractEmbeddedData(html);

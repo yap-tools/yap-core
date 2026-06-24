@@ -51,6 +51,40 @@ describe("widgetHtml", () => {
     expect(render).not.toContain("file_id");
   });
 
+  it("the upload-dropzone renderer uses XMLHttpRequest upload progress", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("new XMLHttpRequest()");
+    expect(render).toContain('xhr.open("PUT", d.upload_url)');
+    expect(render).toContain("xhr.upload.onprogress");
+    expect(render).toContain("evt.lengthComputable");
+  });
+
+  it("the upload-dropzone exposes progress and finalizing UI hooks", () => {
+    const html = widgetHtml("upload-dropzone", "origin", {
+      file_id: "f1",
+      upload_url: "https://x/u",
+      complete_url: "https://x/c",
+    });
+    expect(html).toContain('class="progress"');
+    expect(html).toContain('class="bar"');
+    expect(html).toContain('class="phase"');
+    expect(html).toContain("Finalizing");
+  });
+
+  it("the upload-dropzone does not construct raw status-only failures", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).not.toContain("upload failed (");
+    expect(render).not.toContain("finalize failed (");
+  });
+
+  it("the upload-dropzone explains common upload failures with friendly copy", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("This upload link has expired or is no longer valid");
+    expect(render).toContain("The selected file is too large");
+    expect(render).toContain("The selected file type is not accepted");
+    expect(render).toContain("Request a fresh upload link and try again");
+  });
+
   it("embeds the media-card expired state in origin HTML", () => {
     const html = widgetHtml("media-card", "origin", {
       kind: "image",
