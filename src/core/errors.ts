@@ -10,6 +10,8 @@ export type ErrorCode =
   | "not_found"
   | "invalid_request"
   | "conflict"
+  | "payload_too_large"
+  | "unsupported_media_type"
   | "internal";
 
 const HTTP_STATUS: Record<ErrorCode, number> = {
@@ -18,6 +20,8 @@ const HTTP_STATUS: Record<ErrorCode, number> = {
   not_found: 404,
   invalid_request: 400,
   conflict: 409,
+  payload_too_large: 413,
+  unsupported_media_type: 415,
   internal: 500,
 };
 
@@ -52,6 +56,16 @@ export function notFound(what: string, id?: string): YapError {
 
 export function invalid(message: string, details?: unknown): YapError {
   return new YapError("invalid_request", message, details);
+}
+
+/** A file larger than the configured limit — HTTP 413. */
+export function tooLarge(message: string, details?: unknown): YapError {
+  return new YapError("payload_too_large", message, details);
+}
+
+/** A MIME type outside the configured allowlist — HTTP 415. */
+export function unsupportedMediaType(message: string, details?: unknown): YapError {
+  return new YapError("unsupported_media_type", message, details);
 }
 
 export function forbidden(message: string, details?: unknown): YapError {

@@ -18,7 +18,7 @@ import type { YapConfig } from "../config.js";
 import { signToken } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
-import { YapError, invalid, notFound } from "./errors.js";
+import { YapError, invalid, notFound, tooLarge, unsupportedMediaType } from "./errors.js";
 import { newId, nowIso } from "./util.js";
 
 export interface FileInfo {
@@ -105,10 +105,10 @@ export async function requestUpload(
   const name = cleanFileName(input.name);
   const declaredMime = input.mime_type ?? "";
   if (declaredMime && !mimeAllowed(config, declaredMime)) {
-    throw invalid(`MIME type ${declaredMime} is not allowed`, { allowed: config.mimeAllowlist });
+    throw unsupportedMediaType(`MIME type ${declaredMime} is not allowed`, { allowed: config.mimeAllowlist });
   }
   if (input.size !== undefined && input.size > config.maxFileSizeBytes) {
-    throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+    throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
   }
 
   const { files } = db.tables;
@@ -195,12 +195,12 @@ async function finalizeUpload(
   if (!stat) throw invalid("no uploaded bytes found for this file — upload before completing");
   if (stat.size > config.maxFileSizeBytes) {
     await blob.delete(file.storageKey);
-    throw invalid(`uploaded file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+    throw tooLarge(`uploaded file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
   }
   const mimeType = patch.mime_type ?? file.mimeType ?? "";
   if (mimeType && !mimeAllowed(config, mimeType)) {
     await blob.delete(file.storageKey);
-    throw invalid(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
+    throw unsupportedMediaType(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
   }
 
   const { files } = db.tables;
@@ -377,7 +377,7 @@ export async function storeUploadedBytes(
 ): Promise<{ size: number }> {
   const { db, blob, config } = env;
   if (bytes.byteLength > config.maxFileSizeBytes) {
-    throw invalid(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+    throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
   }
   const file = await getFileRow(db, fileId);
   const { files } = db.tables;

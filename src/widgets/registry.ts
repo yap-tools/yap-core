@@ -34,6 +34,71 @@ export const TOOL_RESULT_UNWRAP_JS =
   `function __yapSc(params){var p=params,sc=p&&p.structuredContent,g=0;` +
   `while(!sc&&p&&typeof p.value==="object"&&p.value!==null&&g++<5){p=p.value;sc=p.structuredContent;}return sc;}`;
 
+/** The upload-dropzone's failure classifier, exported as source so the widget
+ * and its unit test exercise one definition. It keys purely on the HTTP status
+ * and our structured error `code` ({ error: { code, details } }) — never on the
+ * human message text — so rewording a server message can't silently break the
+ * friendly copy. The shared contract is the status code: the REST layer is
+ * tested to return 413 for oversized files and 415 for disallowed types. */
+export const UPLOAD_ERROR_JS = `
+  function formatBytes(size) {
+    if (!size && size !== 0) return "";
+    var units = ["bytes", "KB", "MB", "GB"];
+    var n = Number(size), i = 0;
+    while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++; }
+    return (i === 0 ? String(n) : n.toFixed(n < 10 ? 1 : 0)) + " " + units[i];
+  }
+  function fileTypeLabel(file) {
+    if (file && file.type) return file.type;
+    var m = /\\.([^.]+)$/.exec((file && file.name) || "");
+    return m ? "." + m[1] : "this file type";
+  }
+  function allowedLabel(details) {
+    var allowed = details && details.allowed;
+    return Array.isArray(allowed) && allowed.length ? " Accepted types: " + allowed.join(", ") + "." : "";
+  }
+  function parseUploadError(contentType, bodyText) {
+    var body = String(bodyText || "");
+    if ((contentType || "").indexOf("json") !== -1 || /^[\\s\\r\\n]*[\\{\\[]/.test(body)) {
+      try {
+        var parsed = JSON.parse(body);
+        var err = parsed && parsed.error ? parsed.error : parsed;
+        return { code: String((err && err.code) || ""), details: (err && err.details) || null };
+      } catch (_e) {}
+    }
+    return { code: "", details: null };
+  }
+  function explainUploadFailure(stage, statusCode, contentType, bodyText, file) {
+    var parsed = parseUploadError(contentType, bodyText);
+    var code = parsed.code;
+    var atFinalize = stage === "finalize";
+    // Expired or otherwise rejected link (our server: 401; an S3 presign: 403).
+    if (statusCode === 401 || statusCode === 403 || code === "unauthorized" || code === "forbidden") {
+      return { message: "This upload link has expired or is no longer valid. Request a fresh upload link and try again.", retry: false };
+    }
+    // Single-use link already consumed, or the upload already finalized.
+    if (statusCode === 409 || code === "conflict") {
+      return { message: "This upload link has already been used. Request a fresh upload link and try again.", retry: false };
+    }
+    // File larger than the server's configured limit (HTTP 413). An upload-stage
+    // rejection never consumes the link, so the same link can take a smaller file.
+    if (statusCode === 413 || code === "payload_too_large") {
+      var size = file && file.size ? " Selected file size: " + formatBytes(file.size) + "." : "";
+      var next = atFinalize ? " Request a fresh upload link to choose another file." : "";
+      return { message: "The selected file is too large." + size + next, retry: !atFinalize };
+    }
+    // MIME type outside the configured allowlist (HTTP 415).
+    if (statusCode === 415 || code === "unsupported_media_type") {
+      var typeNext = atFinalize ? " Request a fresh upload link to choose another file." : "";
+      return { message: "The selected file type is not accepted (" + fileTypeLabel(file) + ")." + allowedLabel(parsed.details) + typeNext, retry: !atFinalize };
+    }
+    if (atFinalize) {
+      return { message: "Finalizing failed. The bytes uploaded, but the file could not be finalized; request a fresh upload link and try again.", retry: false };
+    }
+    return { message: "Upload failed. Request a fresh upload link and try again.", retry: true };
+  }
+`;
+
 /** Shared bridge, inlined into every widget. */
 const BRIDGE_JS = `
   var MODE = document.documentElement.getAttribute("data-yap-mode") || "client";
@@ -234,7 +299,16 @@ export const WIDGETS: Record<string, WidgetDef> = {
     style: `
       .drop { border: 2px dashed rgba(128,128,128,.5); border-radius: 10px; padding: 28px; text-align: center; max-width: 560px; }
       .drop.over { border-color: #4a90d9; background: rgba(74,144,217,.08); }
+      .progress { display: none; margin: 14px auto 0; max-width: 360px; text-align: left; }
+      .progress.visible { display: block; }
+      .track { overflow: hidden; height: 8px; border-radius: 999px; background: var(--yap-surface); border: 1px solid var(--yap-border); }
+      .bar { width: 0%; height: 100%; background: #4a90d9; transition: width .18s ease; }
+      .progress.indeterminate .bar { width: 28%; animation: yap-upload-pulse 1.1s ease-in-out infinite alternate; }
+      .phase { display: block; margin-top: 6px; font-size: 12px; color: var(--yap-fg-muted); }
       .done { color: #2e7d32; }
+      .err { color: var(--yap-danger); }
+      button:disabled { opacity: .6; cursor: default; }
+      @keyframes yap-upload-pulse { from { transform: translateX(0); } to { transform: translateX(260%); } }
     `,
     render: `
       onData(function (d) {
@@ -242,30 +316,114 @@ export const WIDGETS: Record<string, WidgetDef> = {
         root.innerHTML = '<div class="drop" id="zone"><p><strong>Drop a file here</strong> or</p>' +
           '<p><button id="pick">Choose file</button></p>' +
           '<input id="file" type="file" style="display:none">' +
-          '<p class="muted" id="status">Waiting for a file\\u2026</p></div>';
+          '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
+          '<div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
+          '<div class="track"><div class="bar" id="bar"></div></div><span class="phase" id="phase"></span></div></div>';
         var zone = document.getElementById("zone");
         var input = document.getElementById("file");
         var status = document.getElementById("status");
+        var pick = document.getElementById("pick");
+        var progress = document.getElementById("progress");
+        var bar = document.getElementById("bar");
+        var phase = document.getElementById("phase");
+        var busy = false;
+        var locked = false;
         function setStatus(text, cls) { status.textContent = text; status.className = "muted " + (cls || ""); requestAnimationFrame(announceHeight); }
+        function setControls(enabled) { pick.disabled = !enabled; }
+        function setProgress(percent, text, indeterminate) {
+          var pct = Math.max(0, Math.min(100, Number(percent) || 0));
+          progress.className = "progress visible" + (indeterminate ? " indeterminate" : "");
+          progress.setAttribute("aria-valuenow", String(Math.round(pct)));
+          bar.style.width = pct + "%";
+          phase.textContent = text || "";
+          requestAnimationFrame(announceHeight);
+        }
+        function resetProgress() {
+          progress.className = "progress";
+          progress.setAttribute("aria-valuenow", "0");
+          bar.style.width = "0%";
+          phase.textContent = "";
+        }
+        ${UPLOAD_ERROR_JS}
+        function readJsonOrText(response) {
+          var contentType = response.headers.get("content-type") || "";
+          return response.text().then(function (text) {
+            var data = null;
+            if (contentType.indexOf("json") !== -1 || /^[\\s\\r\\n]*[\\{\\[]/.test(text)) {
+              try { data = JSON.parse(text); } catch (_e) {}
+            }
+            return { ok: response.ok, status: response.status, contentType: contentType, text: text, data: data };
+          });
+        }
+        function putFile(file) {
+          return new Promise(function (resolve, reject) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("PUT", d.upload_url);
+            xhr.upload.onprogress = function (evt) {
+              if (evt.lengthComputable) {
+                var pct = Math.max(0, Math.min(100, (evt.loaded / evt.total) * 100));
+                setProgress(pct, "Uploading " + Math.round(pct) + "%", false);
+              } else {
+                setProgress(12, "Uploading\\u2026", true);
+              }
+            };
+            xhr.onload = function () {
+              if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+              reject(explainUploadFailure("upload", xhr.status, xhr.getResponseHeader("content-type") || "", xhr.responseText || "", file));
+            };
+            xhr.onerror = function () { reject({ message: "Upload failed. Check the connection, request a fresh upload link, and try again.", retry: true }); };
+            xhr.ontimeout = function () { reject({ message: "Upload timed out. Request a fresh upload link and try again.", retry: true }); };
+            xhr.onabort = function () { reject({ message: "Upload canceled. Choose a file when you are ready to try again.", retry: true }); };
+            setProgress(8, "Uploading\\u2026", true);
+            xhr.send(file);
+          });
+        }
         function upload(file) {
+          if (busy || locked) return;
+          busy = true;
+          var stage = "upload";
+          setControls(false);
           setStatus("Uploading " + file.name + "\\u2026");
-          fetch(d.upload_url, { method: "PUT", body: file })
-            .then(function (r) { if (!r.ok) throw new Error("upload failed (" + r.status + ")"); })
+          setProgress(0, "Starting upload\\u2026", false);
+          putFile(file)
             .then(function () {
+              stage = "finalize";
+              setStatus("Finalizing " + file.name + "\\u2026");
+              setProgress(100, "Finalizing\\u2026", false);
               return fetch(d.complete_url, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ name: file.name, mime_type: file.type || "application/octet-stream" }),
               });
             })
-            .then(function (r) { if (!r.ok) throw new Error("finalize failed (" + r.status + ")"); return r.json(); })
+            .then(function (r) {
+              return readJsonOrText(r).then(function (res) {
+                if (!res.ok) throw explainUploadFailure("finalize", res.status, res.contentType, res.text, file);
+                return res.data || JSON.parse(res.text || "{}");
+              });
+            })
             .then(function (f) {
+              locked = true;
               setStatus("Uploaded " + f.name + " (" + f.size + " bytes)", "done");
+              setProgress(100, "Complete", false);
               emit("upload-complete", { file_id: d.file_id, name: f.name, size: f.size });
             })
-            .catch(function (err) { setStatus(String(err && err.message || err), "err"); });
+            .catch(function (err) {
+              if (!err || err.retry === undefined) err = explainUploadFailure(stage, 0, "", String(err && err.message || err || ""), file);
+              var message = String(err && err.message || err || "Upload failed. Request a fresh upload link and try again.");
+              setStatus(message, "err");
+              setProgress(100, "Failed", false);
+              locked = !!(err && err.retry === false);
+              setControls(err && err.retry === false ? false : true);
+            })
+            .then(function () {
+              busy = false;
+              if (!locked && !pick.disabled) setControls(true);
+            });
         }
-        document.getElementById("pick").addEventListener("click", function () { input.click(); });
+        resetProgress();
+        pick.addEventListener("click", function () { if (!busy && !locked) input.click(); });
+        input.addEventListener("click", function () { input.value = ""; });
         input.addEventListener("change", function () { if (input.files[0]) upload(input.files[0]); });
         ["dragover", "dragenter"].forEach(function (ev) {
           zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add("over"); });
@@ -274,7 +432,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove("over"); });
         });
         zone.addEventListener("drop", function (e) {
-          if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+          if (!busy && !locked && e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
         });
       });
     `,

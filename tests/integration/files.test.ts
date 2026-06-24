@@ -8,6 +8,7 @@ import { request } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { sweepOrphans } from "../../src/core/files.js";
+import { UPLOAD_ERROR_JS } from "../../src/widgets/registry.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
@@ -146,14 +147,16 @@ describeEachAdapter("files", (adapter) => {
     const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "big.bin" }))
       .body;
     const tooBig = new Uint8Array(2048);
-    expect((await fetch(requested.upload_url, { method: "PUT", body: tooBig })).status).toBe(400);
+    // Oversized bytes are 413 Payload Too Large; the rejected PUT never stored
+    // anything, so completing then fails with 400 (no uploaded bytes).
+    expect((await fetch(requested.upload_url, { method: "PUT", body: tooBig })).status).toBe(413);
     expect((await alice.post(`/v1/files/${requested.file_id}/complete`, {})).status).toBe(400);
-    // Declared-size pre-check rejects at request time too.
+    // Declared-size pre-check rejects at request time too — also 413.
     const declared = await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, {
       name: "big.bin",
       size: 999999,
     });
-    expect(declared.status).toBe(400);
+    expect(declared.status).toBe(413);
   });
 
   it("accepts chunked uploads without content-length when under the configured max", async () => {
@@ -176,9 +179,9 @@ describeEachAdapter("files", (adapter) => {
     const put = await rawPut(requested.upload_url, [new Uint8Array(768), new Uint8Array(257)], {
       "transfer-encoding": "chunked",
     });
-    expect(put.status).toBe(400);
+    expect(put.status).toBe(413);
     expect(put.body.error).toEqual({
-      code: "invalid_request",
+      code: "payload_too_large",
       message: "file exceeds the maximum size of 1024 bytes",
     });
 
@@ -219,7 +222,11 @@ describeEachAdapter("files", (adapter) => {
         name: "x.zip",
         mime_type: "application/zip",
       });
-      expect(badZip.status).toBe(400);
+      expect(badZip.status).toBe(415);
+      expect(badZip.body.error).toMatchObject({
+        code: "unsupported_media_type",
+        details: { allowed: ["image/*", "text/plain"] },
+      });
     } finally {
       await restricted.stop();
     }
@@ -341,5 +348,82 @@ describeEachAdapter("files", (adapter) => {
       expect((await bobRest.get(`/v1/files/${fileId}/link`)).status).toBe(200);
       expect((await bobRest.delete(`/v1/files/${fileId}`)).status).toBe(403);
     }
+  });
+});
+
+/**
+ * The upload-dropzone's friendly errors are pinned to the HTTP status contract,
+ * not to server message text: real REST rejections are fed through the exact
+ * classifier the widget ships (UPLOAD_ERROR_JS). If the server stopped returning
+ * 413/415 — or the widget stopped keying on them — these break, which is the
+ * coupling that message-text matching left untested.
+ */
+describe("upload-dropzone error classification (server contract ↔ widget)", () => {
+  const explainUploadFailure = new Function(UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
+    stage: string,
+    status: number,
+    contentType: string,
+    body: string,
+    file: { name?: string; type?: string; size?: number },
+  ) => { message: string; retry: boolean };
+
+  let app: TestApp;
+  let user: ApiClient;
+  let bundleId: string;
+
+  beforeAll(async () => {
+    app = await bootTestApp({ YAP_MAX_FILE_SIZE_BYTES: "1024", YAP_MIME_ALLOWLIST: "image/*, text/plain" });
+    const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+    const u = await sysadmin.post("/v1/users", { name: "U" });
+    user = apiClient(app.baseUrl, u.body.initialKey.key);
+    const sid = (await user.post("/v1/spaces", { name: "S" })).body.id;
+    bundleId = (await user.post(`/v1/spaces/${sid}/bundles`, { name: "b" })).body.id;
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  const readRaw = async (res: Response) => ({
+    status: res.status,
+    contentType: res.headers.get("content-type") || "",
+    body: await res.text(),
+  });
+
+  it("turns a real 413 from the upload PUT into a retryable 'too large' message", async () => {
+    const requested = (await user.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "big.bin" })).body;
+    const res = await readRaw(await fetch(requested.upload_url, { method: "PUT", body: new Uint8Array(2048) }));
+    expect(res.status).toBe(413);
+    const explained = explainUploadFailure("upload", res.status, res.contentType, res.body, {
+      name: "big.bin",
+      size: 2048,
+    });
+    expect(explained.message).toContain("The selected file is too large.");
+    expect(explained.message).toContain("Selected file size: 2.0 KB.");
+    // An upload-stage size rejection never consumes the single-use link, so the
+    // same link can still take a smaller file — the picker is re-offered.
+    expect(explained.retry).toBe(true);
+  });
+
+  it("turns a real 415 from finalize into a terminal 'type not accepted' message", async () => {
+    const requested = (await user.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "note.txt" })).body;
+    expect((await fetch(requested.upload_url, { method: "PUT", body: "hello" })).status).toBe(200);
+    const res = await readRaw(
+      await fetch(requested.complete_url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "note.txt", mime_type: "application/zip" }),
+      }),
+    );
+    expect(res.status).toBe(415);
+    const explained = explainUploadFailure("finalize", res.status, res.contentType, res.body, {
+      name: "note.txt",
+      type: "application/zip",
+    });
+    expect(explained.message).toContain("The selected file type is not accepted (application/zip).");
+    expect(explained.message).toContain("Accepted types: image/*, text/plain.");
+    expect(explained.message).toContain("Request a fresh upload link to choose another file.");
+    // Bytes already uploaded and the link is spent; no in-place retry.
+    expect(explained.retry).toBe(false);
   });
 });
