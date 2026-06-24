@@ -15,7 +15,7 @@ import { z } from "zod";
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
-import { YapError, invalid, unauthorized } from "../core/errors.js";
+import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
@@ -74,7 +74,7 @@ function parseContentLength(c: Context, maxBytes: number): number | undefined {
     throw invalid("invalid content-length header");
   }
   if (parsed > maxBytes) {
-    throw invalid(`file exceeds the maximum size of ${maxBytes} bytes`);
+    throw tooLarge(`file exceeds the maximum size of ${maxBytes} bytes`);
   }
   return parsed;
 }
@@ -100,7 +100,7 @@ async function readBoundedBody(c: Context, maxBytes: number): Promise<Uint8Array
     const nextTotal = total + chunk.byteLength;
     if (nextTotal > maxBytes) {
       await body.cancel().catch(() => {});
-      throw invalid(`file exceeds the maximum size of ${maxBytes} bytes`);
+      throw tooLarge(`file exceeds the maximum size of ${maxBytes} bytes`);
     }
     chunks.push(chunk);
     total = nextTotal;

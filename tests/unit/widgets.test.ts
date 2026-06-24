@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { TOOL_RESULT_UNWRAP_JS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -77,16 +77,13 @@ describe("widgetHtml", () => {
     expect(render).not.toContain("finalize failed (");
   });
 
-  it("the upload-dropzone explains common upload failures with friendly copy", () => {
+  it("the upload-dropzone render wires the shared failure classifier", () => {
+    // The widget must call the exact classifier we unit-test below, not a private copy.
     const render = WIDGETS["upload-dropzone"]!.render;
-    expect(render).toContain("This upload link has expired or is no longer valid");
-    expect(render).toContain("The selected file is too large");
-    expect(render).toContain("The selected file type is not accepted");
-    expect(render).toContain("Request a fresh upload link and try again");
-    expect(render).toContain("Request a fresh upload link to choose another file.");
-    expect(render).toContain('retry: stage !== "finalize"');
+    expect(render).toContain("function explainUploadFailure(");
+    expect(render).toContain('explainUploadFailure("upload"');
+    expect(render).toContain('explainUploadFailure("finalize"');
   });
-
   it("embeds the media-card expired state in origin HTML", () => {
     const html = widgetHtml("media-card", "origin", {
       kind: "image",
@@ -104,6 +101,75 @@ describe("widgetHtml", () => {
     expect(safeUrl("https://example.com/a")).toBe("https://example.com/a");
     expect(safeUrl("javascript:alert(1)")).toBe("#");
     expect(safeUrl("data:text/html,<script>")).toBe("#");
+  });
+});
+
+describe("upload-dropzone: failure classification", () => {
+  // Evaluate the exact source the widget embeds, so the test tracks shipped code.
+  const explain = new Function(UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
+    stage: string,
+    status: number,
+    contentType: string,
+    body: string,
+    file: { name?: string; type?: string; size?: number },
+  ) => { message: string; retry: boolean };
+
+  const json = (code: string, details?: unknown) =>
+    JSON.stringify({ error: { code, ...(details ? { details } : {}) } });
+
+  it("classifies by HTTP status, not message text", () => {
+    // A plain 400 whose message *mentions* size/type must NOT be treated as
+    // 413/415 — otherwise rewording a server message would silently reclassify.
+    const r = explain(
+      "upload",
+      400,
+      "application/json",
+      JSON.stringify({ error: { code: "invalid_request", message: "file too large, mime type not allowed" } }),
+      { name: "x.bin", size: 9 },
+    );
+    expect(r.message).toBe("Upload failed. Request a fresh upload link and try again.");
+    expect(r.retry).toBe(true);
+  });
+
+  it("413 at the upload stage is a retryable 'too large' (link not yet consumed)", () => {
+    const r = explain("upload", 413, "application/json", json("payload_too_large"), { name: "big.bin", size: 2048 });
+    expect(r.message).toContain("The selected file is too large.");
+    expect(r.message).toContain("Selected file size: 2.0 KB.");
+    expect(r.message).not.toContain("fresh upload link");
+    expect(r.retry).toBe(true);
+  });
+
+  it("413 at finalize is terminal and asks for a fresh link", () => {
+    const r = explain("finalize", 413, "application/json", json("payload_too_large"), { name: "big.bin", size: 2048 });
+    expect(r.message).toContain("Request a fresh upload link to choose another file.");
+    expect(r.retry).toBe(false);
+  });
+
+  it("415 names the rejected type and lists the accepted ones from details", () => {
+    const r = explain("finalize", 415, "application/json", json("unsupported_media_type", { allowed: ["image/*", "text/plain"] }), {
+      name: "x.zip",
+      type: "application/zip",
+    });
+    expect(r.message).toContain("The selected file type is not accepted (application/zip).");
+    expect(r.message).toContain("Accepted types: image/*, text/plain.");
+    expect(r.retry).toBe(false);
+  });
+
+  it("401/403 mean an expired or rejected link; 409 means already used — all terminal", () => {
+    for (const status of [401, 403]) {
+      const r = explain("upload", status, "", "", { name: "x" });
+      expect(r.message).toContain("This upload link has expired or is no longer valid");
+      expect(r.retry).toBe(false);
+    }
+    const conflict = explain("upload", 409, "application/json", json("conflict"), { name: "x" });
+    expect(conflict.message).toContain("This upload link has already been used");
+    expect(conflict.retry).toBe(false);
+  });
+
+  it("an unclassified finalize failure is terminal; an unclassified upload failure retries", () => {
+    expect(explain("finalize", 500, "", "", { name: "x" }).retry).toBe(false);
+    expect(explain("finalize", 500, "", "", { name: "x" }).message).toContain("could not be finalized");
+    expect(explain("upload", 500, "", "", { name: "x" }).retry).toBe(true);
   });
 });
 
