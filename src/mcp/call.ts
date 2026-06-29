@@ -144,7 +144,7 @@ export const secondTier: Record<string, SecondTierTool> = {
       'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction}), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
     capability: "read_items",
     params: {
-      item_type: { aliases: ["itemType"] },
+      item_type: { required: true, aliases: ["itemType"] },
       filters: {},
       sort: {},
       cursor: {},
@@ -173,10 +173,10 @@ export const secondTier: Record<string, SecondTierTool> = {
     description:
       'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}].',
     capability: "edit_items",
-    params: { item_type: { aliases: ["itemType"] }, items: { required: true } },
+    params: { item_type: { required: true, aliases: ["itemType"] }, items: { required: true } },
     handler: async (env, params) => ({
       result: await itemsCore.createItems(env.db, env.userId, env.bundleId, {
-        itemType: String(params.item_type ?? ""),
+        itemType: String(params.item_type),
         items: params.items as Record<string, unknown>[],
       }),
     }),

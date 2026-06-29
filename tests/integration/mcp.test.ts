@@ -303,6 +303,17 @@ describeEachAdapter("MCP surface", (adapter) => {
       );
     });
 
+    it("rejects conflicting canonical and alias params", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "get_doc", params: { doc: "instructions", id: "other" } }],
+      });
+
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.code).toBe("invalid_request");
+      expect(result.results[0].error.message).toContain("conflicting params for 'doc'");
+    });
+
     it("rejects unknown second-tier params by name", async () => {
       const result = await alice.call("call", {
         space_id: spaceId,
@@ -319,6 +330,7 @@ describeEachAdapter("MCP surface", (adapter) => {
         space_id: spaceId,
         calls: [
           { bundle_id: todosBundleId, tool: "get_items" },
+          { bundle_id: todosBundleId, tool: "query_items", params: { filters: [] } },
           { bundle_id: todosBundleId, tool: "list_files", params: { extra: true } },
         ],
       });
@@ -328,7 +340,10 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(result.results[0].error.message).toContain("missing required param 'ids'");
       expect(result.results[1].ok).toBe(false);
       expect(result.results[1].error.code).toBe("invalid_request");
-      expect(result.results[1].error.message).toContain("unknown param 'extra'");
+      expect(result.results[1].error.message).toContain("missing required param 'item_type'");
+      expect(result.results[2].ok).toBe(false);
+      expect(result.results[2].error.code).toBe("invalid_request");
+      expect(result.results[2].error.message).toContain("unknown param 'extra'");
     });
 
     it("gates per-capability: a user with read but not edit can query, not write", async () => {
