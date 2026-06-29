@@ -269,6 +269,68 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(gone.results[0].error.code).toBe("not_found");
     });
 
+    it("rejects missing required second-tier params with received keys", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "update_doc", params: { content: "x" } }],
+      });
+
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.code).toBe("invalid_request");
+      expect(result.results[0].error.message).toContain("missing required param 'doc'");
+      expect(result.results[0].error.message).toContain("received keys: [content]");
+    });
+
+    it("keeps provided but nonexistent doc lookups as not_found", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "get_doc", params: { doc: "does-not-exist" } }],
+      });
+
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.code).toBe("not_found");
+    });
+
+    it("accepts id as a bundle-doc lookup alias", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "get_doc", params: { id: "instructions" } }],
+      });
+
+      expect(result.results[0].ok).toBe(true);
+      expect(result.results[0].result).toEqual(
+        expect.objectContaining({ name: "instructions", content: expect.stringContaining("Always set it") }),
+      );
+    });
+
+    it("rejects unknown second-tier params by name", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: todosBundleId, tool: "get_doc", params: { doc: "instructions", unexpected: true } }],
+      });
+
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.code).toBe("invalid_request");
+      expect(result.results[0].error.message).toContain("unknown param 'unexpected'");
+    });
+
+    it("applies catalog validation beyond doc tools", async () => {
+      const result = await alice.call("call", {
+        space_id: spaceId,
+        calls: [
+          { bundle_id: todosBundleId, tool: "get_items" },
+          { bundle_id: todosBundleId, tool: "list_files", params: { extra: true } },
+        ],
+      });
+
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.code).toBe("invalid_request");
+      expect(result.results[0].error.message).toContain("missing required param 'ids'");
+      expect(result.results[1].ok).toBe(false);
+      expect(result.results[1].error.code).toBe("invalid_request");
+      expect(result.results[1].error.message).toContain("unknown param 'extra'");
+    });
+
     it("gates per-capability: a user with read but not edit can query, not write", async () => {
       await aliceRest.post(`/v1/bundles/${todosBundleId}/grants`, {
         userId: bobId,
