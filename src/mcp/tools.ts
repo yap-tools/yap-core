@@ -1,7 +1,7 @@
 /**
  * The top-level MCP surface: a small, fixed tool set built around progressive
- * disclosure — load → load_space → load_bundle → call — plus authoring
- * (space_create, bundle_create), identity, help, and the five user-doc tools.
+ * disclosure — load → load_space → load_bundle → get_tools → call — plus
+ * authoring (space_create, bundle_create), identity, help, and user-doc tools.
  * Every tool is a thin adapter over the core; capability gates live in the core.
  */
 import { UserError } from "fastmcp";
@@ -74,7 +74,14 @@ async function drainPages<T>(
   return { items, truncated: false };
 }
 
-const SECOND_TIER_SPECS = Object.fromEntries(
+const secondTierNames = Object.keys(secondTier);
+
+function summaryFromDescription(description: string): string {
+  const sentenceEnd = description.indexOf(". ");
+  return sentenceEnd === -1 ? description : description.slice(0, sentenceEnd + 1);
+}
+
+const SECOND_TIER_FULL_SPECS = Object.fromEntries(
   Object.entries(secondTier).map(([name, tool]) => [
     name,
     {
@@ -82,6 +89,17 @@ const SECOND_TIER_SPECS = Object.fromEntries(
       capability: tool.capability,
       targets: tool.targets ?? ["bundle"],
       params: tool.params ?? {},
+    },
+  ]),
+);
+
+const SECOND_TIER_MANIFEST = Object.fromEntries(
+  Object.entries(secondTier).map(([name, tool]) => [
+    name,
+    {
+      summary: summaryFromDescription(tool.description),
+      capability: tool.capability,
+      targets: tool.targets ?? ["bundle"],
     },
   ]),
 );
@@ -205,7 +223,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load",
     description:
-      "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or hooks, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → call. Run the chain silently — do not narrate loading calls.",
+      "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or hooks, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → get_tools if you need full second-tier params → call. Run the chain silently — do not narrate loading calls.",
     annotations: { readOnlyHint: true, title: "Load context" },
     execute: async (_args, ctx) => {
       try {
@@ -246,7 +264,12 @@ export function registerMcpTools(server: YapServer): void {
             load_space: "Load a space's context, instructions, and bundles. Params: space_id.",
             load_bundle:
               "Load bundles' docs, item-type schemas, files, and hooks. Required before call. Params: bundle_ids.",
-            call: { description: "Execute second-tier operations against bundles.", second_tier: SECOND_TIER_SPECS },
+            get_tools: "Return the second-tier manifest, or full second-tier descriptions and params by name. Params: names?.",
+            call: {
+              description:
+                "Execute second-tier operations against bundles. Use get_tools for full second-tier parameter specs.",
+              second_tier: SECOND_TIER_MANIFEST,
+            },
           },
         });
       } catch (err) {
@@ -368,6 +391,35 @@ export function registerMcpTools(server: YapServer): void {
   });
 
   addTool({
+    name: "get_tools",
+    description:
+      "Describe second-tier tools dispatched through call. Omit names to get the lightweight manifest; pass names to get full descriptions and parameter specs for only those second-tier tools.",
+    parameters: z.object({ names: z.array(z.string()).min(1).optional() }),
+    annotations: { readOnlyHint: true, title: "Get tools" },
+    execute: async (args) => {
+      try {
+        if (!args.names) {
+          return asJson({ second_tier: SECOND_TIER_MANIFEST });
+        }
+
+        const unknown = args.names.filter((name) => !(name in secondTier));
+        if (unknown.length > 0) {
+          throw new YapError(
+            "invalid_request",
+            `unknown second-tier tool name(s): ${unknown.join(", ")}. Available second-tier tools: ${secondTierNames.join(", ")}`,
+          );
+        }
+
+        return asJson({
+          second_tier: Object.fromEntries(args.names.map((name) => [name, SECOND_TIER_FULL_SPECS[name]])),
+        });
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
+  addTool({
     name: "help",
     description:
       "Reference documentation for core Yap concepts (spaces, bundles, items, hooks, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
@@ -395,7 +447,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "call",
     description:
-      `The single execution verb: a batch of second-tier operations in one round trip. You MUST call load_bundle on a bundle before calling into it — its docs and schemas are needed to call correctly. Each call names a tool, its params, and a target — a bundle (provide bundle_id) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Every tool is gated by the capability in its spec (returned by load) — check it against your role before calling; on a denial, tell the user which capability they lack rather than retrying. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items". Second-tier tools: ${Object.keys(secondTier).join(", ")}.`,
+      `The single execution verb: a batch of second-tier operations in one round trip. You MUST call load_bundle on a bundle before calling into it — its docs and schemas are needed to call correctly. Use get_tools(names) when you need full second-tier descriptions or parameter specs; load only carries the lightweight manifest. Each call names a tool, its params, and a target — a bundle (provide bundle_id) or the call's space (omit bundle_id, for space-scoped tools like update_space and grants). Calls succeed or fail independently (no cross-call rollback). Every tool is gated by the capability in its spec — check it against your role before calling; on a denial, tell the user which capability they lack rather than retrying. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items". Second-tier tools: ${secondTierNames.join(", ")}.`,
     parameters: callSchema,
     _meta: callMeta,
     execute: async (args, ctx) => {
