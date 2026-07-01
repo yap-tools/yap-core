@@ -77,7 +77,12 @@ async function drainPages<T>(
 const SECOND_TIER_SPECS = Object.fromEntries(
   Object.entries(secondTier).map(([name, tool]) => [
     name,
-    { description: tool.description, capability: tool.capability, targets: tool.targets ?? ["bundle"] },
+    {
+      description: tool.description,
+      capability: tool.capability,
+      targets: tool.targets ?? ["bundle"],
+      params: tool.params ?? {},
+    },
   ]),
 );
 

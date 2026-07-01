@@ -65,7 +65,7 @@ Schemas are freely mutable (EAV): renames touch no values, removals drop values,
 
 Ops are applied sequentially; if any fails, the entire update is rejected.
 
-**MCP-only doc tools** (via `call`): `get_doc {doc}` — read a single bundle doc by name or id. `patch_doc {doc, edits}` — surgical edits on a bundle doc. First-tier: `get_user_doc {id}`, `patch_user_doc {id, edits}`.
+**MCP-only doc tools** (via `call`): `get_doc {id}` — read a single bundle doc by name or id. `patch_doc {id, edits}` — surgical edits on a bundle doc. First-tier: `get_user_doc {id}`, `patch_user_doc {id, edits}`.
 
 Query parameters: `itemType` (required unless `ids=`; use the exact name from the item-types listing), `filters` (URL-encoded JSON array), `sort=<property>`, `direction=asc|desc`, `cursor`, `limit`.
 

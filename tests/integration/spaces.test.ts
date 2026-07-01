@@ -144,7 +144,7 @@ describeEachAdapter("spaces & grants", (adapter) => {
     it("deleting a grant row removes it (single capability per row)", async () => {
       const grant = await alice.post(`/v1/spaces/${spaceId}/grants`, {
         userId: bobId,
-        capability: "fire_hooks",
+        capabilities: "fire_hooks",
         effect: "allow",
       });
       const grantId = grant.body.data[0].id;
@@ -156,7 +156,7 @@ describeEachAdapter("spaces & grants", (adapter) => {
     it("authorizes grant deletion before checking existence (no existence oracle)", async () => {
       const grant = await alice.post(`/v1/spaces/${spaceId}/grants`, {
         userId: bobId,
-        capability: "read_files",
+        capabilities: "read_files",
         effect: "allow",
       });
       const realGrantId = grant.body.data[0].id;

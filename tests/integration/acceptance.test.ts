@@ -185,7 +185,7 @@ describeEachAdapter("acceptance", (adapter) => {
     const fire = async (bundleId: string, hook: string) => {
       const res = await agent.call("call", {
         space_id: workSpaceId,
-        calls: [{ bundle_id: bundleId, tool: "fire_hook", params: { hook } }],
+        calls: [{ bundle_id: bundleId, tool: "fire_hook", params: { id: hook } }],
       });
       return res.results[0];
     };
