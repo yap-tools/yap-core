@@ -83,6 +83,7 @@ describeEachAdapter("MCP surface", (adapter) => {
     expect(names).toContain("whoami");
     expect(names).toContain("load_space");
     expect(names).toContain("load_bundle");
+    expect(names).toContain("get_tools");
     expect(names).toContain("help");
     expect(names).toContain("call");
     expect(names).toContain("space_create");
@@ -121,6 +122,56 @@ describeEachAdapter("MCP surface", (adapter) => {
       expect(result.spaces.some((s: any) => s.personal)).toBe(true);
       expect(result.world.time.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(result.tools.call.second_tier.query_items.capability).toBe("read_items");
+      expect(result.tools.get_tools).toBeTruthy();
+
+      const manifestEntry = result.tools.call.second_tier.query_items;
+      expect(manifestEntry.targets).toContain("bundle");
+      expect(manifestEntry.summary).toBeTruthy();
+      expect(manifestEntry.params).toBeUndefined();
+      expect(manifestEntry.description).toBeUndefined();
+    });
+
+    it("get_tools returns named full second-tier specs", async () => {
+      const result = await alice.call("get_tools", { names: ["query_items", "get_doc"] });
+
+      expect(Object.keys(result.second_tier)).toEqual(["query_items", "get_doc"]);
+      expect(result.second_tier.create_items).toBeUndefined();
+
+      expect(result.second_tier.query_items.description).toContain("Filtered, sorted, paginated");
+      expect(result.second_tier.query_items.capability).toBe("read_items");
+      expect(result.second_tier.query_items.targets).toContain("bundle");
+      expect(result.second_tier.query_items.params.item_type.required).toBe(true);
+
+      expect(result.second_tier.get_doc.description).toContain("Read a single bundle doc");
+      expect(result.second_tier.get_doc.capability).toBe("(bundle read access)");
+      expect(result.second_tier.get_doc.targets).toContain("bundle");
+      expect(result.second_tier.get_doc.params.id.required).toBe(true);
+    });
+
+    it("get_tools without names returns the second-tier manifest", async () => {
+      const result = await alice.call("get_tools");
+      const manifestEntry = result.second_tier.query_items;
+
+      expect(manifestEntry.summary).toBeTruthy();
+      expect(manifestEntry.capability).toBe("read_items");
+      expect(manifestEntry.targets).toContain("bundle");
+      expect(manifestEntry.params).toBeUndefined();
+      expect(manifestEntry.description).toBeUndefined();
+    });
+
+    it("get_tools rejects unknown names with the available catalog", async () => {
+      await expect(alice.call("get_tools", { names: ["explode"] })).rejects.toThrow(/unknown.*explode/);
+      await expect(alice.call("get_tools", { names: ["explode"] })).rejects.toThrow(/query_items/);
+    });
+
+    it("keeps the load second-tier manifest materially smaller than full specs", async () => {
+      const loaded = await alice.call("load");
+      const names = Object.keys(loaded.tools.call.second_tier);
+      const full = await alice.call("get_tools", { names });
+
+      expect(JSON.stringify(loaded.tools.call.second_tier).length).toBeLessThan(
+        JSON.stringify(full.second_tier).length * 0.6,
+      );
     });
 
     it("load_space returns context and bundle metadata", async () => {
