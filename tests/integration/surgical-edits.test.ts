@@ -214,7 +214,7 @@ describeEachAdapter("surgical text edits", (adapter) => {
           {
             bundle_id: bundleId,
             tool: "patch_doc",
-            params: { doc: docId, edits: [{ op: "search_replace", search: "old", replace: "new" }] },
+            params: { id: docId, edits: [{ op: "search_replace", search: "old", replace: "new" }] },
           },
         ],
       });
@@ -231,7 +231,7 @@ describeEachAdapter("surgical text edits", (adapter) => {
             bundle_id: bundleId,
             tool: "patch_doc",
             params: {
-              doc: docId,
+              id: docId,
               edits: [
                 { op: "append", content: " world" },
                 { op: "search_replace", search: "MISSING", replace: "x" },

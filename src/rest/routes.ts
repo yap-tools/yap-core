@@ -328,18 +328,13 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Grants (space-level; bundle-level registered with bundles) -----------
 
+  // One canonical field: a capability name or an array of them; a scalar is
+  // normalized to a single-element array (core rejects an empty list).
   const grantSchema = z.object({
     userId: z.string(),
-    capability: z.string().optional(),
-    capabilities: z.array(z.string()).optional(),
+    capabilities: z.union([z.string(), z.array(z.string())]).transform((v) => (Array.isArray(v) ? v : [v])),
     effect: z.enum(["allow", "deny"]),
   });
-
-  function grantCapabilities(body: z.infer<typeof grantSchema>): string[] {
-    const caps = body.capabilities ?? (body.capability ? [body.capability] : []);
-    if (caps.length === 0) throw invalid("capability or capabilities is required");
-    return caps;
-  }
 
   app.post(
     "/v1/spaces/:id/grants",
@@ -349,7 +344,7 @@ export function registerRestRoutes(server: YapServer): void {
       const target = await grantsCore.spaceGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
         userId: body.userId,
-        capabilities: grantCapabilities(body),
+        capabilities: body.capabilities,
         effect: body.effect,
       });
       return c.json({ data: rows }, 201);
@@ -383,7 +378,7 @@ export function registerRestRoutes(server: YapServer): void {
       const target = await bundlesCore.bundleGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
         userId: body.userId,
-        capabilities: grantCapabilities(body),
+        capabilities: body.capabilities,
         effect: body.effect,
       });
       return c.json({ data: rows }, 201);

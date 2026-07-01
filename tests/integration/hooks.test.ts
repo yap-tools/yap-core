@@ -241,7 +241,7 @@ describeEachAdapter("hooks", (adapter) => {
     it("slots allowlisted params into the hidden template and returns the raw result", async () => {
       received.length = 0;
       const result = await fireViaMcp(aliceMcp, bundleId, {
-        hook: "notify",
+        id: "notify",
         params: { message: "deploy finished", channel: "ops" },
       });
       expect(result.ok).toBe(true);
@@ -259,7 +259,7 @@ describeEachAdapter("hooks", (adapter) => {
     it("URL-encodes parameter values substituted into the URL", async () => {
       received.length = 0;
       await fireViaMcp(aliceMcp, bundleId, {
-        hook: "notify",
+        id: "notify",
         params: { message: "x", channel: "a b&c=d" },
       });
       expect(received[0]!.url).toBe("/notify?channel=a%20b%26c%3Dd");
@@ -277,7 +277,7 @@ describeEachAdapter("hooks", (adapter) => {
       });
       received.length = 0;
       const tricky = 'say "hi"\n\tand a \\ backslash';
-      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json", params: { message: tricky } });
+      const result = await fireViaMcp(aliceMcp, bundleId, { id: "notify-json", params: { message: tricky } });
       expect(result.ok).toBe(true);
       expect(received).toHaveLength(1);
       // Valid JSON whose value round-trips exactly, despite quotes/newline/backslash.
@@ -298,7 +298,7 @@ describeEachAdapter("hooks", (adapter) => {
       });
       received.length = 0;
       const attack = '", "admin": true, "x": "';
-      await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json-inject", params: { message: attack } });
+      await fireViaMcp(aliceMcp, bundleId, { id: "notify-json-inject", params: { message: attack } });
       const parsed = JSON.parse(received[0]!.body);
       expect(Object.keys(parsed)).toEqual(["text"]); // no injected field
       expect(parsed.text).toBe(attack); // the whole value landed as one string
@@ -317,7 +317,7 @@ describeEachAdapter("hooks", (adapter) => {
         },
       });
       received.length = 0;
-      await fireViaMcp(aliceMcp, bundleId, { hook: "notify-json-ct", params: { message: "x" } });
+      await fireViaMcp(aliceMcp, bundleId, { id: "notify-json-ct", params: { message: "x" } });
       expect(received[0]!.headers["content-type"]).toBe("application/json; charset=utf-8");
     });
 
@@ -334,7 +334,7 @@ describeEachAdapter("hooks", (adapter) => {
       });
       received.length = 0;
       const result = await fireViaMcp(aliceMcp, bundleId, {
-        hook: "header-inject",
+        id: "header-inject",
         params: { tag: "good\r\nx-injected: evil" },
       });
       expect(result.ok).toBe(false);
@@ -344,7 +344,7 @@ describeEachAdapter("hooks", (adapter) => {
 
     it("rejects undeclared parameters (allowlisting is the safety hinge)", async () => {
       const result = await fireViaMcp(aliceMcp, bundleId, {
-        hook: "notify",
+        id: "notify",
         params: { message: "x", url: "http://evil.example" },
       });
       expect(result.ok).toBe(false);
@@ -352,7 +352,7 @@ describeEachAdapter("hooks", (adapter) => {
     });
 
     it("rejects missing required parameters", async () => {
-      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "notify", params: { channel: "ops" } });
+      const result = await fireViaMcp(aliceMcp, bundleId, { id: "notify", params: { channel: "ops" } });
       expect(result.ok).toBe(false);
       expect(result.error.message).toContain('required hook parameter "message"');
     });
@@ -362,7 +362,7 @@ describeEachAdapter("hooks", (adapter) => {
       const result = await fireViaMcp(aliceMcp, bundleId, { params: { message: "x" } });
       expect(result.ok).toBe(false);
       expect(result.error.code).toBe("invalid_request");
-      expect(result.error.message).toMatch(/params\.hook|no hook specified/i);
+      expect(result.error.message).toMatch(/params\.id|no hook specified/i);
     });
 
     it("fires by the hook id that load_bundle now returns (not just by name)", async () => {
@@ -371,7 +371,7 @@ describeEachAdapter("hooks", (adapter) => {
       expect(notify.id).toBeTruthy();
       received.length = 0;
       const result = await fireViaMcp(aliceMcp, bundleId, {
-        hook: notify.id,
+        id: notify.id,
         params: { message: "by id", channel: "ops" },
       });
       expect(result.ok).toBe(true);
@@ -384,7 +384,7 @@ describeEachAdapter("hooks", (adapter) => {
         name: "failing",
         transport: { url: `http://127.0.0.1:${targetPort}/fail`, method: "GET" },
       });
-      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "failing" });
+      const result = await fireViaMcp(aliceMcp, bundleId, { id: "failing" });
       expect(result.ok).toBe(true); // the call succeeded; the upstream status is data
       expect(result.result.status).toBe(502);
       expect(result.result.body).toBe("upstream exploded");
@@ -396,7 +396,7 @@ describeEachAdapter("hooks", (adapter) => {
         transport: { url: `http://127.0.0.1:${targetPort}/slow`, method: "GET" },
       });
       received.length = 0;
-      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "slow" });
+      const result = await fireViaMcp(aliceMcp, bundleId, { id: "slow" });
       expect(result.ok).toBe(false);
       expect(result.error.message).toMatch(/timed out after 700ms/);
       expect(received).toHaveLength(1); // exactly one attempt — no retries
@@ -419,7 +419,7 @@ describeEachAdapter("hooks", (adapter) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
-      const result = await fireViaMcp(aliceMcp, bundleId, { hook: "rebound" });
+      const result = await fireViaMcp(aliceMcp, bundleId, { id: "rebound" });
       expect(result.ok).toBe(false);
       expect(result.error.message).toMatch(/blocked by the SSRF guard/);
       // The hidden destination (host/IP) must never reach the firing agent.
@@ -466,7 +466,7 @@ describeEachAdapter("hooks", (adapter) => {
         effect: "deny",
       });
       const bobMcp = await connectMcp(app.baseUrl, bobKey);
-      const blocked = await fireViaMcp(bobMcp, bundleId, { hook: "notify", params: { message: "x" } });
+      const blocked = await fireViaMcp(bobMcp, bundleId, { id: "notify", params: { message: "x" } });
       expect(blocked.ok).toBe(false);
       expect(blocked.error.code).toBe("forbidden");
       // The deciding row is identifiable for the deny…
@@ -476,7 +476,7 @@ describeEachAdapter("hooks", (adapter) => {
         effect: "deny",
       });
       // …and the sibling fires fine under the space baseline.
-      const allowed = await fireViaMcp(bobMcp, siblingBundleId, { hook: "sibling-hook" });
+      const allowed = await fireViaMcp(bobMcp, siblingBundleId, { id: "sibling-hook" });
       expect(allowed.ok).toBe(true);
       expect(allowed.result.status).toBe(200);
       await bobMcp.close();

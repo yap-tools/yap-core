@@ -81,12 +81,7 @@ const SECOND_TIER_SPECS = Object.fromEntries(
       description: tool.description,
       capability: tool.capability,
       targets: tool.targets ?? ["bundle"],
-      params: Object.fromEntries(
-        Object.entries(tool.params ?? {}).map(([param, spec]) => [
-          param,
-          { ...(spec.required ? { required: true } : {}), ...(spec.aliases ? { aliases: spec.aliases } : {}) },
-        ]),
-      ),
+      params: tool.params ?? {},
     },
   ]),
 );

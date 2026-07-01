@@ -102,7 +102,7 @@ describeEachAdapter("MCP management parity", (adapter) => {
       const bundleGrant = await one(alice, spaceId, {
         bundle_id: bundleId,
         tool: "grant_role",
-        params: { user_id: bobId, capability: "edit_items", effect: "allow" },
+        params: { user_id: bobId, capabilities: "edit_items", effect: "allow" }, // scalar accepted
       });
       expect(bundleGrant.ok).toBe(true);
 
@@ -114,10 +114,20 @@ describeEachAdapter("MCP management parity", (adapter) => {
       const bundleGrants = await one(alice, spaceId, { bundle_id: bundleId, tool: "list_grants" });
       expect(bundleGrants.result.data.some((g: any) => g.capability === "edit_items")).toBe(true);
 
+      // The pre-collapse singular `capability` param is gone — rejected, with a suggestion.
+      const oldParam = await one(alice, spaceId, {
+        tool: "grant_role",
+        params: { user_id: bobId, capability: "read_items", effect: "allow" },
+      });
+      expect(oldParam.ok).toBe(false);
+      expect(oldParam.error.code).toBe("invalid_request");
+      expect(oldParam.error.message).toContain("unknown param 'capability'");
+      expect(oldParam.error.message).toContain("Did you mean 'capabilities'?");
+
       // Bob (now read_items at space) can query but cannot grant — manage_roles gate.
       const bobTries = await one(bob, spaceId, {
         tool: "grant_role",
-        params: { user_id: bobId, capability: "manage_roles", effect: "allow" },
+        params: { user_id: bobId, capabilities: "manage_roles", effect: "allow" },
       });
       expect(bobTries.ok).toBe(false);
       expect(bobTries.error.details.capability).toBe("manage_roles");
@@ -126,7 +136,7 @@ describeEachAdapter("MCP management parity", (adapter) => {
       const revoke = await one(alice, spaceId, {
         bundle_id: bundleId,
         tool: "revoke_grant",
-        params: { grant_id: bundleGrant.result.data[0].id },
+        params: { id: bundleGrant.result.data[0].id },
       });
       expect(revoke.ok).toBe(true);
     } finally {
