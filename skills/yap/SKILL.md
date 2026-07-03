@@ -31,7 +31,7 @@ claude mcp add --transport http yap http://localhost:8787/mcp \
   --header "Authorization: Bearer <access-key>"
 ```
 
-Tools disclose progressively: `load` → `load_space` → `load_bundle` (required before calling into a bundle) → `call`. Compliant clients can also connect with zero config via OAuth — each instance is its own authorization server.
+Tools disclose progressively: `load` → `load_space` → `load_bundle` (required before calling into a bundle) → `get_tools` (full second-tier descriptions and param specs; `load` carries only a lightweight manifest) → `call`. Compliant clients can also connect with zero config via OAuth — each instance is its own authorization server.
 
 **REST**: every request needs `Authorization: Bearer <access-key>` (header only — no query-string auth on REST). Discover, don't guess:
 

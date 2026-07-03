@@ -402,7 +402,7 @@ export function registerMcpTools(server: YapServer): void {
           return asJson({ second_tier: SECOND_TIER_MANIFEST });
         }
 
-        const unknown = args.names.filter((name) => !(name in secondTier));
+        const unknown = args.names.filter((name) => !Object.hasOwn(secondTier, name));
         if (unknown.length > 0) {
           throw new YapError(
             "invalid_request",

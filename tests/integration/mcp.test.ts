@@ -164,6 +164,11 @@ describeEachAdapter("MCP surface", (adapter) => {
       await expect(alice.call("get_tools", { names: ["explode"] })).rejects.toThrow(/query_items/);
     });
 
+    it("get_tools rejects Object.prototype key names instead of leaking inherited values", async () => {
+      await expect(alice.call("get_tools", { names: ["toString"] })).rejects.toThrow(/unknown.*toString/);
+      await expect(alice.call("get_tools", { names: ["hasOwnProperty", "__proto__"] })).rejects.toThrow(/unknown/);
+    });
+
     it("keeps the load second-tier manifest materially smaller than full specs", async () => {
       const loaded = await alice.call("load");
       const names = Object.keys(loaded.tools.call.second_tier);
