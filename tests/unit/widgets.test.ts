@@ -33,6 +33,7 @@ describe("widgetHtml", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain("document.title = displayName");
     expect(render).toContain('d.kind === "audio" || d.kind === "video"');
+    expect(render).toContain("window.navigator");
     expect(render).toContain("navigator.mediaSession");
     expect(render).toContain("window.MediaMetadata");
     expect(render).toContain("new MediaMetadata({ title: displayName })");

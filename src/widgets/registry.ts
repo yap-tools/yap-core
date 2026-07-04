@@ -467,7 +467,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var sizeNote = size ? '<span class="muted"> \\u00b7 ' + size + " bytes</span>" : "";
         var inner;
         document.title = displayName;
-        if ((d.kind === "audio" || d.kind === "video") && navigator.mediaSession && window.MediaMetadata) {
+        if ((d.kind === "audio" || d.kind === "video") && window.navigator && navigator.mediaSession && window.MediaMetadata) {
           try {
             navigator.mediaSession.metadata = new MediaMetadata({ title: displayName });
           } catch (_e) {}
