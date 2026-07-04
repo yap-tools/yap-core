@@ -460,11 +460,18 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
-        var name = esc(d.name || "file");
+        var displayName = String(d.name || "file");
+        var name = esc(displayName);
         var url = safeUrl(d.url);
         var size = Number(d.size) || 0;
         var sizeNote = size ? '<span class="muted"> \\u00b7 ' + size + " bytes</span>" : "";
         var inner;
+        document.title = displayName;
+        if ((d.kind === "audio" || d.kind === "video") && navigator.mediaSession && window.MediaMetadata) {
+          try {
+            navigator.mediaSession.metadata = new MediaMetadata({ title: displayName });
+          } catch (_e) {}
+        }
         if (d.kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
         else if (d.kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
         else if (d.kind === "video") inner = '<video controls src="' + url + '"></video>';
