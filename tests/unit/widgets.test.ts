@@ -71,6 +71,48 @@ describe("widgetHtml", () => {
     expect(html).toContain("Finalizing");
   });
 
+  it("the upload-dropzone renders as a focused paste target", () => {
+    const html = widgetHtml("upload-dropzone", "origin", {
+      file_id: "f1",
+      upload_url: "https://x/u",
+      complete_url: "https://x/c",
+    });
+    expect(html).toContain('id="zone" tabindex="0"');
+    expect(html).toContain('aria-label="Upload file dropzone"');
+    expect(html).toContain("Drop or paste a file here");
+  });
+
+  it("the upload-dropzone handles pasted images from scoped clipboard events", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain('zone.addEventListener("paste"');
+    expect(render).not.toContain('window.addEventListener("paste"');
+    expect(render).toContain("e.clipboardData");
+    expect(render).toContain("data.items");
+    expect(render).toContain("item.getAsFile()");
+    expect(render).toContain("data.files");
+    expect(render).toContain('item.kind === "file"');
+    expect(render).toContain('String(item.type || "").indexOf("image/") === 0');
+    expect(render).toContain('String(file.type || "").indexOf("image/") === 0');
+    expect(render).toContain("if (!file) return;");
+    expect(render).toContain("e.preventDefault();");
+  });
+
+  it("the upload-dropzone gives pasted clipboard files safe names before reusing upload", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("function imageExtension(type)");
+    expect(render).toContain('if (t === "image/jpeg") return "jpg";');
+    expect(render).toContain("function safeUploadName(file)");
+    expect(render).toContain("pasted-image.");
+    expect(render).toContain("name.length <= 255");
+    expect(render).toContain("new File([file], safeName");
+    expect(render).toContain('type: file.type || "image/png"');
+    expect(render).toContain("upload(withSafeName(file));");
+    expect(render).toContain("function upload(file)");
+    expect(render).toContain('xhr.open("PUT", d.upload_url)');
+    expect(render).toContain('fetch(d.complete_url');
+    expect(render).toContain("JSON.stringify({ name: file.name");
+  });
+
   it("the upload-dropzone does not construct raw status-only failures", () => {
     const render = WIDGETS["upload-dropzone"]!.render;
     expect(render).not.toContain("upload failed (");
