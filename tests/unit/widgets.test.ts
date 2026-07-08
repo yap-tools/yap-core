@@ -33,12 +33,8 @@ describe("widgetHtml", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain("document.title = displayName");
     expect(render).toContain('d.kind === "audio" || d.kind === "video"');
-    expect(render).toContain("window.navigator");
-    expect(render).toContain("navigator.mediaSession");
     expect(render).toContain("window.MediaMetadata");
-    expect(render).toContain("new MediaMetadata({ title: displayName })");
-    expect(render).toContain("try {");
-    expect(render).toContain("catch (_e) {}");
+    expect(render).toContain("navigator.mediaSession.metadata = new MediaMetadata({ title: displayName })");
   });
 
   it("the media-card download uses the attachment link and opens it via the host bridge", () => {
