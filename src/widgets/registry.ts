@@ -299,6 +299,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     style: `
       .drop { border: 2px dashed rgba(128,128,128,.5); border-radius: 10px; padding: 28px; text-align: center; max-width: 560px; }
       .drop.over { border-color: #4a90d9; background: rgba(74,144,217,.08); }
+      .drop:focus-visible { outline: none; border-color: #4a90d9; background: rgba(74,144,217,.08); }
       .progress { display: none; margin: 14px auto 0; max-width: 360px; text-align: left; }
       .progress.visible { display: block; }
       .track { overflow: hidden; height: 8px; border-radius: 999px; background: var(--yap-surface); border: 1px solid var(--yap-border); }
@@ -313,7 +314,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
-        root.innerHTML = '<div class="drop" id="zone"><p><strong>Drop a file here</strong> or</p>' +
+        root.innerHTML = '<div class="drop" id="zone" tabindex="0" aria-label="Upload file dropzone"><p><strong>Drop a file or paste an image</strong> or</p>' +
           '<p><button id="pick">Choose file</button></p>' +
           '<input id="file" type="file" style="display:none">' +
           '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
@@ -345,6 +346,43 @@ export const WIDGETS: Record<string, WidgetDef> = {
           phase.textContent = "";
         }
         ${UPLOAD_ERROR_JS}
+        function imageExtension(type) {
+          var t = String(type || "").toLowerCase();
+          if (t === "image/png") return "png";
+          if (t === "image/jpeg") return "jpg";
+          if (t === "image/gif") return "gif";
+          if (t === "image/webp") return "webp";
+          if (t === "image/svg+xml") return "svg";
+          return "png";
+        }
+        function safeUploadName(file) {
+          var name = String((file && file.name) || "").trim();
+          if (name && name.length <= 255 && !/[\\/\\\\\\x00-\\x1f\\x7f]/.test(name)) return name;
+          return "pasted-image." + imageExtension(file && file.type);
+        }
+        function withSafeName(file) {
+          var safeName = safeUploadName(file);
+          if (safeName === file.name) return file;
+          return new File([file], safeName, { type: file.type || "image/png", lastModified: file.lastModified || Date.now() });
+        }
+        function firstClipboardImage(e) {
+          var data = e.clipboardData;
+          if (!data) return null;
+          var items = data.items || [];
+          for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            if (item && item.kind === "file" && String(item.type || "").indexOf("image/") === 0) {
+              var itemFile = item.getAsFile();
+              if (itemFile) return itemFile;
+            }
+          }
+          var files = data.files || [];
+          for (var j = 0; j < files.length; j++) {
+            var file = files[j];
+            if (file && String(file.type || "").indexOf("image/") === 0) return file;
+          }
+          return null;
+        }
         function readJsonOrText(response) {
           var contentType = response.headers.get("content-type") || "";
           return response.text().then(function (text) {
@@ -434,6 +472,23 @@ export const WIDGETS: Record<string, WidgetDef> = {
         zone.addEventListener("drop", function (e) {
           if (!busy && !locked && e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
         });
+        // Paste is document-wide: the widget owns its whole document, so any
+        // click inside it is enough to make ctrl-V land here — requiring the
+        // zone itself to hold focus makes the advertised paste a silent no-op.
+        // A re-delivered render must not stack handlers (one paste, two
+        // uploads), so the previous handler is removed first.
+        if (window.__yapPasteHandler) document.removeEventListener("paste", window.__yapPasteHandler);
+        window.__yapPasteHandler = function (e) {
+          if (busy || locked) return;
+          var file = firstClipboardImage(e);
+          if (!file) {
+            if (e.clipboardData) setStatus("No image in the clipboard \\u2014 copy an image and paste again.");
+            return;
+          }
+          e.preventDefault();
+          upload(withSafeName(file));
+        };
+        document.addEventListener("paste", window.__yapPasteHandler);
       });
     `,
   },

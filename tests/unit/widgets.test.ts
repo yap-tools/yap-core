@@ -80,6 +80,36 @@ describe("widgetHtml", () => {
     expect(html).toContain("Finalizing");
   });
 
+  it("the upload-dropzone renders as a focusable paste target", () => {
+    const html = widgetHtml("upload-dropzone", "origin", {
+      file_id: "f1",
+      upload_url: "https://x/u",
+      complete_url: "https://x/c",
+    });
+    expect(html).toContain('id="zone" tabindex="0"');
+    expect(html).toContain('aria-label="Upload file dropzone"');
+    expect(html).toContain("Drop a file or paste an image");
+  });
+
+  it("the upload-dropzone uploads pasted clipboard images and reports imageless pastes", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain('document.addEventListener("paste", window.__yapPasteHandler)');
+    expect(render).toContain('document.removeEventListener("paste", window.__yapPasteHandler)');
+    expect(render).toContain('item.kind === "file"');
+    expect(render).toContain('String(item.type || "").indexOf("image/") === 0');
+    expect(render).toContain('String(file.type || "").indexOf("image/") === 0');
+    expect(render).toContain("No image in the clipboard");
+    expect(render).toContain("upload(withSafeName(file));");
+  });
+
+  it("the upload-dropzone gives pasted clipboard files safe names", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("function safeUploadName(file)");
+    expect(render).toContain("name.length <= 255");
+    expect(render).toContain('"pasted-image." + imageExtension(file && file.type)');
+    expect(render).toContain("new File([file], safeName");
+  });
+
   it("the upload-dropzone does not construct raw status-only failures", () => {
     const render = WIDGETS["upload-dropzone"]!.render;
     expect(render).not.toContain("upload failed (");
