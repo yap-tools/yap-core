@@ -23,9 +23,18 @@ describe("widgetHtml", () => {
 
   it("the media-card renderer routes user data through esc()/safeUrl()", () => {
     const render = WIDGETS["media-card"]!.render;
-    expect(render).toContain("esc(d.name");
+    expect(render).toContain('var displayName = String(d.name || "file")');
+    expect(render).toContain("var name = esc(displayName)");
     expect(render).toContain("esc(d.mime_type");
     expect(render).toContain("safeUrl(d.url)");
+  });
+
+  it("the media-card renderer sets runtime titles and audio/video Media Session metadata", () => {
+    const render = WIDGETS["media-card"]!.render;
+    expect(render).toContain("document.title = displayName");
+    expect(render).toContain('d.kind === "audio" || d.kind === "video"');
+    expect(render).toContain("window.MediaMetadata");
+    expect(render).toContain("navigator.mediaSession.metadata = new MediaMetadata({ title: displayName })");
   });
 
   it("the media-card download uses the attachment link and opens it via the host bridge", () => {
@@ -93,6 +102,20 @@ describe("widgetHtml", () => {
     });
     expect(html).toContain("File preview expired - re-run to refresh");
     expect(html).toContain('addEventListener("error"');
+  });
+
+  it("embeds origin media-card data while keeping runtime title/media-session handling", () => {
+    const html = widgetHtml("media-card", "origin", {
+      kind: "audio",
+      url: "https://x/song.mp3",
+      name: "up in the ceiling.mp3",
+    });
+    const embedded = /window\.__YAP_DATA__ = (.*?);<\/script>/s.exec(html);
+    expect(embedded).toBeTruthy();
+    expect(JSON.parse(embedded![1]!).name).toBe("up in the ceiling.mp3");
+    expect(html).toContain("<title>yap media-card</title>");
+    expect(html).toContain("document.title = displayName");
+    expect(html).toContain("new MediaMetadata({ title: displayName })");
   });
 
   it("only http(s) URLs survive safeUrl (javascript:/data: are neutralized)", () => {
