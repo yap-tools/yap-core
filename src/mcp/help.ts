@@ -44,15 +44,20 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 1. **load** — discover your spaces (id, name, description, keywords, role,
    and the names of the bundles inside). Match the user's intent against this
    metadata instead of opening everything; if several spaces could match, ask
-   the user. Autoloading user docs and the current time arrive here too.
+   the user. Autoloading user docs, the current time, and a lightweight
+   second-tier tool manifest arrive here too.
 2. **load_space(space_id)** — the space's instructions and its bundles.
 3. **load_bundle(bundle_ids)** — required before calling into a bundle:
    returns docs (autoloaded ones in full — follow them; list and fetch the rest
    with read_docs), item-type schemas, files, and hooks.
-4. **call(space_id, calls)** — execute. Batch related operations in one
+4. **get_tools(names?)** — expand the second-tier manifest when you need full
+   tool descriptions or parameter specs before calling. Pass names to fetch
+   only those full specs; omit names to return the manifest.
+5. **call(space_id, calls)** — execute. Batch related operations in one
    round trip; each call succeeds or fails independently. Results include
    durationMs per call and as a total. A call targets a bundle (provide
-   bundle_id) or the space (omit bundle_id). Second-tier tools:
+   bundle_id) or the space (omit bundle_id). Full second-tier specs come from
+   get_tools; load exposes only the manifest. Second-tier tools:
    items (query/get/create/update/delete), docs (get/read/create/update/patch/delete),
    files (list_files, show_file, upload_request, upload_complete, delete_file),
    hooks (fire_hook), and management — gated by the matching capability:

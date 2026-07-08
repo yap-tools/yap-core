@@ -233,10 +233,13 @@ layer at a time, so an agent can resolve "show me open todos" by reading
 metadata and descending only into the relevant branch:
 
 - **`load`** → reachable spaces (id, name, description, keywords, role) +
-  autoloading user docs + tool specs
+  autoloading user docs + a lightweight second-tier tool manifest
 - **`load_space`** → the space's instructions and bundles
 - **`load_bundle`** → binding docs, item-type schemas, files, hooks
   (required before calling into a bundle)
+- **`get_tools`** → expand the second-tier manifest when full descriptions or
+  parameter specs are needed. Pass `names` to fetch only those full specs, or
+  omit `names` to fetch the manifest directly.
 - **`call`** → the single execution verb: a batch of second-tier operations,
   each targeting a bundle (`bundle_id`) or the call's space (omit it) and
   succeeding/failing independently. Data & content: `query_items`, `get_items`,

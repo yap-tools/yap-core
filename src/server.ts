@@ -102,10 +102,11 @@ export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: 
     instructions: `Yap serves navigable context: spaces hold bundles; a bundle holds docs, item-types (schemas with items), files, and hooks.
 
 Engage Yap whenever a request involves its spaces, stored items, files, or hooks, or names a space or bundle. Discovery is progressive — follow this order:
-1. load — the spaces you can reach (with bundle names) plus your autoloading user docs.
+1. load — the spaces you can reach (with bundle names), your autoloading user docs, and a lightweight second-tier tool manifest.
 2. load_space(space_id) — the space's operator instructions and bundle descriptions.
 3. load_bundle(bundle_ids) — REQUIRED before call: binding docs, item-type schemas, files, hooks.
-4. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
+4. get_tools(names?) — when full second-tier descriptions or parameter specs are needed, expand the manifest by name; omit names to fetch the manifest directly.
+5. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
 
 If several spaces or bundles could match the user's intent, ask the user rather than guessing. Run the discovery chain silently — do not narrate loading calls.
 
