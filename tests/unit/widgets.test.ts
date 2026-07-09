@@ -102,6 +102,17 @@ describe("widgetHtml", () => {
     expect(render).toContain("upload(withSafeName(file));");
   });
 
+  it("the upload-dropzone offers a clipboard-API paste button for hosts without a paste gesture", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain('<button id="paste">Paste image</button>');
+    expect(render).toContain("!(navigator.clipboard && navigator.clipboard.read)");
+    expect(render).toContain("navigator.clipboard.read()");
+    expect(render).toContain(".then(firstAsyncClipboardImage)");
+    expect(render).toContain('type.indexOf("image/") === 0');
+    expect(render).toContain('new File([blob], "pasted-image." + imageExtension(blob.type || type)');
+    expect(render).toContain("Could not read the clipboard");
+  });
+
   it("the upload-dropzone gives pasted clipboard files safe names", () => {
     const render = WIDGETS["upload-dropzone"]!.render;
     expect(render).toContain("function safeUploadName(file)");
