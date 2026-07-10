@@ -166,6 +166,12 @@ describeEachAdapter("EAV items", (adapter) => {
       expect(page.data.map((i) => i.values.priority)).toEqual([10, 5, 2, 1]);
     });
 
+    it("names the system fields when the sort property is unknown", async () => {
+      await expect(q(undefined, { sort: { property: "nope" } })).rejects.toThrow(
+        /unknown sort property "nope".*system fields: createdAt, updatedAt/,
+      );
+    });
+
     it("paginates with opaque cursors and a stable order", async () => {
       const page1 = await q(undefined, { sort: { property: "priority", direction: "asc" }, limit: 3 });
       expect(page1.data).toHaveLength(3);
@@ -179,6 +185,91 @@ describeEachAdapter("EAV items", (adapter) => {
       expect(page2.nextCursor).toBeNull();
       const all = [...page1.data, ...page2.data].map((i) => i.values.priority);
       expect(all).toEqual([1, 2, 5, 10]);
+    });
+  });
+
+  describe("system timestamp sort", () => {
+    // Items of a type with NO date property of its own — sorting must still
+    // work through the system timestamps. Timestamps are pinned directly in
+    // the table: a single createItems batch stamps every row alike, so the
+    // suite would otherwise race the clock.
+    let recBundleId: string;
+    const rq = (extra: Record<string, unknown>) =>
+      queryItems(db, userId, recBundleId, { itemType: "recording", ...extra });
+
+    beforeAll(async () => {
+      const space = await createSpace(db, userId, { name: "Recordings" });
+      const bundle = await createBundle(db, userId, space.id, {
+        name: "recordings",
+        itemTypes: [
+          { name: "recording", properties: [{ name: "title", datatype: "text", required: true }] },
+          {
+            name: "shadow",
+            properties: [
+              { name: "title", datatype: "text", required: true },
+              { name: "createdAt", datatype: "text" },
+            ],
+          },
+        ],
+      });
+      recBundleId = bundle.id;
+      const created = await createItems(db, userId, recBundleId, {
+        itemType: "recording",
+        items: [{ title: "first" }, { title: "second" }, { title: "third" }],
+      });
+      const { items } = db.tables;
+      const stamps = ["2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z", "2026-01-03T00:00:00.000Z"];
+      for (const [i, item] of created.entries()) {
+        await db.client.update(items).set({ createdAt: stamps[i]!, updatedAt: stamps[i]! }).where(eq(items.id, item.id));
+      }
+      // The oldest recording gets the newest edit, so createdAt and updatedAt
+      // orders disagree and a test can't pass by sorting the wrong column.
+      await db.client
+        .update(items)
+        .set({ updatedAt: "2026-02-01T00:00:00.000Z" })
+        .where(eq(items.id, created[0]!.id));
+    });
+
+    it("sorts by createdAt in both directions without a schema date property", async () => {
+      const asc = await rq({ sort: { property: "createdAt", direction: "asc" } });
+      expect(asc.data.map((i) => i.values.title)).toEqual(["first", "second", "third"]);
+      const desc = await rq({ sort: { property: "createdAt", direction: "desc" } });
+      expect(desc.data.map((i) => i.values.title)).toEqual(["third", "second", "first"]);
+    });
+
+    it("sorts by updatedAt, which orders differently from createdAt after an edit", async () => {
+      const desc = await rq({ sort: { property: "updatedAt", direction: "desc" } });
+      expect(desc.data.map((i) => i.values.title)).toEqual(["first", "third", "second"]);
+    });
+
+    it("accepts the snake_case spellings", async () => {
+      const created = await rq({ sort: { property: "created_at", direction: "desc" } });
+      expect(created.data.map((i) => i.values.title)).toEqual(["third", "second", "first"]);
+      const updated = await rq({ sort: { property: "updated_at", direction: "desc" } });
+      expect(updated.data.map((i) => i.values.title)).toEqual(["first", "third", "second"]);
+    });
+
+    it("a schema property named createdAt shadows the system field", async () => {
+      const created = await createItems(db, userId, recBundleId, {
+        itemType: "shadow",
+        items: [{ title: "prop-z", createdAt: "z" }, { title: "prop-a", createdAt: "a" }],
+      });
+      // Pin row timestamps OPPOSITE to the property values: prop-z is older.
+      const { items } = db.tables;
+      await db.client
+        .update(items)
+        .set({ createdAt: "2026-01-01T00:00:00.000Z" })
+        .where(eq(items.id, created[0]!.id));
+      await db.client
+        .update(items)
+        .set({ createdAt: "2026-01-02T00:00:00.000Z" })
+        .where(eq(items.id, created[1]!.id));
+      const page = await queryItems(db, userId, recBundleId, {
+        itemType: "shadow",
+        sort: { property: "createdAt", direction: "asc" },
+      });
+      // Property values ("a" < "z"), not row timestamps, decide the order.
+      expect(page.data.map((i) => i.values.title)).toEqual(["prop-a", "prop-z"]);
     });
   });
 
