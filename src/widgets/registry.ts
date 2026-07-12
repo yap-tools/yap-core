@@ -315,7 +315,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
       onData(function (d) {
         var root = document.getElementById("root");
         root.innerHTML = '<div class="drop" id="zone" tabindex="0" aria-label="Upload file dropzone"><p><strong>Drop a file or paste an image</strong> or</p>' +
-          '<p><button id="pick">Choose file</button></p>' +
+          '<p><button id="pick">Choose file</button> <button id="paste">Paste image</button></p>' +
           '<input id="file" type="file" style="display:none">' +
           '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
           '<div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
@@ -324,13 +324,23 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var input = document.getElementById("file");
         var status = document.getElementById("status");
         var pick = document.getElementById("pick");
+        var pasteBtn = document.getElementById("paste");
         var progress = document.getElementById("progress");
         var bar = document.getElementById("bar");
         var phase = document.getElementById("phase");
+        // The paste *event* needs a keyboard or context-menu gesture, which a
+        // non-editable page never gets on iOS — the button covers those hosts
+        // through the async clipboard API, which a plain tap may invoke (the
+        // OS shows its own paste-permission bubble). Removed where
+        // clipboard.read is missing; ctrl-V still works via the paste handler.
+        if (!(navigator.clipboard && navigator.clipboard.read)) {
+          pasteBtn.parentNode.removeChild(pasteBtn);
+          pasteBtn = null;
+        }
         var busy = false;
         var locked = false;
         function setStatus(text, cls) { status.textContent = text; status.className = "muted " + (cls || ""); requestAnimationFrame(announceHeight); }
-        function setControls(enabled) { pick.disabled = !enabled; }
+        function setControls(enabled) { pick.disabled = !enabled; if (pasteBtn) pasteBtn.disabled = !enabled; }
         function setProgress(percent, text, indeterminate) {
           var pct = Math.max(0, Math.min(100, Number(percent) || 0));
           progress.className = "progress visible" + (indeterminate ? " indeterminate" : "");
@@ -364,6 +374,20 @@ export const WIDGETS: Record<string, WidgetDef> = {
           var safeName = safeUploadName(file);
           if (safeName === file.name) return file;
           return new File([file], safeName, { type: file.type || "image/png", lastModified: file.lastModified || Date.now() });
+        }
+        function firstAsyncClipboardImage(items) {
+          for (var i = 0; i < (items || []).length; i++) {
+            var types = items[i].types || [];
+            for (var j = 0; j < types.length; j++) {
+              var type = String(types[j]);
+              if (type.indexOf("image/") === 0) {
+                return items[i].getType(type).then(function (blob) {
+                  return new File([blob], "pasted-image." + imageExtension(blob.type || type), { type: blob.type || type });
+                });
+              }
+            }
+          }
+          return Promise.resolve(null);
         }
         function firstClipboardImage(e) {
           var data = e.clipboardData;
@@ -461,6 +485,19 @@ export const WIDGETS: Record<string, WidgetDef> = {
         }
         resetProgress();
         pick.addEventListener("click", function () { if (!busy && !locked) input.click(); });
+        if (pasteBtn) pasteBtn.addEventListener("click", function () {
+          if (busy || locked) return;
+          navigator.clipboard.read()
+            .then(firstAsyncClipboardImage)
+            .then(function (file) {
+              if (busy || locked) return;
+              if (!file) { setStatus("No image in the clipboard \\u2014 copy an image and try again."); return; }
+              upload(file);
+            })
+            .catch(function () {
+              setStatus("Could not read the clipboard \\u2014 allow paste access and try again.", "err");
+            });
+        });
         input.addEventListener("click", function () { input.value = ""; });
         input.addEventListener("change", function () { if (input.files[0]) upload(input.files[0]); });
         ["dragover", "dragenter"].forEach(function (ev) {
