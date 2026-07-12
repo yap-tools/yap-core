@@ -47,9 +47,22 @@ export interface ItemFilter {
 }
 
 export interface ItemSort {
+  /** A schema property name, or a system timestamp field (SYSTEM_SORT_FIELDS). */
   property: string;
   direction?: "asc" | "desc";
 }
+
+/** Sortable system fields every item carries, keyed by accepted spelling.
+ *  Items are returned with camelCase fields while tool params are snake_case
+ *  elsewhere, so both spellings are accepted. A schema property with the same
+ *  name shadows the system field — these only apply where the name would
+ *  otherwise be rejected as unknown. */
+const SYSTEM_SORT_FIELDS: Record<string, "createdAt" | "updatedAt" | undefined> = {
+  createdAt: "createdAt",
+  created_at: "createdAt",
+  updatedAt: "updatedAt",
+  updated_at: "updatedAt",
+};
 
 export interface ItemQuery {
   itemType: string;
@@ -735,12 +748,25 @@ export async function queryItemsUnchecked(db: Db, ctx: BundleContext, query: Ite
   if (query.sort) {
     const direction = query.sort.direction ?? "asc";
     if (direction !== "asc" && direction !== "desc") throw invalid(`sort direction must be "asc" or "desc"`);
-    const sortProp = propertyByName(props, query.sort.property);
-    // For a multi-valued property, sort by its first element (lowest position).
-    const sub = sql`(SELECT ${storedValueExpr(sortProp)} FROM item_values iv WHERE iv.item_id = ${items.id} AND iv.property_id = ${sortProp.id} ORDER BY iv.position ASC LIMIT 1)`;
-    // Missing values sort last in both directions, on both dialects.
-    orderings.push(sql`${sub} IS NULL`);
-    orderings.push(direction === "desc" ? sql`${sub} DESC` : sql`${sub} ASC`);
+    const sortName = String(query.sort.property ?? "");
+    const sortProp = props.find((p) => p.name === sortName);
+    const systemField = SYSTEM_SORT_FIELDS[sortName];
+    if (sortProp) {
+      // For a multi-valued property, sort by its first element (lowest position).
+      const sub = sql`(SELECT ${storedValueExpr(sortProp)} FROM item_values iv WHERE iv.item_id = ${items.id} AND iv.property_id = ${sortProp.id} ORDER BY iv.position ASC LIMIT 1)`;
+      // Missing values sort last in both directions, on both dialects.
+      orderings.push(sql`${sub} IS NULL`);
+      orderings.push(direction === "desc" ? sql`${sub} DESC` : sql`${sub} ASC`);
+    } else if (systemField) {
+      // Timestamps are NOT NULL ISO text on both dialects, so a bare
+      // lexicographic ORDER BY is chronological and needs no missing-last leg.
+      const col = systemField === "updatedAt" ? items.updatedAt : items.createdAt;
+      orderings.push(direction === "desc" ? sql`${col} DESC` : sql`${col} ASC`);
+    } else {
+      throw invalid(
+        `unknown sort property "${sortName}" (known: ${props.map((p) => p.name).join(", ") || "none"}; system fields: createdAt, updatedAt)`,
+      );
+    }
   } else {
     orderings.push(sql`${items.createdAt} ASC`);
   }
