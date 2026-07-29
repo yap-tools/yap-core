@@ -18,7 +18,7 @@ import {
 } from "./bundles.js";
 import { invalid, notFound } from "./errors.js";
 import { parseConfig, serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
-import { newId, nowIso } from "./util.js";
+import { displayValue, newId, nowIso } from "./util.js";
 
 export interface Property {
   id: string;
@@ -228,10 +228,13 @@ export async function updateProperty(
     }
   }
   // Config is validated against the (immutable) datatype and the effective
-  // multi flag — so e.g. minItems can't survive a switch to single-valued.
-  if (patch.config !== undefined) {
+  // multi flag — so e.g. minItems can't survive a switch to single-valued,
+  // and unique can't survive a switch to multi. A multi flip without a config
+  // patch re-validates the stored config for the same reason.
+  if (patch.config !== undefined || patch.multi !== undefined) {
     const effectiveMulti = patch.multi ?? current.multi === 1;
-    const cfgErrors = validatePropertyConfig(current.datatype, effectiveMulti, patch.config);
+    const effectiveConfig = patch.config ?? parseConfig(current.config);
+    const cfgErrors = validatePropertyConfig(current.datatype, effectiveMulti, effectiveConfig);
     if (cfgErrors.length > 0) throw invalid(`property "${current.name}": ${cfgErrors.join("; ")}`);
   }
   // single→multi is free (existing scalar reads back as a one-element list);
@@ -249,6 +252,26 @@ export async function updateProperty(
       throw invalid(
         `cannot convert "${current.name}" to single-valued: at least one item has multiple values; ` +
           `reduce those items to one value first`,
+      );
+    }
+  }
+  // Turning unique on must not grandfather existing duplicates — the flag
+  // would be a lie. Reject and name the shared values so the data can be
+  // fixed first. (A freshly added property has no values, so addProperty
+  // needs no such guard.)
+  if (patch.config?.unique === true && parseConfig(current.config).unique !== true) {
+    const dupes = await db.client
+      .select({ value: itemValues.value })
+      .from(itemValues)
+      .where(eq(itemValues.propertyId, propertyId))
+      .groupBy(itemValues.value)
+      .having(sql`count(*) > 1`)
+      .limit(5);
+    if (dupes.length > 0) {
+      const shown = dupes.map((d) => displayValue(d.value));
+      throw invalid(
+        `cannot mark "${current.name}" unique: value(s) ${shown.join(", ")} are shared by multiple items; ` +
+          `deduplicate those items first`,
       );
     }
   }

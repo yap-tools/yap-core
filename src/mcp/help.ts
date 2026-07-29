@@ -24,7 +24,8 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
   datatype). A property may declare config constraints, enforced on every
   write: text {pattern, enum}; number {min, max, decimals} (default 2 decimals,
   out-of-precision writes rejected); item {itemType} to pin the referent's
-  type; any multi field {minItems, maxItems}. Query multi fields with the set
+  type; any multi field {minItems, maxItems}; single-valued text/number
+  {unique} — no two items of the type may share a value. Query multi fields with the set
   operators has/has_any/has_all/has_none, or a comparison op with a quantifier
   (any/all/none).
 - **Hook** — a named outbound HTTP call owned by a bundle. You see the hook's

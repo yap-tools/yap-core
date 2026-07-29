@@ -212,6 +212,137 @@ describeEachAdapter("property constraints & reference datatypes", (adapter) => {
     });
   });
 
+  describe("unique", () => {
+    let uniqBundleId: string;
+    let uniqTypeId: string;
+    let codeId: string;
+
+    beforeAll(async () => {
+      const b = await createBundle(db, userId, spaceId, {
+        name: "uniq",
+        itemTypes: [
+          {
+            name: "record",
+            properties: [
+              { name: "code", datatype: "text", config: { unique: true } },
+              { name: "serial", datatype: "number", config: { unique: true, decimals: 0 } },
+              { name: "note", datatype: "text" },
+            ],
+          },
+        ],
+      });
+      uniqBundleId = b.id;
+      const types = await listItemTypesUnchecked(db, uniqBundleId);
+      uniqTypeId = types.find((t) => t.name === "record")!.id;
+      codeId = types.find((t) => t.name === "record")!.properties.find((p) => p.name === "code")!.id;
+    });
+
+    const mkU = (items: Record<string, unknown>[]) =>
+      createItems(db, userId, uniqBundleId, { itemType: "record", items });
+
+    it("is rejected at authoring time on multi fields and non-text/number datatypes", async () => {
+      await expect(
+        createBundle(db, userId, spaceId, {
+          name: "uniq-bad1",
+          itemTypes: [{ name: "t", properties: [{ name: "p", datatype: "boolean", config: { unique: true } }] }],
+        }),
+      ).rejects.toMatchObject({
+        details: { errors: expect.arrayContaining([expect.stringMatching(/config\.unique is not valid for a boolean/)]) },
+      });
+      await expect(
+        addProperty(db, userId, uniqTypeId, { name: "multi-u", datatype: "text", multi: true, config: { unique: true } }),
+      ).rejects.toThrow(/config\.unique is not valid for a multi text/);
+      await expect(
+        addProperty(db, userId, uniqTypeId, { name: "date-u", datatype: "date", config: { unique: true } }),
+      ).rejects.toThrow(/config\.unique is not valid for a date/);
+    });
+
+    it("rejects a duplicate of a stored value on create, accepts distinct ones", async () => {
+      await mkU([{ code: "ID-1", serial: 1 }]);
+      await expect(mkU([{ code: "ID-1" }])).rejects.toThrow(/"code" must be unique.*already used by item/);
+      await expect(mkU([{ serial: 1 }])).rejects.toThrow(/"serial" must be unique/);
+      expect((await mkU([{ code: "ID-2", serial: 2 }]))[0]!.values.code).toBe("ID-2");
+    });
+
+    it("is case-sensitive (exact stored value) and ignores absent values", async () => {
+      expect((await mkU([{ code: "id-1" }]))[0]!.values.code).toBe("id-1"); // differs from ID-1 by case only
+      // any number of items may leave a unique field empty
+      await mkU([{ note: "a" }, { note: "b" }]);
+    });
+
+    it("rejects duplicates within a single create batch", async () => {
+      await expect(mkU([{ code: "ID-3" }, { code: "ID-3" }])).rejects.toThrow(
+        /items\[1\].*"code" must be unique.*also appears in items\[0\]/,
+      );
+      // the whole batch is rejected — nothing was written
+      expect((await mkU([{ code: "ID-3" }]))[0]!.values.code).toBe("ID-3");
+    });
+
+    it("enforces uniqueness on update, but re-writing an item's own value is legal", async () => {
+      const [a] = await mkU([{ code: "UPD-A" }]);
+      await mkU([{ code: "UPD-B" }]);
+      await expect(updateItems(db, userId, uniqBundleId, [{ id: a!.id, set: { code: "UPD-B" } }])).rejects.toThrow(
+        /"code" must be unique.*already used by item/,
+      );
+      const [same] = await updateItems(db, userId, uniqBundleId, [{ id: a!.id, set: { code: "UPD-A" } }]);
+      expect(same!.values.code).toBe("UPD-A");
+    });
+
+    it("allows a batch that moves a value from one item to another", async () => {
+      const [x, y] = await mkU([{ code: "SWAP-1" }, { code: "SWAP-2" }]);
+      const updated = await updateItems(db, userId, uniqBundleId, [
+        { id: x!.id, set: { code: "SWAP-3" } },
+        { id: y!.id, set: { code: "SWAP-1" } }, // takes the value x is giving up
+      ]);
+      const byId = new Map(updated.map((u) => [u.id, u]));
+      expect(byId.get(x!.id)!.values.code).toBe("SWAP-3");
+      expect(byId.get(y!.id)!.values.code).toBe("SWAP-1");
+    });
+
+    it("rejects two updates claiming the same value in one batch", async () => {
+      const [x, y] = await mkU([{ code: "CLAIM-1" }, { code: "CLAIM-2" }]);
+      await expect(
+        updateItems(db, userId, uniqBundleId, [
+          { id: x!.id, set: { code: "CLAIM-3" } },
+          { id: y!.id, set: { code: "CLAIM-3" } },
+        ]),
+      ).rejects.toThrow(/"code" must be unique.*also appears in updates\[0\]/);
+    });
+
+    it("applies to surgical edits too", async () => {
+      await mkU([{ code: "EDIT-1" }]);
+      const [victim] = await mkU([{ code: "EDIT-2" }]);
+      await expect(
+        updateItems(db, userId, uniqBundleId, [
+          { id: victim!.id, edits: { code: [{ op: "search_replace", search: "EDIT-2", replace: "EDIT-1" }] } },
+        ]),
+      ).rejects.toThrow(/"code" must be unique/);
+    });
+
+    it("refuses to enable unique on a property with existing duplicates, naming them", async () => {
+      const prop = await addProperty(db, userId, uniqTypeId, { name: "legacy", datatype: "text" });
+      await mkU([{ legacy: "dup" }, { legacy: "dup" }, { legacy: "solo" }]);
+      await expect(updateProperty(db, userId, uniqTypeId, prop.id, { config: { unique: true } })).rejects.toThrow(
+        /cannot mark "legacy" unique.*"dup".*deduplicate/,
+      );
+      // fix the data, then enabling succeeds and enforcement kicks in
+      const page = await queryItems(db, userId, uniqBundleId, {
+        itemType: "record",
+        filters: [{ property: "legacy", op: "eq", value: "dup" }],
+      });
+      await updateItems(db, userId, uniqBundleId, [{ id: page.data[0]!.id, set: { legacy: "dedup" } }]);
+      const updated = await updateProperty(db, userId, uniqTypeId, prop.id, { config: { unique: true } });
+      expect(JSON.parse(updated.config)).toEqual({ unique: true });
+      await expect(mkU([{ legacy: "solo" }])).rejects.toThrow(/"legacy" must be unique/);
+    });
+
+    it("rejects converting a unique property to multi-valued", async () => {
+      await expect(updateProperty(db, userId, uniqTypeId, codeId, { multi: true })).rejects.toThrow(
+        /config\.unique is not valid for a multi text/,
+      );
+    });
+  });
+
   describe("schema-authoring config validation", () => {
     // createBundle aggregates property errors into one "invalid bundle design"
     // YapError whose details.errors holds the specifics.

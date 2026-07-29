@@ -285,11 +285,17 @@ A property may declare a **`config`** of constraints, enforced at the core
 | `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
 | `item` | `{ itemType }` | the referent must be of this item-type |
 | any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
+| single-valued `text` / `number` | `{ unique }` | no two items of the type may share a value (exact match on the stored value; absent values never collide) — for ids and other identity fields |
 
 Schemas are freely mutable after items exist (it's EAV): renaming a property
 touches no values, adding one leaves existing items without it, removing one
 drops its values, and tightening a `config` does not retroactively invalidate
-stored values (same as the `required` flag).
+stored values (same as the `required` flag). The exception is `unique`, which
+would be a lie if duplicates were grandfathered: enabling it on a property
+whose items already share values is rejected (with the shared values named)
+until the data is deduplicated. Uniqueness is enforced at the application
+layer on the API write paths, like every other constraint — a backup restore
+does not re-validate it.
 
 Query filters AND-combine and are datatype-aware. Comparison ops — `eq`,
 `neq`, `contains`, `gt`, `gte`, `lt`, `lte`, `in` — take an optional

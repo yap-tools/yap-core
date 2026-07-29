@@ -8,6 +8,11 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** Renders a stored value for an error message, truncated for sanity. */
+export function displayValue(value: string): string {
+  return JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
+}
+
 /**
  * Sanitizes a name for use inside a `filename="..."` Content-Disposition
  * value: strips quotes, backslashes, and control characters (CR/LF would

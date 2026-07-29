@@ -24,7 +24,7 @@ import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { countDecimals, NUMBER_DEFAULT_DECIMALS, parseConfig, type PropertyConfig } from "./propertyConfig.js";
 import { applyEdits, type EditOp } from "./textEdits.js";
-import { newId, nowIso } from "./util.js";
+import { displayValue, newId, nowIso } from "./util.js";
 
 /** Element-wise comparison operators. On a multi-valued property they apply
  *  per element, scoped by the filter's quantifier (any/all/none). */
@@ -384,14 +384,16 @@ async function materialize(
 
 // ---- Reference integrity ----------------------------------------------------
 
-interface RefEntry {
+/** A batch-labeled property value queued for a DB-backed validation pass
+ *  (reference existence, uniqueness). */
+interface ValueEntry {
   label: string;
   prop: Property;
   value: string;
 }
 
 /** Queues item/file values for existence checking (no-op for other datatypes). */
-function collectRefs(refs: RefEntry[], label: string, prop: Property, rows: { value: string }[]): void {
+function collectRefs(refs: ValueEntry[], label: string, prop: Property, rows: { value: string }[]): void {
   if (prop.datatype !== "item" && prop.datatype !== "file") return;
   for (const r of rows) refs.push({ label, prop, value: r.value });
 }
@@ -403,7 +405,7 @@ function collectRefs(refs: RefEntry[], label: string, prop: Property, rows: { va
  * as a batched pass alongside the synchronous datatype validation rather than
  * inside normalizeValue. Returns label-prefixed error strings.
  */
-async function validateReferences(db: Db, bundleId: string, refs: RefEntry[]): Promise<string[]> {
+async function validateReferences(db: Db, bundleId: string, refs: ValueEntry[]): Promise<string[]> {
   if (refs.length === 0) return [];
   const { items, files } = db.tables;
   const errors: string[] = [];
@@ -464,6 +466,69 @@ async function validateReferences(db: Db, bundleId: string, refs: RefEntry[]): P
   return errors;
 }
 
+// ---- Uniqueness -------------------------------------------------------------
+
+/** Queues a written value for cross-item uniqueness checking when the
+ *  property's config declares unique (no-op otherwise). Unique properties are
+ *  single-valued by config validation, so rows holds at most one element. */
+function collectUnique(entries: ValueEntry[], label: string, prop: Property, rows: { value: string }[]): void {
+  if (rows.length === 0 || !parseConfig(prop.config).unique) return;
+  entries.push({ label, prop, value: rows[0]!.value });
+}
+
+/**
+ * Enforces config.unique: each queued value must not collide with another
+ * value in the same batch nor with a stored value row. `excludeByProp`
+ * (property id → item ids) names items whose row for that property the batch
+ * replaces or clears — their stored value is about to vanish, so it does not
+ * count (and re-writing an item's own value stays legal). Application-level
+ * enforcement, same as every other constraint; backup restore bypasses it.
+ */
+async function validateUniqueness(
+  db: Db,
+  entries: ValueEntry[],
+  excludeByProp?: Map<string, Set<string>>,
+): Promise<string[]> {
+  if (entries.length === 0) return [];
+  const { itemValues } = db.tables;
+  const errors: string[] = [];
+  const byProp = new Map<string, ValueEntry[]>();
+  for (const entry of entries) {
+    const group = byProp.get(entry.prop.id);
+    if (group) group.push(entry);
+    else byProp.set(entry.prop.id, [entry]);
+  }
+  for (const [propId, group] of byProp) {
+    const prop = group[0]!.prop;
+    const firstLabelByValue = new Map<string, string>();
+    for (const entry of group) {
+      const first = firstLabelByValue.get(entry.value);
+      if (first !== undefined) {
+        errors.push(
+          `${entry.label}: property "${prop.name}" must be unique; value ${displayValue(entry.value)} also appears in ${first}`,
+        );
+      } else {
+        firstLabelByValue.set(entry.value, entry.label);
+      }
+    }
+    const exclude = excludeByProp?.get(propId);
+    const rows = await db.client
+      .select({ itemId: itemValues.itemId, value: itemValues.value })
+      .from(itemValues)
+      .where(and(eq(itemValues.propertyId, propId), inArray(itemValues.value, [...firstLabelByValue.keys()])));
+    for (const row of rows) {
+      if (exclude?.has(row.itemId)) continue;
+      const label = firstLabelByValue.get(row.value);
+      if (label !== undefined) {
+        errors.push(
+          `${label}: property "${prop.name}" must be unique; value ${displayValue(row.value)} is already used by item ${row.itemId}`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
 // ---- CRUD -------------------------------------------------------------------
 
 /** Resolves an item id to its owning bundle (transport helper for /v1/items/:id). */
@@ -490,7 +555,8 @@ export async function createItems(
 
   // Validate the whole batch before writing anything (never partially applied).
   const errors: string[] = [];
-  const refs: RefEntry[] = [];
+  const refs: ValueEntry[] = [];
+  const uniques: ValueEntry[] = [];
   const normalized: { propertyId: string; value: string; position: number }[][] = [];
   for (const [i, itemInput] of input.items.entries()) {
     const rows: { propertyId: string; value: string; position: number }[] = [];
@@ -507,6 +573,7 @@ export async function createItems(
         if (elements.length > 0) populated.add(prop.id);
         for (const el of elements) rows.push({ propertyId: prop.id, value: el.value, position: el.position });
         collectRefs(refs, `items[${i}]`, prop, elements);
+        collectUnique(uniques, `items[${i}]`, prop, elements);
       } catch (err) {
         errors.push(`items[${i}]: ${(err as Error).message}`);
       }
@@ -520,7 +587,11 @@ export async function createItems(
     }
     normalized.push(rows);
   }
-  errors.push(...(await validateReferences(db, bundleId, refs)));
+  const [refErrors, uniqueErrors] = await Promise.all([
+    validateReferences(db, bundleId, refs),
+    validateUniqueness(db, uniques),
+  ]);
+  errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid items: ${errors.join("; ")}`, { errors });
 
   const { items, itemValues } = db.tables;
@@ -590,8 +661,12 @@ export async function updateItems(
   // its existing rows are deleted and the new ones inserted (works uniformly
   // for single- and multi-valued properties). An empty/null value clears it.
   const errors: string[] = [];
-  const refs: RefEntry[] = [];
-  const plans: { itemId: string; ops: { prop: Property; rows: { value: string; position: number }[] }[] }[] = [];
+  const refs: ValueEntry[] = [];
+  const plans: {
+    itemId: string;
+    label: string;
+    ops: { prop: Property; rows: { value: string; position: number }[] }[];
+  }[] = [];
   for (const [i, update] of updates.entries()) {
     const item = byId.get(update.id);
     if (!item) {
@@ -607,7 +682,11 @@ export async function updateItems(
       continue;
     }
     const props = propsByType.get(item.itemTypeId)!;
-    const plan = { itemId: item.id, ops: [] as { prop: Property; rows: { value: string; position: number }[] }[] };
+    const plan = {
+      itemId: item.id,
+      label: `updates[${i}]`,
+      ops: [] as { prop: Property; rows: { value: string; position: number }[] }[],
+    };
     for (const [name, value] of Object.entries(update.set ?? {})) {
       try {
         const prop = propertyByName(props, name);
@@ -654,7 +733,24 @@ export async function updateItems(
     }
     plans.push(plan);
   }
-  errors.push(...(await validateReferences(db, bundleId, refs)));
+  // Uniqueness inputs derive from the plans themselves, so every write path
+  // (set, edits, future ops) is covered by construction. An op on a unique
+  // property replaces or clears that item's stored row, so the item must not
+  // count as a collision (and re-writing an item's own value stays legal).
+  const uniques: ValueEntry[] = [];
+  const uniqueRewrites = new Map<string, Set<string>>();
+  for (const plan of plans) {
+    for (const op of plan.ops) {
+      if (!parseConfig(op.prop.config).unique) continue;
+      uniqueRewrites.set(op.prop.id, (uniqueRewrites.get(op.prop.id) ?? new Set()).add(plan.itemId));
+      if (op.rows.length > 0) uniques.push({ label: plan.label, prop: op.prop, value: op.rows[0]!.value });
+    }
+  }
+  const [refErrors, uniqueErrors] = await Promise.all([
+    validateReferences(db, bundleId, refs),
+    validateUniqueness(db, uniques, uniqueRewrites),
+  ]);
+  errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid updates: ${errors.join("; ")}`, { errors });
 
   const now = nowIso();

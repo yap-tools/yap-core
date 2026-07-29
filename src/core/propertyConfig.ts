@@ -32,6 +32,10 @@ export interface PropertyConfig {
   maxItems?: number;
   /** item: constrain the referent to a target item-type (name or id). */
   itemType?: string;
+  /** single-valued text/number: no two items of the type may share a value
+   *  (exact match on the stored text; absent values never collide). Enforced
+   *  at write time in application code — see validateUniqueness in items.ts. */
+  unique?: boolean;
 }
 
 /** Loose shape accepted at the transport boundary; semantics are checked by
@@ -46,10 +50,12 @@ export const propertyConfigSchema = z
     minItems: z.number().int().min(0),
     maxItems: z.number().int().min(0),
     itemType: z.string(),
+    unique: z.boolean(),
   })
   .partial();
 
-/** Which config keys each datatype understands (multi adds minItems/maxItems). */
+/** Which config keys each datatype understands (multi adds minItems/maxItems,
+ *  single-valued adds SINGLE_ONLY_KEYS_BY_DATATYPE). */
 const KEYS_BY_DATATYPE: Record<string, (keyof PropertyConfig)[]> = {
   text: ["pattern", "enum"],
   number: ["min", "max", "decimals"],
@@ -57,6 +63,14 @@ const KEYS_BY_DATATYPE: Record<string, (keyof PropertyConfig)[]> = {
   date: [],
   item: ["itemType"],
   file: [],
+};
+
+/** Keys only a single-valued property understands. Uniqueness is a cross-item
+ *  constraint on a single scalar slot; a multi-valued property has no such
+ *  slot, so the key is rejected there. */
+const SINGLE_ONLY_KEYS_BY_DATATYPE: Record<string, (keyof PropertyConfig)[]> = {
+  text: ["unique"],
+  number: ["unique"],
 };
 
 export function parseConfig(stored: string | null | undefined): PropertyConfig {
@@ -83,7 +97,10 @@ export function serializeConfig(config: PropertyConfig | undefined): string {
  */
 export function validatePropertyConfig(datatype: string, multi: boolean, config: PropertyConfig): string[] {
   const errors: string[] = [];
-  const allowed = new Set<string>([...(KEYS_BY_DATATYPE[datatype] ?? []), ...(multi ? ["minItems", "maxItems"] : [])]);
+  const allowed = new Set<string>([
+    ...(KEYS_BY_DATATYPE[datatype] ?? []),
+    ...(multi ? ["minItems", "maxItems"] : (SINGLE_ONLY_KEYS_BY_DATATYPE[datatype] ?? [])),
+  ]);
   for (const [key, value] of Object.entries(config)) {
     if (value === undefined || value === null) continue;
     if (!allowed.has(key)) {
@@ -105,6 +122,9 @@ export function validatePropertyConfig(datatype: string, multi: boolean, config:
     } else if (new Set(config.enum).size !== config.enum.length) {
       errors.push(`config.enum must not contain duplicate values`);
     }
+  }
+  if (config.unique !== undefined && typeof config.unique !== "boolean") {
+    errors.push(`config.unique must be a boolean`);
   }
   if (config.decimals !== undefined && (!Number.isInteger(config.decimals) || config.decimals < 0)) {
     errors.push(`config.decimals must be a non-negative integer`);
