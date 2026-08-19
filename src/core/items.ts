@@ -547,6 +547,26 @@ export async function createItems(
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_items", ctx);
+  return createItemsUnchecked(db, bundleId, input);
+}
+
+/**
+ * Internal: creation without the capability check, and without any other
+ * shortcut — every validation the gated path runs (shape, datatypes, required
+ * properties, references, uniqueness, all-or-nothing batching) happens here,
+ * because this is the same write. Only the gate moves.
+ *
+ * The one caller that skips the gate is the service bundle writer
+ * (`createBundleWriter`): a driver's authority comes from the service an
+ * operator authored over privileged REST, not from the identity of whoever
+ * triggered the run, so there is no user to check `edit_items` against.
+ * Everything else must go through `createItems`.
+ */
+export async function createItemsUnchecked(
+  db: Db,
+  bundleId: string,
+  input: { itemType: string; items: Record<string, unknown>[] },
+): Promise<MaterializedItem[]> {
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw invalid("items must be a non-empty array");
   }

@@ -48,6 +48,7 @@ import type { DriverRegistry } from "./drivers/registry.js";
 import type { DriverDefinition, DriverParamSpec } from "./drivers/types.js";
 import { invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
+import { createBundleWriter, type ScopedBundleWriter } from "./services.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -242,6 +243,7 @@ function buildParams(
 
 interface Job {
   runId: string;
+  bundleId: string;
   def: DriverDefinition;
   action: string;
   values: Record<string, string>;
@@ -253,8 +255,12 @@ interface Job {
  * serializing inside the attempt is what keeps a non-serializable driver
  * result from throwing during the row write, where it would be swallowed and
  * leave the run `running` forever.
+ *
+ * `writes` rides along with both endings on purpose: a run that failed halfway
+ * may still have written, and that half has to reach the audit column.
  */
-type Outcome = { status: "succeeded"; result: string } | { status: "failed"; error: string };
+type Ending = { status: "succeeded"; result: string } | { status: "failed"; error: string };
+type Outcome = Ending & { writes: unknown[] };
 
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
@@ -296,18 +302,27 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     if (logs.length > LOG_RING_SIZE) logs.shift();
   };
 
+  // The audit trail this run leaves behind. The writer appends to it as the
+  // driver writes; it lands on the row whichever way the run ends.
+  const writes: unknown[] = [];
+
   let egress: Egress | null = null;
+  let writer: ScopedBundleWriter | null = null;
   try {
     await db.client.update(runs).set({ status: "running", startedAt: nowIso() }).where(eq(runs.id, job.runId));
     // The decrypted config exists only here, only in memory.
     const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
+    // Undeclared write surfaces are simply not reachable: no handle, no door.
+    // The writer is scoped to *this run's* bundle at construction, so a driver
+    // has no way to point it at another one.
+    writer = job.def.writes?.items ? createBundleWriter(db, job.bundleId, (entry) => writes.push(entry)) : null;
     const running = job.def.run({
       config: serviceConfig,
       action: job.action,
       params: job.values,
       egress,
-      writer: null, // bundle writes arrive with the services core (Task 6)
+      writer,
       signal: controller.signal,
       log,
     });
@@ -321,12 +336,15 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     const result = await Promise.race([running, abortedBy(controller.signal)]);
     // The driver may also have *won* the race by resolving after the deadline
     // already fired. The run is over either way: a late success is a timeout.
-    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs) };
-    return serialize(result, log);
+    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs), writes };
+    return { ...serialize(result, log), writes };
   } catch (err) {
-    return { status: "failed", error: failureMessage(err, timedOut, budgetMs, log) };
+    return { status: "failed", error: failureMessage(err, timedOut, budgetMs, log), writes };
   } finally {
     clearTimeout(timer);
+    // Same reason the egress handle is disposed: a signal-deaf driver is still
+    // running, and a write it lands now would never reach the audit column.
+    writer?.close();
     if (egress) {
       try {
         // Safe even while a signal-ignoring driver still holds the handle:
@@ -358,7 +376,7 @@ function abortedBy(signal: AbortSignal): Promise<never> {
  * BigInt) is the driver's bug: it fails the run with a message that quotes
  * nothing of the value, rather than throwing where it would strand the row.
  */
-function serialize(result: unknown, log: (m: string) => void): Outcome {
+function serialize(result: unknown, log: (m: string) => void): Ending {
   try {
     // `?? "null"` covers the values JSON drops outright (a function, a bare
     // undefined): the run succeeded, it just has no result to show.
@@ -379,6 +397,7 @@ async function execute(env: RunEnv, job: Job): Promise<void> {
       .set({
         status: outcome.status,
         ...(outcome.status === "succeeded" ? { result: outcome.result } : { error: outcome.error }),
+        writes: JSON.stringify(outcome.writes),
         finishedAt: nowIso(),
       })
       .where(eq(runs.id, job.runId));
@@ -442,7 +461,14 @@ export async function runService(
   // Floating on purpose: the wait window must be honoured even for a run that
   // outlives it. `execute` swallows every outcome into the row, so this
   // promise can never reject unhandled.
-  const execution = execute(env, { runId, def, action, values, configEncrypted: service.configEncrypted }).catch(
+  const execution = execute(env, {
+    runId,
+    bundleId,
+    def,
+    action,
+    values,
+    configEncrypted: service.configEncrypted,
+  }).catch(
     () => {
       // `execute` funnels everything into the row and does not reject; this is
       // the belt-and-braces that keeps an unawaited run from ever surfacing as
