@@ -1,0 +1,10 @@
+{
+  "name": "yap-driver-smtp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "yap": {
+    "driverApi": 1
+  },
+  "license": "MIT"
+}
