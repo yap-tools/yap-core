@@ -77,7 +77,7 @@ export interface HookEnv {
 
 /** Agent-visible hook listing: never includes transport. */
 export async function listHooksUnchecked(db: Db, bundleId: string): Promise<HookInfo[]> {
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   const rows = await db.client
     .select({ id: hooks.id, name: hooks.name, description: hooks.description, params: hooks.params })
     .from(hooks)
@@ -141,7 +141,7 @@ export async function createHook(
   validateParamSpecs(params);
   await validateTransport(input.transport, env);
 
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   const clash = await db.client
     .select({ id: hooks.id })
     .from(hooks)
@@ -156,7 +156,7 @@ export async function createHook(
     name,
     description: input.description ?? "",
     params: JSON.stringify(params),
-    transportEncrypted: encryptSecret(JSON.stringify(input.transport), env.config.masterKey),
+    configEncrypted: encryptSecret(JSON.stringify(input.transport), env.config.masterKey),
     createdAt: now,
     updatedAt: now,
   });
@@ -169,7 +169,7 @@ export async function getHookBundleId(db: Db, hookId: string): Promise<string> {
 }
 
 async function getHookRow(db: Db, hookId: string) {
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   const rows = await db.client.select().from(hooks).where(eq(hooks.id, hookId));
   if (rows.length === 0) throw notFound("hook", hookId);
   return rows[0]!;
@@ -190,7 +190,7 @@ export async function updateHook(
   const name = patch.name !== undefined ? patch.name.trim() : undefined;
   if (name !== undefined && !name) throw invalid("hook name cannot be empty");
 
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   if (name !== undefined) {
     const clash = await db.client
       .select({ id: hooks.id })
@@ -206,7 +206,7 @@ export async function updateHook(
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       ...(patch.params !== undefined ? { params: JSON.stringify(patch.params) } : {}),
       ...(patch.transport !== undefined
-        ? { transportEncrypted: encryptSecret(JSON.stringify(patch.transport), env.config.masterKey) }
+        ? { configEncrypted: encryptSecret(JSON.stringify(patch.transport), env.config.masterKey) }
         : {}),
       updatedAt: nowIso(),
     })
@@ -225,7 +225,7 @@ export async function deleteHook(env: HookEnv, userId: string, hookId: string): 
   const hook = await getHookRow(db, hookId);
   const ctx = await getBundleContext(db, hook.bundleId);
   await requireBundleCapability(db, userId, "edit_hooks", ctx);
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   await db.client.delete(hooks).where(eq(hooks.id, hookId));
 }
 
@@ -285,7 +285,7 @@ export async function fireHook(
     );
   }
 
-  const { hooks } = db.tables;
+  const { services: hooks } = db.tables;
   const byId = await db.client
     .select()
     .from(hooks)
@@ -322,7 +322,7 @@ export async function fireHook(
   }
 
   // Decrypted transport exists only in memory, only here.
-  const transport = JSON.parse(decryptSecret(hook.transportEncrypted, config.masterKey)) as HookTransport;
+  const transport = JSON.parse(decryptSecret(hook.configEncrypted, config.masterKey)) as HookTransport;
   const url = substitute(transport.url, values, true);
   // Pre-flight re-check at fire time (DNS can change since authoring). This
   // gives a fast rejection and covers IP-literal destinations, for which undici

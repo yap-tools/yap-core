@@ -123,11 +123,11 @@ describeEachAdapter("hooks", (adapter) => {
     });
 
     it("stores the transport encrypted at rest", async () => {
-      const { hooks } = app.db.tables;
+      const { services: hooks } = app.db.tables;
       const row = (await app.db.client.select().from(hooks).where(eq(hooks.name, "notify")))[0]!;
-      expect(row.transportEncrypted).toMatch(/^v1\./);
-      expect(row.transportEncrypted).not.toContain("super-secret-token");
-      expect(row.transportEncrypted).not.toContain("127.0.0.1");
+      expect(row.configEncrypted).toMatch(/^v1\./);
+      expect(row.configEncrypted).not.toContain("super-secret-token");
+      expect(row.configEncrypted).not.toContain("127.0.0.1");
     });
 
     it("hook authoring is absent from the MCP surface", async () => {
@@ -405,14 +405,14 @@ describeEachAdapter("hooks", (adapter) => {
     it("re-checks the SSRF guard at fire time", async () => {
       // Plant a hook whose stored destination is private, bypassing the
       // creation check — as if DNS changed after authoring.
-      const { hooks } = app.db.tables;
+      const { services: hooks } = app.db.tables;
       await app.db.client.insert(hooks).values({
         id: "planted-hook",
         bundleId,
         name: "rebound",
         description: "",
         params: "[]",
-        transportEncrypted: encryptSecret(
+        configEncrypted: encryptSecret(
           JSON.stringify({ url: "http://192.168.0.1/internal", method: "GET" }),
           app.config.masterKey,
         ),

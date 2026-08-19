@@ -211,6 +211,66 @@ describeEachAdapter("backup import", (adapter: Adapter) => {
     await db2.close();
   });
 
+  it("restores a pre-services archive and migrates its hooks into services", async () => {
+    const work = tmp();
+    const db = await adapter.makeFreshDb();
+    await db.migrateTo(5); // the pre-services head — the archive still has `hooks`
+    await db.insertRows("users", [{ id: "u1", name: "ada", created_at: "x" }]);
+    await db.insertRows("spaces", [
+      {
+        id: "s1",
+        owner_id: "u1",
+        name: "sp",
+        description: "",
+        keywords: "",
+        context: "",
+        personal: 0,
+        created_at: "x",
+        updated_at: "x",
+      },
+    ]);
+    await db.insertRows("bundles", [
+      { id: "b1", space_id: "s1", name: "bu", description: "", created_at: "x", updated_at: "x" },
+    ]);
+    await db.insertRows("hooks", [
+      {
+        id: "h1",
+        bundle_id: "b1",
+        name: "notify",
+        description: "",
+        params: "[]",
+        transport_encrypted: "v1.x.y.z",
+        created_at: "x",
+        updated_at: "x",
+      },
+    ]);
+    const blob = await createBlobStore(blobConfig(join(work, "blobs")));
+    const out = join(work, "pre-services.tar.gz");
+    const manifest = await exportBackup({ db, blob, trigger: "manual", yapVersion: "0.0.0", outPath: out });
+    expect(manifest.db.migrationIndex).toBe(5);
+    expect(manifest.tables.hooks).toBe(1);
+    await db.close();
+
+    const db2 = await adapter.makeFreshDb();
+    const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
+    await importArchive({ db: db2, blob: blob2, archivePath: out });
+    await db2.migrate();
+    expect(await db2.appliedMigrations()).toBe(db2.journalLength());
+
+    const services = await db2.snapshotRead(async (read) => read("services"));
+    expect(services).toHaveLength(1);
+    expect(services[0]).toMatchObject({
+      id: "h1",
+      bundle_id: "b1",
+      name: "notify",
+      driver: "http",
+      pins: "{}",
+      config_encrypted: "v1.x.y.z",
+    });
+    expect(await db2.listDataTables()).not.toContain("hooks");
+    await db2.close();
+  });
+
   it("rejects an archive newer than this build's journal", async () => {
     const work = tmp();
     const db = await adapter.makeDb();
