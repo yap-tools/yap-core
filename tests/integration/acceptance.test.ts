@@ -76,7 +76,7 @@ describeEachAdapter("acceptance", (adapter) => {
     agentUserId = ag.body.user.id;
     await operator.post(`/v1/spaces/${workSpaceId}/grants`, {
       userId: agentUserId,
-      capabilities: ["read_items", "edit_items", "read_files", "edit_files", "fire_hooks"],
+      capabilities: ["read_items", "edit_items", "read_files", "edit_files", "run_services"],
       effect: "allow",
     });
     agent = await connectMcp(app.baseUrl, agentKey);
@@ -158,8 +158,8 @@ describeEachAdapter("acceptance", (adapter) => {
     expect((await fetch(shown.result.url)).status).toBe(401); // TTL of 2s in this app
   });
 
-  it("3. Permission override: space-level fire_hooks, bundle-level deny — both outcomes row-identifiable", async () => {
-    // Two bundles with hooks; the agent's space grant already includes fire_hooks.
+  it("3. Permission override: space-level run_services, bundle-level deny — both outcomes row-identifiable", async () => {
+    // Two bundles with hooks; the agent's space grant already includes run_services.
     const sensitiveId = (
       await operator.post(`/v1/spaces/${workSpaceId}/bundles`, { name: "sensitive" })
     ).body.id;
@@ -177,7 +177,7 @@ describeEachAdapter("acceptance", (adapter) => {
     }
     const deny = await operator.post(`/v1/bundles/${sensitiveId}/grants`, {
       userId: agentUserId,
-      capabilities: ["fire_hooks"],
+      capabilities: ["run_services"],
       effect: "deny",
     });
     const denyRowId = deny.body.data[0].id;
@@ -204,10 +204,10 @@ describeEachAdapter("acceptance", (adapter) => {
     // The allow outcome's deciding row is identifiable too: the space-level allow.
     const spaceRows = (await operator.get(`/v1/spaces/${workSpaceId}/grants`)).body.data;
     const spaceAllow = spaceRows.find(
-      (g: any) => g.userId === agentUserId && g.capability === "fire_hooks" && g.effect === "allow",
+      (g: any) => g.userId === agentUserId && g.capability === "run_services" && g.effect === "allow",
     );
     const space = { id: workSpaceId, ownerId: "n/a", personal: 0 };
-    const decision = await resolveCapability(app.db, agentUserId, "fire_hooks", {
+    const decision = await resolveCapability(app.db, agentUserId, "run_services", {
       space,
       bundleId: siblingId,
     });

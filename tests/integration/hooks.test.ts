@@ -153,7 +153,7 @@ describeEachAdapter("hooks", (adapter) => {
         transport: { url: `http://127.0.0.1:${targetPort}/x`, method: "GET" },
       });
       expect(res.status).toBe(403);
-      expect(res.body.error.details.capability).toBe("edit_hooks");
+      expect(res.body.error.details.capability).toBe("edit_services");
     });
 
     it("denies private destinations at creation unless allowlisted", async () => {
@@ -445,7 +445,7 @@ describeEachAdapter("hooks", (adapter) => {
       const hookId = listed.body.data[0].id;
       const denied = await viewerRest.post(`/v1/hooks/${hookId}/fire`, { params: { message: "x" } });
       expect(denied.status).toBe(403);
-      expect(denied.body.error.details.capability).toBe("fire_hooks");
+      expect(denied.body.error.details.capability).toBe("run_services");
     });
 
     it("acceptance: space-level fire_hooks with a bundle-level deny blocks that bundle, not its sibling", async () => {

@@ -97,7 +97,7 @@ const ROLE_OPTIONS: Array<{ value: string; title: string; summary: string }> = [
   {
     value: "member",
     title: "Member",
-    summary: "Read and edit items, docs, and files, and fire hooks. No credential, role, or space management.",
+    summary: "Read and edit items, docs, and files, and run services. No credential, role, or space management.",
   },
   {
     value: "admin",

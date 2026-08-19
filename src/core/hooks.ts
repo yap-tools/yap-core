@@ -134,7 +134,7 @@ export async function createHook(
 ): Promise<HookInfo> {
   const { db } = env;
   const ctx = await getBundleContext(db, bundleId);
-  await requireBundleCapability(db, userId, "edit_hooks", ctx);
+  await requireBundleCapability(db, userId, "edit_services", ctx);
   const name = input.name?.trim();
   if (!name) throw invalid("hook name is required");
   const params = input.params ?? [];
@@ -184,7 +184,7 @@ export async function updateHook(
   const { db } = env;
   const hook = await getHookRow(db, hookId);
   const ctx = await getBundleContext(db, hook.bundleId);
-  await requireBundleCapability(db, userId, "edit_hooks", ctx);
+  await requireBundleCapability(db, userId, "edit_services", ctx);
   if (patch.params) validateParamSpecs(patch.params);
   if (patch.transport) await validateTransport(patch.transport, env);
   const name = patch.name !== undefined ? patch.name.trim() : undefined;
@@ -224,7 +224,7 @@ export async function deleteHook(env: HookEnv, userId: string, hookId: string): 
   const { db } = env;
   const hook = await getHookRow(db, hookId);
   const ctx = await getBundleContext(db, hook.bundleId);
-  await requireBundleCapability(db, userId, "edit_hooks", ctx);
+  await requireBundleCapability(db, userId, "edit_services", ctx);
   const { services: hooks } = db.tables;
   await db.client.delete(hooks).where(eq(hooks.id, hookId));
 }
@@ -272,7 +272,7 @@ export async function fireHook(
 ): Promise<FireResult> {
   const { db, config } = env;
   const ctx = await getBundleContext(db, bundleId);
-  await requireBundleCapability(db, userId, "fire_hooks", ctx);
+  await requireBundleCapability(db, userId, "run_services", ctx);
 
   // Distinguish "you didn't name a hook" from "that hook doesn't exist". An
   // empty identifier is the flattening mistake — the caller put the declared

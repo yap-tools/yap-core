@@ -7,7 +7,7 @@
 import { and, asc, eq } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { CAPABILITY_NAME_PATTERN, requireCapability } from "./capabilities.js";
+import { CAPABILITY_NAME_PATTERN, normalizeCapability, requireCapability } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { getSpaceRow, toSpaceRef, type Space } from "./spaces.js";
 import { getUser } from "./users.js";
@@ -60,12 +60,14 @@ export async function createGrants(
 
   const { grants } = db.tables;
   const now = nowIso();
+  // Legacy capability names (e.g. "fire_hooks") are accepted here and
+  // normalized before storage, so every stored row carries the current name.
   const rows: Grant[] = input.capabilities.map((capability) => ({
     id: newId(),
     userId: input.userId,
     resourceType: target.type,
     resourceId: target.id,
-    capability,
+    capability: normalizeCapability(capability),
     effect: input.effect,
     createdAt: now,
   }));

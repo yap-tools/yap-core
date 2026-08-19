@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { decide, effectiveCapabilities, resolveCapability } from "../../src/core/capabilities.js";
+import { decide, effectiveCapabilities, normalizeCapability, resolveCapability } from "../../src/core/capabilities.js";
 import { createDb, type Db } from "../../src/db/index.js";
 
 const allow = (id: string) => ({ id, effect: "allow" });
@@ -71,6 +71,14 @@ describe("decide (pure most-specific-wins evaluation)", () => {
   });
 });
 
+describe("normalizeCapability", () => {
+  it("normalizes legacy hook capabilities", () => {
+    expect(normalizeCapability("fire_hooks")).toBe("run_services");
+    expect(normalizeCapability("edit_hooks")).toBe("edit_services");
+    expect(normalizeCapability("run_services")).toBe("run_services");
+  });
+});
+
 describe("resolveCapability (db-backed)", () => {
   async function setup(): Promise<{
     db: Db;
@@ -111,17 +119,17 @@ describe("resolveCapability (db-backed)", () => {
 
   it("space allow cascades to the bundle as baseline", async () => {
     const { db, insertGrant } = await setup();
-    await insertGrant("space", "sp1", "fire_hooks", "allow");
-    const decision = await resolveCapability(db, "u1", "fire_hooks", { space: space(), bundleId: "bn1" });
+    await insertGrant("space", "sp1", "run_services", "allow");
+    const decision = await resolveCapability(db, "u1", "run_services", { space: space(), bundleId: "bn1" });
     expect(decision.allowed).toBe(true);
     await db.close();
   });
 
   it("bundle-level deny overrides the space allow, and the deciding row is identifiable", async () => {
     const { db, insertGrant } = await setup();
-    await insertGrant("space", "sp1", "fire_hooks", "allow");
-    const denyId = await insertGrant("bundle", "bn1", "fire_hooks", "deny");
-    const decision = await resolveCapability(db, "u1", "fire_hooks", { space: space(), bundleId: "bn1" });
+    await insertGrant("space", "sp1", "run_services", "allow");
+    const denyId = await insertGrant("bundle", "bn1", "run_services", "deny");
+    const decision = await resolveCapability(db, "u1", "run_services", { space: space(), bundleId: "bn1" });
     expect(decision).toEqual({
       allowed: false,
       decidedBy: { grantId: denyId, level: "bundle", effect: "deny" },
@@ -131,9 +139,9 @@ describe("resolveCapability (db-backed)", () => {
 
   it("rows for other bundles do not leak into the check", async () => {
     const { db, insertGrant } = await setup();
-    await insertGrant("space", "sp1", "fire_hooks", "allow");
-    await insertGrant("bundle", "other-bundle", "fire_hooks", "deny");
-    const decision = await resolveCapability(db, "u1", "fire_hooks", { space: space(), bundleId: "bn1" });
+    await insertGrant("space", "sp1", "run_services", "allow");
+    await insertGrant("bundle", "other-bundle", "run_services", "deny");
+    const decision = await resolveCapability(db, "u1", "run_services", { space: space(), bundleId: "bn1" });
     expect(decision.allowed).toBe(true);
     await db.close();
   });
@@ -180,16 +188,16 @@ describe("resolveCapability (db-backed)", () => {
   it("effectiveCapabilities applies per-capability overrides", async () => {
     const { db, insertGrant } = await setup();
     await insertGrant("space", "sp1", "read_items", "allow");
-    await insertGrant("space", "sp1", "fire_hooks", "allow");
-    await insertGrant("bundle", "bn1", "fire_hooks", "deny");
+    await insertGrant("space", "sp1", "run_services", "allow");
+    await insertGrant("bundle", "bn1", "run_services", "deny");
     await insertGrant("bundle", "bn1", "custom_cap", "allow");
     const atSpace = await effectiveCapabilities(db, "u1", { space: space() });
     expect(atSpace).toContain("read_items");
-    expect(atSpace).toContain("fire_hooks");
+    expect(atSpace).toContain("run_services");
     expect(atSpace).not.toContain("custom_cap");
     const atBundle = await effectiveCapabilities(db, "u1", { space: space(), bundleId: "bn1" });
     expect(atBundle).toContain("read_items"); // inherited baseline
-    expect(atBundle).not.toContain("fire_hooks"); // bundle deny overrides
+    expect(atBundle).not.toContain("run_services"); // bundle deny overrides
     expect(atBundle).toContain("custom_cap"); // bundle-only allow
     await db.close();
   });
