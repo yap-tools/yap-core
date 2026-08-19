@@ -13,9 +13,10 @@ import type { BundleDoc } from "../core/bundleDocs.js";
 import type { EditOp } from "../core/textEdits.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
-import * as hooksCore from "../core/hooks.js";
+import type { DriverRegistry } from "../core/drivers/registry.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
+import * as runsCore from "../core/runs.js";
 import * as spacesCore from "../core/spaces.js";
 import type { PropertyConfig } from "../core/propertyConfig.js";
 import { YapError } from "../core/errors.js";
@@ -27,6 +28,8 @@ export interface CallEnv {
   db: Db;
   config: YapConfig;
   blob: BlobStore;
+  /** The installed drivers — what a service run resolves its driver against. */
+  registry: DriverRegistry;
   userId: string;
   /** Always the call's space. */
   spaceId: string;
@@ -348,14 +351,23 @@ export const secondTier: Record<string, SecondTierTool> = {
   fire_hook: {
     description:
       'Fire a hook with values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the hook\'s transport. Synchronous with a fixed timeout, no automatic retries; returns the raw response status and body. Two params: "id" — the hook\'s name or id (both are in load_bundle); and "params" — an object of the hook\'s declared parameter values. The declared values go inside the nested params object, NOT alongside id. Example: {id: "notify", params: {message: "deploy finished", channel: "ops"}}.',
-    capability: "fire_hooks",
+    capability: "run_services",
     params: { id: { required: true }, params: {} },
-    handler: async (env, params) => ({
-      result: await hooksCore.fireHook(env, env.userId, env.bundleId, {
-        hook: String(params.id),
+    // A fire is synchronous by contract, so this internal caller waits past the
+    // action's own budget (deliberately uncapped) and always has a terminal run
+    // to translate into the old shape: the result on success, a thrown error —
+    // matching today's per-call error shape — on failure.
+    handler: async (env, params) => {
+      const waitMs = env.config.hookTimeoutMs + 500;
+      const run = await runsCore.runService(env, env.userId, env.bundleId, {
+        service: String(params.id),
         params: params.params as Record<string, unknown> | undefined,
-      }),
-    }),
+        waitMs,
+      });
+      if (run.status === "succeeded") return { result: run.result };
+      const message = run.error ?? `hook did not finish within ${waitMs}ms`;
+      throw new YapError(/blocked by the SSRF guard/.test(message) ? "forbidden" : "internal", message);
+    },
   },
 
   // ---- Management (parity with the REST management plane) -----------------------

@@ -17,21 +17,14 @@ describe("capability coverage (drift guard)", () => {
     const viaCall = new Set(Object.values(secondTier).map((t) => t.capability));
     const reachable = new Set<string>([...viaCall, "create_bundles"]); // create_bundles → top-level bundle_create
     const REST_ONLY = new Set(["edit_services"]); // documented exception
-    // The fire_hook MCP tool still advertises the pre-rename capability
-    // string "fire_hooks" (see src/mcp/call.ts) — Task 8 updates it to
-    // "run_services". Until then, allow this one drift so the guard still
-    // catches any other capability going unreachable.
-    // TODO(until Task 8): drop this once fire_hook advertises "run_services".
-    const TEMPORARILY_UNREACHABLE = new Set(["run_services"]);
     for (const cap of [...CONTENT_CAPABILITIES, ...CONTAINER_CAPABILITIES]) {
-      if (REST_ONLY.has(cap) || TEMPORARILY_UNREACHABLE.has(cap)) continue;
+      if (REST_ONLY.has(cap)) continue;
       expect(reachable.has(cap), `${cap} should be reachable over MCP`).toBe(true);
     }
     // The exception really is absent from the MCP surface.
     expect(viaCall.has("edit_services")).toBe(false);
-    // ...and the fire_hook tool is still advertising the pre-rename name
-    // (documents the gap this test is knowingly allowing).
-    expect(viaCall.has("fire_hooks")).toBe(true);
+    // The pre-rename capability string is gone from the catalog.
+    expect(viaCall.has("fire_hooks")).toBe(false);
   });
 });
 

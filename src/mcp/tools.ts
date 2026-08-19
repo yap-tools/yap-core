@@ -22,10 +22,10 @@ import { effectiveCapabilities } from "../core/capabilities.js";
 import { YapError } from "../core/errors.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
-import { listHooksUnchecked } from "../core/hooks.js";
 import { listItemTypesUnchecked } from "../core/itemTypes.js";
 import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
+import { listServicesUnchecked } from "../core/services.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
@@ -148,8 +148,8 @@ function widgetCspDomains(config: YapConfig): string[] {
 }
 
 export function registerMcpTools(server: YapServer): void {
-  const { mcp, db, config, blob, version } = server;
-  const env = { db, config, blob, baseUrl: config.baseUrl };
+  const { mcp, db, config, blob, registry, version } = server;
+  const env = { db, config, blob, registry, baseUrl: config.baseUrl };
 
   // Every tool executes inside the session's token-scope context (if the
   // session authenticated with an OAuth token) so capability resolution deep
@@ -368,12 +368,16 @@ export function registerMcpTools(server: YapServer): void {
                 }),
               })),
               files: await listFilesUnchecked(db, bundleId),
-              hooks: (await listHooksUnchecked(db, bundleId)).map((h) => ({
-                id: h.id,
-                name: h.name,
-                description: h.description,
-                params: h.params,
-              })),
+              // Still the legacy hook view: http services rendered in the old
+              // shape. Task 8 replaces this with the full services listing.
+              hooks: (await listServicesUnchecked({ db, config, registry }, bundleId))
+                .filter((s) => s.driver === "http")
+                .map((s) => ({
+                  id: s.id,
+                  name: s.name,
+                  description: s.description,
+                  params: s.actions[0]?.params ?? [],
+                })),
             });
           } catch (err) {
             if (err instanceof YapError) {

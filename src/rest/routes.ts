@@ -19,11 +19,12 @@ import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
-import * as hooksCore from "../core/hooks.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
+import * as runsCore from "../core/runs.js";
+import * as servicesCore from "../core/services.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
@@ -131,8 +132,9 @@ function sendDirect404(c: Context, body: unknown): Response | null {
 
 export function registerRestRoutes(server: YapServer): void {
   const app = server.mcp.getApp();
-  const { db, config, logger, blob } = server;
+  const { db, config, logger, blob, registry } = server;
   const fileEnv: filesCore.FileEnv = { db, blob, config };
+  const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, config, registry };
 
   const handle =
     (fn: Handler) =>
@@ -817,9 +819,150 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  // ---- Hooks (authoring is REST-only — deliberately absent from MCP) --------------
+  // ---- Services (authoring is REST-only — deliberately absent from MCP) -----------
 
-  const hookEnv: hooksCore.HookEnv = { db, config };
+  const serviceParamSpecs = z.array(servicesCore.serviceParamSpecSchema);
+  // Pins are configuration, not parameters, and the runner String()s them
+  // blindly — so the boundary accepts only the scalars core validates for.
+  const servicePins = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]));
+
+  app.post(
+    "/v1/bundles/:id/services",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({
+          name: z.string(),
+          description: z.string().optional(),
+          driver: z.string().optional(),
+          params: serviceParamSpecs.optional(),
+          pins: servicePins.optional(),
+          // Shaped by the driver, not by this boundary: required here, checked
+          // by the driver's own validateConfig (and validateConfigOnline).
+          config: z.unknown(),
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await servicesCore.createService(serviceEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/bundles/:id/services",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json({ data: await servicesCore.listServices(serviceEnv, userId, param(c, "id")) });
+    }),
+  );
+
+  app.patch(
+    "/v1/services/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({
+          name: z.string().optional(),
+          description: z.string().optional(),
+          params: serviceParamSpecs.optional(),
+          // null clears the pin set; absent leaves it alone.
+          pins: servicePins.nullable().optional(),
+          config: z.unknown().optional(),
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await servicesCore.updateService(serviceEnv, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/services/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      await servicesCore.deleteService(serviceEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
+    }),
+  );
+
+  /**
+   * A body that may be absent entirely: running a service with no parameters
+   * (and firing a legacy hook) is a bare POST, which `jsonBody` would reject.
+   */
+  async function optionalJsonBody(c: Context): Promise<unknown> {
+    const rawText = await c.req.text();
+    if (!rawText) return {};
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      throw invalid("request body must be valid JSON");
+    }
+  }
+
+  /** Adapters clamp what a caller asks to wait; internal callers do not. */
+  const clampWait = (waitMs?: number): number | undefined =>
+    waitMs === undefined ? undefined : Math.min(waitMs, config.runWaitCapMs);
+
+  app.post(
+    "/v1/services/:id/run",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({
+          action: z.string().optional(),
+          params: z.record(z.string(), z.unknown()).optional(),
+          wait_ms: z.number().int().min(0).optional(),
+        }),
+        await optionalJsonBody(c),
+      );
+      const serviceId = param(c, "id");
+      const bundleId = await servicesCore.getServiceBundleId(db, serviceId);
+      return c.json(
+        await runsCore.runService(serviceEnv, userId, bundleId, {
+          service: serviceId,
+          action: body.action,
+          params: body.params,
+          waitMs: clampWait(body.wait_ms),
+        }),
+      );
+    }),
+  );
+
+  app.get(
+    "/v1/runs/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(await runsCore.getRun(serviceEnv, userId, param(c, "id")));
+    }),
+  );
+
+  app.get(
+    "/v1/bundles/:id/runs",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(
+        await runsCore.listRuns(serviceEnv, userId, param(c, "id"), {
+          service: c.req.query("service"),
+          ...pageOpts(c),
+        }),
+      );
+    }),
+  );
+
+  // ---- Legacy hook mounts (kept byte-compatible; a hook is an http service) -------
+  //
+  // Every hook was a service with the `http` driver, so these routes are pure
+  // translation: `transport` is the service config, the driver is forced, and
+  // the responses keep the old shapes — a flat `params` array with no driver or
+  // action fields, and `{status, body}` from a fire.
+
+  const LEGACY_DRIVER = "http";
+
+  /** The old hook view of a service: its single http action's parameters. */
+  const legacyHookView = (info: servicesCore.ServiceInfo) => ({
+    id: info.id,
+    name: info.name,
+    description: info.description,
+    params: info.actions[0]?.params ?? [],
+  });
 
   app.post(
     "/v1/bundles/:id/hooks",
@@ -829,12 +972,19 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({
           name: z.string(),
           description: z.string().optional(),
-          params: z.array(hooksCore.hookParamSpecSchema).optional(),
-          transport: hooksCore.hookTransportSchema,
+          params: serviceParamSpecs.optional(),
+          transport: z.unknown(),
         }),
         await jsonBody(c),
       );
-      return c.json(await hooksCore.createHook(hookEnv, userId, param(c, "id"), body), 201);
+      const created = await servicesCore.createService(serviceEnv, userId, param(c, "id"), {
+        name: body.name,
+        description: body.description,
+        driver: LEGACY_DRIVER,
+        params: body.params,
+        config: body.transport,
+      });
+      return c.json(legacyHookView(created), 201);
     }),
   );
 
@@ -842,7 +992,10 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/bundles/:id/hooks",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      return c.json({ data: await hooksCore.listHooks(db, userId, param(c, "id")) });
+      const services = await servicesCore.listServices(serviceEnv, userId, param(c, "id"));
+      // Only http services are hooks; a service on any other driver has no old
+      // shape to be rendered in.
+      return c.json({ data: services.filter((s) => s.driver === LEGACY_DRIVER).map(legacyHookView) });
     }),
   );
 
@@ -854,12 +1007,18 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({
           name: z.string().optional(),
           description: z.string().optional(),
-          params: z.array(hooksCore.hookParamSpecSchema).optional(),
-          transport: hooksCore.hookTransportSchema.optional(),
+          params: serviceParamSpecs.optional(),
+          transport: z.unknown().optional(),
         }),
         await jsonBody(c),
       );
-      return c.json(await hooksCore.updateHook(hookEnv, userId, param(c, "id"), body));
+      const updated = await servicesCore.updateService(serviceEnv, userId, param(c, "id"), {
+        name: body.name,
+        description: body.description,
+        params: body.params,
+        config: body.transport,
+      });
+      return c.json(legacyHookView(updated));
     }),
   );
 
@@ -867,7 +1026,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/hooks/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      await hooksCore.deleteHook(hookEnv, userId, param(c, "id"));
+      await servicesCore.deleteService(serviceEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
   );
@@ -876,19 +1035,27 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/hooks/:id/fire",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      const rawText = await c.req.text();
-      let rawBody: unknown = {};
-      if (rawText) {
-        try {
-          rawBody = JSON.parse(rawText);
-        } catch {
-          throw invalid("request body must be valid JSON");
-        }
-      }
-      const body = parseBody(z.object({ params: z.record(z.string(), z.unknown()).optional() }), rawBody);
+      const body = parseBody(
+        z.object({ params: z.record(z.string(), z.unknown()).optional() }),
+        await optionalJsonBody(c),
+      );
       const hookId = param(c, "id");
-      const bundleId = await hooksCore.getHookBundleId(db, hookId);
-      return c.json(await hooksCore.fireHook(hookEnv, userId, bundleId, { hook: hookId, params: body.params }));
+      const bundleId = await servicesCore.getServiceBundleId(db, hookId);
+      // A fire is synchronous by contract, so this internal caller waits past
+      // the action's own budget (deliberately uncapped) and always gets back a
+      // terminal run to translate.
+      const waitMs = config.hookTimeoutMs + 500;
+      const run = await runsCore.runService(serviceEnv, userId, bundleId, {
+        service: hookId,
+        params: body.params,
+        waitMs,
+      });
+      if (run.status === "succeeded") return c.json(run.result as Record<string, unknown>);
+      // The old mapping: a destination the guard refused was a 403, everything
+      // else a 500. The run's error is already agent-safe (the driver sanitizes
+      // it), so it is what the caller sees, unchanged.
+      const message = run.error ?? `hook did not finish within ${waitMs}ms`;
+      throw new YapError(/blocked by the SSRF guard/.test(message) ? "forbidden" : "internal", message);
     }),
   );
 

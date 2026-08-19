@@ -16,6 +16,8 @@ import type { BlobStore } from "./blob/index.js";
 import type { YapConfig } from "./config.js";
 import type { TokenAuth } from "./core/authScope.js";
 import { bearerToken, resolveCredential } from "./core/credential.js";
+import { createHttpDriver } from "./core/drivers/http.js";
+import { DriverRegistry } from "./core/drivers/registry.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
 import { registerMcpTools } from "./mcp/tools.js";
@@ -41,6 +43,8 @@ export interface YapServer {
   config: YapConfig;
   db: Db;
   blob: BlobStore;
+  /** The installed drivers, threaded to both surfaces alongside db/config/blob. */
+  registry: DriverRegistry;
   logger: YapLogger;
   /** Package version, surfaced in the MCP handshake and whoami. */
   version: string;
@@ -120,11 +124,18 @@ Stored references are opaque — resolve before showing them to a user: file://{
 
   let edge: HttpServer | undefined;
 
+  // One registry per server, shared by every surface: services are authored
+  // against it over REST and run against it from REST and MCP alike. The
+  // built-in http driver is what every hook was.
+  const registry = new DriverRegistry();
+  registry.register(createHttpDriver(config));
+
   const server: YapServer = {
     mcp,
     config,
     db,
     blob,
+    registry,
     logger,
     version: VERSION,
     start: async () => {
