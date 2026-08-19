@@ -83,9 +83,16 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
 - **Writes.** It declares none, so `ctx.writer` is `null` and no write surface is reachable from it.
 - **Abort.** Every read races `ctx.signal`, so a run that hits its budget tears the session down rather than
   holding a socket open.
-- **Injection.** `to` and `from` must be single addresses and a `subject` containing a line break is refused —
-  otherwise an agent-supplied value could inject extra headers. Body lines starting with `.` are dot-stuffed,
-  so no message content can be read as the end of `DATA`.
+- **Injection.** `to` and `from` must be single addresses that require a dotted domain (`name@host.tld`) — a
+  single-label intranet address like `postmaster@relay` is rejected by design, not just international ones —
+  and a `subject` containing a line break is refused, since either could otherwise let an agent-supplied value
+  inject extra headers. The body is first normalized so every line-break form it might contain (`\r\n`, bare
+  `\n`, *and bare* `\r`) becomes a real line break, and only then are lines starting with `.` dot-stuffed and
+  the whole message rejoined with `\r\n`. Skipping the bare-CR case would be an SMTP smuggling hole: a body
+  containing a lone `\r.\r` would reach a server that treats bare CR as a line terminator on its own, which
+  reads that as the end of `DATA` and the attacker-supplied SMTP commands after it as new commands — bypassing
+  the pinned recipient entirely. Normalizing first means no line of the payload, in any of its forms, can be
+  read as the end of `DATA`.
 - **Errors.** A rejected SMTP reply becomes a plain `Error` carrying the server's reply line. Yap collapses a
   non-sanitized driver error into a flat `run failed` for the agent (a reply line can echo an address), so the
   transcript is written to `ctx.log` instead, where it stays inside the run.

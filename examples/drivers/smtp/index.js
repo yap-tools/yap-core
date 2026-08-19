@@ -104,7 +104,12 @@ export default {
       // The message, then the lone dot that ends it. Body lines starting with a
       // dot were stuffed while building the message, so no line of the payload
       // can impersonate this terminator.
-      await session.command(`${message}\r\n.`, [250], "message", `<message, ${message.length} bytes>`);
+      await session.command(
+        `${message}\r\n.`,
+        [250],
+        "message",
+        `<message, ${Buffer.byteLength(message, "utf8")} bytes>`,
+      );
       try {
         await session.command("QUIT", [221], "QUIT");
       } catch {
@@ -114,9 +119,21 @@ export default {
       return { accepted: [to] };
     } finally {
       // The socket is the driver's — `egress.dispose()` does not touch it.
+      // `end()` immediately followed by `destroy()` is not a belt-and-braces
+      // teardown, it is a race: `destroy()` tears the socket down before the
+      // FIN `end()` queued has any chance to reach the peer, so the first
+      // call would be dead code. We want the FIN sent — QUIT may not have
+      // gotten a reply (see the `catch` above), so this may be the only
+      // signal the peer gets that the session is over — but we still want a
+      // hard close if the peer never reciprocates, rather than leaning on
+      // `ctx.egress`'s own budget. So: `end()` to close gracefully, then
+      // `destroy()` only if the socket has not already finished closing on
+      // its own within a short grace period.
       session.dispose();
       socket.end();
-      socket.destroy();
+      const graceTimer = setTimeout(() => socket.destroy(), 200);
+      socket.once("close", () => clearTimeout(graceTimer));
+      if (graceTimer.unref) graceTimer.unref();
     }
   },
 };
@@ -199,12 +216,19 @@ function buildMessage({ from, to, subject, body }) {
     "Content-Type: text/plain; charset=utf-8",
     "Content-Transfer-Encoding: 8bit",
   ];
-  // Dot-stuffing (RFC 5321 §4.5.2): a body line beginning with "." gets a
-  // second one, so nothing in the payload can be read as the end of DATA. The
-  // receiver strips it back off.
+  // Split on every line-break form — CRLF, bare LF, *and bare CR* — not just
+  // "\r\n". A lone CR left unsplit would ride inside a "line" and reach the
+  // wire raw; a server that treats bare CR as its own line terminator would
+  // then see the dot-stuffing (and the CRLF join below) apply to the wrong
+  // logical lines. A body containing "\r.\rRCPT TO:<attacker>\r", for example,
+  // would put a bare `\r.\r` on the wire — which such a server reads as
+  // "<CR>", "." (end of DATA), "<CR>" and everything after it as new SMTP
+  // commands: an SMTP smuggling attack that runs right past the pinned
+  // recipient. Every line-break form is normalized to a real line break here,
+  // so joining with "\r\n" below always emits CRLF and nothing else survives
+  // to the wire.
   const lines = body
-    .replace(/\r\n/g, "\n")
-    .split("\n")
+    .split(/\r\n|\r|\n/)
     .map((line) => (line.startsWith(".") ? `.${line}` : line));
   return `${headers.join("\r\n")}\r\n\r\n${lines.join("\r\n")}`;
 }
@@ -219,7 +243,15 @@ function buildMessage({ from, to, subject, body }) {
  * a naive parser mistakes for the end), and a reply may never arrive at all —
  * so every read races `ctx.signal`, and a server that closes mid-session fails
  * the pending read instead of hanging the run.
+ *
+ * A hostile or broken server that never sends a terminating CRLF, or that
+ * keeps a `250-` continuation going forever, would otherwise let the pending
+ * line and the collected continuation lines grow for the whole timeout
+ * budget; both are capped below.
  */
+const MAX_REPLY_LINE_BYTES = 64 * 1024;
+const MAX_REPLY_CONTINUATION_LINES = 100;
+
 function createSession(socket, ctx) {
   let pending = "";
   const lines = [];
@@ -245,6 +277,10 @@ function createSession(socket, ctx) {
 
   const onData = (chunk) => {
     pending += chunk.toString("utf8");
+    if (Buffer.byteLength(pending, "utf8") > MAX_REPLY_LINE_BYTES) {
+      fail(new Error(`SMTP reply line exceeded ${MAX_REPLY_LINE_BYTES} bytes without a terminator`));
+      return;
+    }
     let index;
     while ((index = pending.indexOf("\r\n")) >= 0) {
       lines.push(pending.slice(0, index));
@@ -260,7 +296,16 @@ function createSession(socket, ctx) {
   socket.on("error", fail);
   socket.on("end", onClose);
   socket.on("close", onClose);
-  ctx.signal.addEventListener("abort", onAbort, { once: true });
+  // A signal that was already aborted before this session existed fired its
+  // "abort" event in the past — `addEventListener` from here on would never
+  // see it, and every future read would hang until the socket itself gave up
+  // (or forever, against a server that just sits there). Fail immediately in
+  // that case instead of registering a listener that will never fire.
+  if (ctx.signal.aborted) {
+    onAbort();
+  } else {
+    ctx.signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   const nextLine = () =>
     new Promise((resolve, reject) => {
@@ -274,6 +319,9 @@ function createSession(socket, ctx) {
     for (;;) {
       const line = await nextLine();
       collected.push(line);
+      if (collected.length > MAX_REPLY_CONTINUATION_LINES) {
+        throw new Error(`SMTP reply exceeded ${MAX_REPLY_CONTINUATION_LINES} continuation lines`);
+      }
       const match = /^(\d{3})([ -]?)/.exec(line);
       if (!match) throw new Error(`unexpected SMTP reply: ${line}`);
       if (match[2] !== "-") return { code: Number(match[1]), lines: collected, last: line };
@@ -283,6 +331,12 @@ function createSession(socket, ctx) {
   return {
     /** Reads a reply and demands one of `codes`, naming the step on failure. */
     async expect(codes, step) {
+      // Mirrors the same check in `command()`: a read invoked directly (the
+      // greeting, which no command precedes) would otherwise start a
+      // `nextLine()` wait with no guarantee the abort listener above is still
+      // able to fire for it — checking here, before that wait begins, closes
+      // the gap.
+      if (ctx.signal.aborted) throw Object.assign(new Error("run aborted"), { name: "AbortError" });
       const reply = await readReply();
       // The transcript goes to the run's log ring, which is where a reply line
       // can be seen without it reaching the agent-visible error column.

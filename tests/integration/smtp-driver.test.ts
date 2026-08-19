@@ -124,6 +124,37 @@ describe("smtp example driver", () => {
     expect(body).toBe("First line\r\n..hidden\r\nlast ☂ line");
   });
 
+  it("normalizes a bare CR in the body so it cannot smuggle a second command", async () => {
+    // A lone "\r" (no paired "\n") used to survive line-splitting whole and
+    // reach the wire raw. A server that treats bare CR as its own line
+    // terminator would read "\r.\r" as end-of-DATA followed by new SMTP
+    // commands — smuggling straight past the pinned recipient. The fix
+    // normalizes every line-break form to CRLF before dot-stuffing, so no
+    // bare CR ever reaches the wire.
+    const created = await authorService(
+      "bare-cr",
+      { host: "127.0.0.1", port: mock.port, from: FROM },
+      { to: PINNED_TO },
+    );
+    const before = mock.messages.length;
+    const smugglingBody = "x\r.\rRCPT TO:<attacker@evil.test>\r";
+    const res = await run(created.body.id, { subject: "Hello", body: smugglingBody });
+    expect(res.body.status).toBe("succeeded");
+
+    expect(mock.messages).toHaveLength(before + 1);
+    const message = mock.messages[mock.messages.length - 1]!;
+    // Only the pinned recipient was ever recorded — the embedded "RCPT TO:"
+    // text stayed inside the DATA payload as message content, never parsed
+    // as a command of its own.
+    expect(message.to).toEqual([PINNED_TO]);
+    const body = message.data.split("\r\n\r\n").slice(1).join("\r\n\r\n");
+    // Every line-break form normalized to CRLF, and the lone "." line
+    // dot-stuffed to "..", exactly as a legitimate leading-dot line would be.
+    expect(body).toBe("x\r\n..\r\nRCPT TO:<attacker@evil.test>\r\n");
+    // No orphan CR survives anywhere in what actually crossed the wire.
+    expect(message.data).not.toMatch(/\r(?!\n)/);
+  });
+
   it("refuses a caller-supplied recipient", async () => {
     const created = await authorService(
       "pinned-recipient",
@@ -263,5 +294,56 @@ describe("smtp example driver under the run budget", () => {
     expect(silent.connections).toBe(1);
     // The socket is the driver's to close — egress.dispose() does not touch it.
     await expect.poll(() => silent.closed, { timeout: 2000 }).toBe(1);
+  });
+});
+
+/**
+ * The zero-connection half of the SSRF guard: an operator who never
+ * allowlists anything must get zero connections to a private destination,
+ * not merely a `failed` run. This app boots with no `YAP_HOOK_ALLOW_HOSTS` at
+ * all — unlike every describe block above, which allowlists 127.0.0.1 so the
+ * mock server is reachable — and the service is pointed at the mock's own
+ * host and port. If the guard let anything through, this is the one place a
+ * real connection would land.
+ */
+describe("smtp example driver without an SSRF allowlist", () => {
+  let app: TestApp;
+  let alice: ApiClient;
+  let loopback: MockSmtp;
+  let serviceId: string;
+
+  beforeAll(async () => {
+    loopback = await startMockSmtp();
+    app = await bootTestApp({ YAP_DRIVERS_DIR: driversDirWithSmtp() });
+    const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+    const a = await sysadmin.post("/v1/users", { name: "Alice" });
+    alice = apiClient(app.baseUrl, a.body.initialKey.key);
+    const spaceId = (await alice.post("/v1/spaces", { name: "Mail" })).body.id;
+    const bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "outbound" })).body.id;
+    const created = await alice.post(`/v1/bundles/${bundleId}/services`, {
+      name: "loopback-relay",
+      driver: "smtp",
+      // The mock's real host and port, unlike the fictitious 10.0.0.1 used
+      // above — a guard failure here would show up as an actual connection.
+      config: { host: "127.0.0.1", port: loopback.port, from: FROM },
+      pins: { to: PINNED_TO },
+    });
+    serviceId = created.body.id;
+  });
+
+  afterAll(async () => {
+    await app?.stop();
+    await loopback.close();
+  });
+
+  it("blocks loopback at run time with zero connections reaching the server", async () => {
+    const res = await alice.post(`/v1/services/${serviceId}/run`, {
+      action: "send",
+      params: { subject: "Hello", body: "Should never leave." },
+      wait_ms: 3000,
+    });
+    expect(res.body.status).toBe("failed");
+    expect(res.body.errorCode).toBe("internal");
+    expect(loopback.connections).toBe(0);
   });
 });
