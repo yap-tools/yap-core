@@ -219,11 +219,11 @@ function buildParams(
 ): Record<string, string> {
   const pins = JSON.parse(service.pins) as Record<string, unknown>;
   const specs = effectiveSpecs(def, service, action);
-  const callable = specs.filter((spec) => !(spec.name in pins));
+  const callable = specs.filter((spec) => !Object.hasOwn(pins, spec.name));
 
   const values: Record<string, string> = {};
   for (const key of Object.keys(supplied)) {
-    if (key in pins) throw invalid(`parameter "${key}" is fixed by this service configuration`);
+    if (Object.hasOwn(pins, key)) throw invalid(`parameter "${key}" is fixed by this service configuration`);
     if (!callable.some((spec) => spec.name === key)) {
       throw invalid(`unknown parameter "${key}" (declared: ${callable.map((s) => s.name).join(", ") || "none"})`);
     }
@@ -505,7 +505,9 @@ export async function listRuns(
   env: RunEnv,
   userId: string,
   bundleId: string,
-  opts: { service?: string; cursor?: string; limit?: number },
+  /** `limit` arrives as a raw query string from REST and as a number from
+   *  in-process callers; `clampLimit` accepts either. */
+  opts: { service?: string; cursor?: string; limit?: number | string },
 ): Promise<{ data: RunRecord[]; nextCursor: string | null }> {
   const { db } = env;
   const bundleCtx = await getBundleContext(db, bundleId);

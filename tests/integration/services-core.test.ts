@@ -174,6 +174,12 @@ describeEachAdapter("services core", (adapter) => {
       name: "Ledger",
       properties: [{ name: "title", datatype: "text" }],
     });
+    // A unique-constrained type: the writer's uniqueness guard is asserted
+    // against it below.
+    await createItemType(app.db, aliceId, bundleId, {
+      name: "Ticket",
+      properties: [{ name: "title", datatype: "text", required: true, config: { unique: true } }],
+    });
   });
 
   afterAll(async () => {
@@ -288,6 +294,7 @@ describeEachAdapter("services core", (adapter) => {
         createService(env, aliceId, bundleId, {
           name: "objectpin",
           params: [{ name: "message" }],
+          // Deliberately past the type: the runtime check is the one under test.
           pins: { message: { deep: "value" } } as unknown as Record<string, string>,
           config: httpConfig,
         }),
@@ -373,7 +380,7 @@ describeEachAdapter("services core", (adapter) => {
         name: "two-actions",
         driver: "plain",
         params: [{ name: "shared", required: true }, { name: "hidden" }],
-        pins: { hidden: "fixed", note: 7 } as unknown as Record<string, string>,
+        pins: { hidden: "fixed", note: 7 },
         config: {},
       });
       expect(svc.actions).toEqual([
@@ -492,6 +499,30 @@ describeEachAdapter("services core", (adapter) => {
       expect(run.error).toMatch(/required property "title" is missing/);
       expect(run.writes).toEqual([]);
       expect(await titles(bundleId)).toHaveLength(before);
+    });
+
+    it("keeps a colliding stored value out of the run's error", async () => {
+      await createService(env, aliceId, bundleId, { name: "ticketer", driver: "writer", config: {} });
+      const first = await runService(env, aliceId, bundleId, {
+        service: "ticketer",
+        action: "record",
+        params: { itemType: "Ticket", title: "SECRET-SERIAL-42" },
+        waitMs: 5_000,
+      });
+      expect(first.status).toBe("succeeded");
+
+      const clash = await runService(env, aliceId, bundleId, {
+        service: "ticketer",
+        action: "record",
+        params: { itemType: "Ticket", title: "SECRET-SERIAL-42" },
+        waitMs: 5_000,
+      });
+      expect(clash.status).toBe("failed");
+      // The rule is named…
+      expect(clash.error).toMatch(/uniqueness/i);
+      // …but the stored value that caused it never reaches the agent-visible row.
+      expect(clash.error).not.toContain("SECRET-SERIAL-42");
+      expect(clash.writes).toEqual([]);
     });
 
     it("hands a driver that declared no writes a null writer", async () => {

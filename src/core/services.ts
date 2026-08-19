@@ -68,6 +68,13 @@ export const serviceParamSpecSchema = z.object({
 });
 export type ServiceParamSpec = z.infer<typeof serviceParamSpecSchema>;
 
+/**
+ * A pin's fixed value. Scalars only, and for the same reason `validatePins`
+ * enforces it at runtime: the runner `String()`s a pinned value blindly, so an
+ * object pin would reach a driver as "[object Object]".
+ */
+export type ServicePins = Record<string, string | number | boolean>;
+
 export interface ServiceActionInfo {
   name: string;
   description: string;
@@ -212,7 +219,7 @@ function effectiveActions(
   return Object.entries(def.actions).map(([name, action]) => ({
     name,
     description: action.description,
-    params: ((action.params ?? params) as ServiceParamSpec[]).filter((spec) => !(spec.name in pins)),
+    params: ((action.params ?? params) as ServiceParamSpec[]).filter((spec) => !Object.hasOwn(pins, spec.name)),
   }));
 }
 
@@ -288,7 +295,7 @@ export async function createService(
     description?: string;
     driver?: string;
     params?: ServiceParamSpec[];
-    pins?: Record<string, string>;
+    pins?: ServicePins;
     config: unknown;
   },
 ): Promise<ServiceInfo> {
@@ -335,7 +342,7 @@ export async function updateService(
     description?: string;
     params?: ServiceParamSpec[];
     /** A record replaces the pin set wholesale; null clears it. */
-    pins?: Record<string, string> | null;
+    pins?: ServicePins | null;
     config?: unknown;
   },
 ): Promise<ServiceInfo> {
@@ -434,7 +441,19 @@ export function createBundleWriter(
   return {
     async createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]> {
       if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
-      const created = await createItemsUnchecked(db, bundleId, { itemType: itemTypeName, items: values });
+      const created = await createItemsUnchecked(db, bundleId, { itemType: itemTypeName, items: values }).catch(
+        (err: unknown) => {
+          // A uniqueness rejection is written by the *bundle's* data: the item
+          // layer's message quotes the colliding value and the id of the item
+          // that already holds it. A driver's failure lands on `run.error`,
+          // which is agent-visible, so that message is replaced by a flat one
+          // naming the rule and nothing else.
+          if (err instanceof YapError && (err.code === "conflict" || /must be unique/.test(err.message))) {
+            throw new YapError("conflict", "service write-back hit a uniqueness conflict");
+          }
+          throw err;
+        },
+      );
       const ids = created.map((item) => item.id);
       // The resolved type name, not the caller's reference: a driver may name
       // an item-type by id, and the trail should read as a name.
