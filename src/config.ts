@@ -83,6 +83,12 @@ export interface YapConfig {
   hookTimeoutMs: number;
   /** Hostnames allowed to resolve to private ranges (SSRF override). */
   hookAllowHosts: string[];
+  /** Ceiling the adapters clamp a caller's `wait_ms` to when starting a run. */
+  runWaitCapMs: number;
+  /** Operator ceiling on a driver action's own timeout; unset = no cap. */
+  runTimeoutCapMs?: number;
+  /** Terminal runs older than this are pruned by the retention sweep. */
+  runRetentionDays: number;
   orphanSweepIntervalMs: number;
   /** Reserved file records older than this are swept. */
   orphanMaxAgeMs: number;
@@ -92,14 +98,27 @@ export class ConfigError extends Error {}
 
 type Env = Record<string, string | undefined>;
 
+/**
+ * A positive integer setting. Fractions are truncated rather than rejected —
+ * consumers downstream (the driver registry's action budgets, timers, byte
+ * limits) all want whole numbers — but a value that truncates to zero is not a
+ * positive integer at all, so it is refused.
+ */
 function intEnv(env: Env, name: string, fallback: number): number {
   const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
+  const n = Math.trunc(Number(raw));
   if (!Number.isFinite(n) || n <= 0) {
-    throw new ConfigError(`${name} must be a positive number, got ${JSON.stringify(raw)}`);
+    throw new ConfigError(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
   }
   return n;
+}
+
+/** Same rules as intEnv, but "unset" is a meaningful value (no ceiling). */
+function optionalIntEnv(env: Env, name: string): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return undefined;
+  return intEnv(env, name, 0);
 }
 
 function listEnv(env: Env, name: string): string[] {
@@ -232,6 +251,9 @@ export function loadConfig(env: Env = process.env): YapConfig {
     mimeAllowlist,
     hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000),
     hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
+    runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", 25_000),
+    runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS"),
+    runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),
   };

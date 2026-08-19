@@ -68,6 +68,40 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...base, YAP_PORT: "nope" })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, YAP_PORT: "-1" })).toThrow(ConfigError);
   });
+
+  it("truncates fractional millisecond settings to whole integers", () => {
+    // The driver registry requires integer action budgets, so the config layer
+    // is where a fractional override is squared away.
+    expect(loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: "1500.7" }).hookTimeoutMs).toBe(1500);
+    expect(() => loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: "0.5" })).toThrow(ConfigError);
+  });
+});
+
+describe("run config", () => {
+  it("defaults: 25s wait cap, no timeout cap, 7-day retention", () => {
+    const config = loadConfig(base);
+    expect(config.runWaitCapMs).toBe(25_000);
+    expect(config.runTimeoutCapMs).toBeUndefined();
+    expect(config.runRetentionDays).toBe(7);
+  });
+
+  it("parses operator overrides", () => {
+    const config = loadConfig({
+      ...base,
+      YAP_RUN_WAIT_CAP_MS: "5000",
+      YAP_RUN_TIMEOUT_CAP_MS: "60000",
+      YAP_RUN_RETENTION_DAYS: "30",
+    });
+    expect(config.runWaitCapMs).toBe(5_000);
+    expect(config.runTimeoutCapMs).toBe(60_000);
+    expect(config.runRetentionDays).toBe(30);
+  });
+
+  it("rejects malformed run settings", () => {
+    expect(() => loadConfig({ ...base, YAP_RUN_WAIT_CAP_MS: "nope" })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...base, YAP_RUN_TIMEOUT_CAP_MS: "0" })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...base, YAP_RUN_RETENTION_DAYS: "-3" })).toThrow(ConfigError);
+  });
 });
 
 describe("backup config", () => {

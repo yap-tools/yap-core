@@ -1,0 +1,585 @@
+/**
+ * Runs: the always-async service executor. Services are authored through REST
+ * only from Task 7 onwards, so this suite plants service rows directly and
+ * drives `src/core/runs.ts` against a registry holding the built-in http
+ * driver plus a tiny in-test driver (short budgets, a sleeper, a thrower).
+ *
+ * What is pinned here: the wait/poll contract, the timeout budget, pinned and
+ * declared parameter handling, the audit rows a run leaves behind, the
+ * capability gates, and the boot/retention helpers.
+ */
+import { createServer, type Server } from "node:http";
+import { and, eq } from "drizzle-orm";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { DriverRegistry } from "../../src/core/drivers/registry.js";
+import { createHttpDriver } from "../../src/core/drivers/http.js";
+import { DRIVER_API, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
+import {
+  getRun,
+  listRuns,
+  pruneRuns,
+  recoverInterruptedRuns,
+  runService,
+  type RunEnv,
+  type RunRecord,
+} from "../../src/core/runs.js";
+import { encryptSecret } from "../../src/crypto.js";
+import { describeEachAdapter } from "../helpers/adapters.js";
+import { apiClient, type ApiClient } from "../helpers/api.js";
+import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
+
+interface ReceivedRequest {
+  method: string;
+  url: string;
+  body: string;
+}
+
+/** In-test driver: no egress, deterministic actions with short budgets. */
+const testDriver: DriverDefinition = {
+  name: "test",
+  api: DRIVER_API,
+  description: "In-test driver with deterministic actions.",
+  egress: false,
+  validateConfig(): void {},
+  actions: {
+    echo: {
+      description: "Echoes the supplied parameters.",
+      params: [
+        { name: "message", required: true },
+        { name: "tag" },
+      ],
+      timeoutMs: 5_000,
+    },
+    sleep: {
+      description: "Sleeps past its own budget.",
+      params: [],
+      timeoutMs: 100,
+    },
+    boom: {
+      description: "Throws a non-YapError.",
+      params: [],
+      timeoutMs: 5_000,
+    },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    if (ctx.action === "sleep") {
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ slept: true }), 10_000);
+        ctx.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        });
+      });
+    }
+    if (ctx.action === "boom") {
+      ctx.log("about to explode");
+      throw new Error("secret internal detail");
+    }
+    return { echoed: ctx.params, config: ctx.config };
+  },
+};
+
+describeEachAdapter("runs", (adapter) => {
+  let app: TestApp;
+  let alice: ApiClient;
+  let aliceId: string;
+  let viewerId: string;
+  let outsiderId: string;
+  let spaceId: string;
+  let bundleId: string;
+  let env: RunEnv;
+
+  let target: Server;
+  let targetPort: number;
+  const received: ReceivedRequest[] = [];
+
+  const plantService = async (input: {
+    name: string;
+    driver?: string;
+    params?: Array<{ name: string; required?: boolean }>;
+    pins?: Record<string, string>;
+    config: unknown;
+    bundle?: string;
+  }): Promise<string> => {
+    const { services } = app.db.tables;
+    const id = `svc-${input.name}`;
+    const now = new Date().toISOString();
+    await app.db.client.insert(services).values({
+      id,
+      bundleId: input.bundle ?? bundleId,
+      name: input.name,
+      description: "",
+      driver: input.driver ?? "http",
+      params: JSON.stringify(input.params ?? []),
+      pins: JSON.stringify(input.pins ?? {}),
+      configEncrypted: encryptSecret(JSON.stringify(input.config), app.config.masterKey),
+      createdAt: now,
+      updatedAt: now,
+    });
+    return id;
+  };
+
+  const pollUntilTerminal = async (runId: string, timeoutMs = 8_000): Promise<RunRecord> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const run = await getRun(env, aliceId, runId);
+      if (run.status === "succeeded" || run.status === "failed") return run;
+      if (Date.now() > deadline) throw new Error(`run ${runId} still ${run.status} after ${timeoutMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  beforeAll(async () => {
+    targetPort = await getFreePort();
+    target = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        received.push({ method: req.method!, url: req.url!, body });
+        if (req.url?.includes("slow")) {
+          setTimeout(() => res.writeHead(200).end("slow response"), 400);
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ received: true }));
+      });
+    });
+    await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
+
+    app = await bootTestApp(
+      { YAP_HOOK_ALLOW_HOSTS: "127.0.0.1", YAP_HOOK_TIMEOUT_MS: "5000" },
+      await adapter.makeDb(),
+    );
+    const registry = new DriverRegistry();
+    registry.register(createHttpDriver(app.config));
+    registry.register(testDriver);
+    env = { db: app.db, config: app.config, registry };
+
+    const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+    const a = await sysadmin.post("/v1/users", { name: "Alice" });
+    alice = apiClient(app.baseUrl, a.body.initialKey.key);
+    aliceId = a.body.user.id;
+    viewerId = (await sysadmin.post("/v1/users", { name: "Viewer" })).body.user.id;
+    outsiderId = (await sysadmin.post("/v1/users", { name: "Outsider" })).body.user.id;
+
+    spaceId = (await alice.post("/v1/spaces", { name: "Runner" })).body.id;
+    bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "services" })).body.id;
+    await alice.post(`/v1/bundles/${bundleId}/grants`, {
+      userId: viewerId,
+      capabilities: ["read_items"],
+      effect: "allow",
+    });
+  });
+
+  afterAll(async () => {
+    await app.stop();
+    await new Promise<void>((resolve, reject) => target.close((e) => (e ? reject(e) : resolve())));
+  });
+
+  describe("executing", () => {
+    it("completes within the wait window and records the driver's result", async () => {
+      await plantService({
+        name: "notify",
+        params: [{ name: "message", required: true }],
+        config: {
+          url: `http://127.0.0.1:${targetPort}/notify`,
+          method: "POST",
+          headers: { authorization: "Bearer super-secret-token" },
+          body_json: { text: "{{message}}" },
+        },
+      });
+      received.length = 0;
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "notify",
+        params: { message: "deploy finished" },
+        waitMs: 8_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.serviceName).toBe("notify");
+      expect(run.action).toBe("fire"); // the http driver's single action, resolved implicitly
+      expect(run.result).toEqual({ status: 200, body: JSON.stringify({ received: true }) });
+      expect(run.error).toBeNull();
+      expect(run.params).toEqual({ message: "deploy finished" });
+      expect(run.startedAt).not.toBeNull();
+      expect(run.finishedAt).not.toBeNull();
+      expect(received).toHaveLength(1);
+      expect(JSON.parse(received[0]!.body)).toEqual({ text: "deploy finished" });
+    });
+
+    it("returns immediately with waitMs 0 and completes in the background", async () => {
+      await plantService({
+        name: "slowcall",
+        config: { url: `http://127.0.0.1:${targetPort}/slow`, method: "GET" },
+      });
+
+      const queued = await runService(env, aliceId, bundleId, { service: "slowcall", waitMs: 0 });
+      expect(["queued", "running"]).toContain(queued.status);
+      expect(queued.result).toBeNull();
+      expect(queued.finishedAt).toBeNull();
+
+      const finished = await pollUntilTerminal(queued.id);
+      expect(finished.status).toBe("succeeded");
+      expect(finished.result).toEqual({ status: 200, body: "slow response" });
+    });
+
+    it("fails a run that outlives its action budget", async () => {
+      await plantService({ name: "sleeper", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "sleeper",
+        action: "sleep",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run timed out after 100ms");
+      expect(run.result).toBeNull();
+      expect(run.finishedAt).not.toBeNull();
+    });
+
+    it("caps an action's budget with runTimeoutCapMs", async () => {
+      const capped = await bootTestApp({ YAP_RUN_TIMEOUT_CAP_MS: "80" });
+      try {
+        const registry = new DriverRegistry();
+        registry.register(testDriver);
+        const cappedEnv: RunEnv = { db: capped.db, config: capped.config, registry };
+        const sysadmin = apiClient(capped.baseUrl, TEST_SYSADMIN_KEY);
+        const u = await sysadmin.post("/v1/users", { name: "U" });
+        const user = apiClient(capped.baseUrl, u.body.initialKey.key);
+        const sid = (await user.post("/v1/spaces", { name: "S" })).body.id;
+        const bid = (await user.post(`/v1/spaces/${sid}/bundles`, { name: "b" })).body.id;
+        const { services } = capped.db.tables;
+        const now = new Date().toISOString();
+        await capped.db.client.insert(services).values({
+          id: "capped-svc",
+          bundleId: bid,
+          name: "sleeper",
+          description: "",
+          driver: "test",
+          params: "[]",
+          pins: "{}",
+          configEncrypted: encryptSecret("{}", capped.config.masterKey),
+          createdAt: now,
+          updatedAt: now,
+        });
+        // The action declares 5000ms; the operator cap wins.
+        const run = await runService(cappedEnv, u.body.user.id, bid, {
+          service: "sleeper",
+          action: "sleep",
+          waitMs: 5_000,
+        });
+        expect(run.status).toBe("failed");
+        expect(run.error).toBe("run timed out after 80ms");
+      } finally {
+        await capped.stop();
+      }
+    });
+
+    it("collapses a non-YapError into a generic failure that leaks nothing", async () => {
+      await plantService({ name: "exploder", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "exploder",
+        action: "boom",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run failed");
+      expect(JSON.stringify(run)).not.toContain("secret internal detail");
+    });
+
+    it("keeps a driver's agent-safe YapError message", async () => {
+      // Planted private destination: the http driver collapses the guard
+      // rejection itself, and the run records that message verbatim.
+      await plantService({ name: "rebound", config: { url: "http://192.168.0.1/internal", method: "GET" } });
+      const run = await runService(env, aliceId, bundleId, { service: "rebound", waitMs: 5_000 });
+      expect(run.status).toBe("failed");
+      expect(run.error).toMatch(/blocked by the SSRF guard/);
+      expect(JSON.stringify(run)).not.toContain("192.168.0.1");
+    });
+  });
+
+  describe("parameters", () => {
+    it("blocks a pinned parameter and injects its value instead", async () => {
+      await plantService({
+        name: "pinned",
+        params: [
+          { name: "to", required: true },
+          { name: "message", required: true },
+        ],
+        pins: { to: "ops" },
+        config: { url: `http://127.0.0.1:${targetPort}/notify?to={{to}}&message={{message}}`, method: "GET" },
+      });
+
+      await expect(
+        runService(env, aliceId, bundleId, { service: "pinned", params: { to: "elsewhere", message: "x" } }),
+      ).rejects.toThrow(/parameter "to" is fixed by this service configuration/);
+
+      received.length = 0;
+      const run = await runService(env, aliceId, bundleId, {
+        service: "pinned",
+        params: { message: "hi" },
+        waitMs: 8_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(received[0]!.url).toBe("/notify?to=ops&message=hi");
+      expect(run.params).toEqual({ to: "ops", message: "hi" });
+    });
+
+    it("rejects unknown and missing parameters", async () => {
+      await expect(
+        runService(env, aliceId, bundleId, { service: "notify", params: { message: "x", url: "http://evil" } }),
+      ).rejects.toThrow(/unknown parameter "url"/);
+      await expect(runService(env, aliceId, bundleId, { service: "notify", params: {} })).rejects.toThrow(
+        /required parameter "message" is missing/,
+      );
+      await expect(
+        runService(env, aliceId, bundleId, { service: "notify", params: { message: { a: 1 } } }),
+      ).rejects.toThrow(/must be a scalar/);
+    });
+
+    it("takes the parameter specs from the driver action when it declares them", async () => {
+      await plantService({
+        name: "echoer",
+        driver: "test",
+        params: [{ name: "ignored" }], // the action's own specs win
+        config: { some: "config" },
+      });
+      await expect(
+        runService(env, aliceId, bundleId, { service: "echoer", action: "echo", params: { ignored: "x" } }),
+      ).rejects.toThrow(/unknown parameter "ignored"/);
+      const run = await runService(env, aliceId, bundleId, {
+        service: "echoer",
+        action: "echo",
+        params: { message: "hello", tag: 7 },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toMatchObject({ echoed: { message: "hello", tag: "7" } });
+    });
+  });
+
+  describe("resolution", () => {
+    it("names the actions when the driver has more than one and none was given", async () => {
+      await expect(runService(env, aliceId, bundleId, { service: "echoer" })).rejects.toThrow(
+        /echo.*sleep|sleep.*echo/s,
+      );
+    });
+
+    it("rejects an unknown action", async () => {
+      await expect(runService(env, aliceId, bundleId, { service: "echoer", action: "nope" })).rejects.toThrow(
+        /unknown action "nope"/,
+      );
+    });
+
+    it("resolves a service by id as well as by name, and explains an empty ref", async () => {
+      const byId = await runService(env, aliceId, bundleId, {
+        service: "svc-notify",
+        params: { message: "by id" },
+        waitMs: 8_000,
+      });
+      expect(byId.status).toBe("succeeded");
+
+      await expect(runService(env, aliceId, bundleId, { service: "  " })).rejects.toThrow(/run_service/);
+      await expect(runService(env, aliceId, bundleId, { service: "ghost" })).rejects.toThrow(/not found/);
+    });
+
+    it("keeps a run after its service is deleted", async () => {
+      const serviceId = await plantService({ name: "doomed", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "doomed",
+        action: "echo",
+        params: { message: "last words" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.serviceId).toBe(serviceId);
+
+      const { services } = app.db.tables;
+      await app.db.client.delete(services).where(eq(services.id, serviceId));
+
+      const survivor = await getRun(env, aliceId, run.id);
+      expect(survivor.serviceId).toBeNull();
+      expect(survivor.serviceName).toBe("doomed");
+      expect(survivor.status).toBe("succeeded");
+    });
+  });
+
+  describe("listing", () => {
+    it("lists newest-first, filters by service, and paginates", async () => {
+      const listBundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "listing" })).body.id;
+      await plantService({ name: "l-one", driver: "test", bundle: listBundleId, config: {} });
+      await plantService({ name: "l-two", driver: "test", bundle: listBundleId, config: {} });
+      for (const service of ["l-one", "l-one", "l-two"]) {
+        await runService(env, aliceId, listBundleId, {
+          service,
+          action: "echo",
+          params: { message: service },
+          waitMs: 5_000,
+        });
+        // Distinct created_at values: the ordering assertion below is about
+        // recency, not about the id tiebreaker.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+
+      const all = await listRuns(env, aliceId, listBundleId, {});
+      expect(all.data).toHaveLength(3);
+      expect(all.data[0]!.serviceName).toBe("l-two"); // newest first
+      expect(all.nextCursor).toBeNull();
+
+      const filtered = await listRuns(env, aliceId, listBundleId, { service: "l-one" });
+      expect(filtered.data.map((r) => r.serviceName)).toEqual(["l-one", "l-one"]);
+
+      const firstPage = await listRuns(env, aliceId, listBundleId, { limit: 2 });
+      expect(firstPage.data).toHaveLength(2);
+      expect(firstPage.nextCursor).toBeTruthy();
+      const secondPage = await listRuns(env, aliceId, listBundleId, {
+        limit: 2,
+        cursor: firstPage.nextCursor!,
+      });
+      expect(secondPage.data).toHaveLength(1);
+      expect(secondPage.nextCursor).toBeNull();
+      const ids = [...firstPage.data, ...secondPage.data].map((r) => r.id);
+      expect(new Set(ids).size).toBe(3);
+    });
+  });
+
+  describe("capability gates", () => {
+    it("a member without run_services gets a 403 naming the capability", async () => {
+      await expect(runService(env, viewerId, bundleId, { service: "notify" })).rejects.toMatchObject({
+        code: "forbidden",
+        details: { capability: "run_services" },
+      });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "notify",
+        params: { message: "x" },
+        waitMs: 8_000,
+      });
+      await expect(getRun(env, viewerId, run.id)).rejects.toMatchObject({ code: "forbidden" });
+      await expect(listRuns(env, viewerId, bundleId, {})).rejects.toMatchObject({ code: "forbidden" });
+    });
+
+    it("an outsider gets a not_found that hides the bundle's existence", async () => {
+      await expect(runService(env, outsiderId, bundleId, { service: "notify" })).rejects.toMatchObject({
+        code: "not_found",
+      });
+      await expect(listRuns(env, outsiderId, bundleId, {})).rejects.toMatchObject({ code: "not_found" });
+    });
+
+    it("an unknown run id is a not_found", async () => {
+      await expect(getRun(env, aliceId, "no-such-run")).rejects.toMatchObject({ code: "not_found" });
+    });
+  });
+
+  describe("boot recovery and retention", () => {
+    it("fails runs interrupted by a restart", async () => {
+      const { runs } = app.db.tables;
+      const now = new Date().toISOString();
+      await app.db.client.insert(runs).values([
+        {
+          id: "interrupted-running",
+          bundleId,
+          serviceId: null,
+          serviceName: "ghost",
+          action: "fire",
+          status: "running",
+          params: "{}",
+          writes: "[]",
+          createdAt: now,
+          startedAt: now,
+        },
+        {
+          id: "interrupted-queued",
+          bundleId,
+          serviceId: null,
+          serviceName: "ghost",
+          action: "fire",
+          status: "queued",
+          params: "{}",
+          writes: "[]",
+          createdAt: now,
+        },
+      ]);
+
+      const recovered = await recoverInterruptedRuns(app.db);
+      expect(recovered).toBeGreaterThanOrEqual(2);
+
+      const row = await getRun(env, aliceId, "interrupted-running");
+      expect(row.status).toBe("failed");
+      expect(row.error).toBe("interrupted by server restart");
+      expect(row.finishedAt).not.toBeNull();
+
+      // Idempotent: a second pass finds nothing left to recover.
+      expect(await recoverInterruptedRuns(app.db)).toBe(0);
+    });
+
+    it("prunes terminal runs older than the retention window only", async () => {
+      const pruneBundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "pruning" })).body.id;
+      const { runs } = app.db.tables;
+      const nowMs = Date.parse("2026-01-10T00:00:00.000Z");
+      const iso = (offsetDays: number) => new Date(nowMs - offsetDays * 86_400_000).toISOString();
+      await app.db.client.insert(runs).values([
+        {
+          id: "old-succeeded",
+          bundleId: pruneBundleId,
+          serviceName: "s",
+          action: "fire",
+          status: "succeeded",
+          params: "{}",
+          writes: "[]",
+          createdAt: iso(30),
+          startedAt: iso(30),
+          finishedAt: iso(30),
+        },
+        {
+          id: "old-failed",
+          bundleId: pruneBundleId,
+          serviceName: "s",
+          action: "fire",
+          status: "failed",
+          params: "{}",
+          writes: "[]",
+          createdAt: iso(9),
+          startedAt: iso(9),
+          finishedAt: iso(9),
+        },
+        {
+          id: "young-succeeded",
+          bundleId: pruneBundleId,
+          serviceName: "s",
+          action: "fire",
+          status: "succeeded",
+          params: "{}",
+          writes: "[]",
+          createdAt: iso(1),
+          startedAt: iso(1),
+          finishedAt: iso(1),
+        },
+        {
+          id: "old-running",
+          bundleId: pruneBundleId,
+          serviceName: "s",
+          action: "fire",
+          status: "running",
+          params: "{}",
+          writes: "[]",
+          createdAt: iso(30),
+          startedAt: iso(30),
+        },
+      ]);
+
+      const deleted = await pruneRuns(app.db, 7, nowMs);
+      expect(deleted).toBe(2);
+      const left = await app.db.client.select().from(runs).where(eq(runs.bundleId, pruneBundleId));
+      expect(left.map((r) => r.id).sort()).toEqual(["old-running", "young-succeeded"]);
+    });
+
+    it("leaves rows in other bundles alone when pruning by age", async () => {
+      const { runs } = app.db.tables;
+      const survivors = await app.db.client
+        .select()
+        .from(runs)
+        .where(and(eq(runs.bundleId, bundleId), eq(runs.status, "succeeded")));
+      expect(survivors.length).toBeGreaterThan(0);
+    });
+  });
+});
