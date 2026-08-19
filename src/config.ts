@@ -102,6 +102,10 @@ export interface YapConfig {
   orphanSweepIntervalMs: number;
   /** Reserved file records older than this are swept. */
   orphanMaxAgeMs: number;
+  /** Directory the operator installs drivers into; resolved against the
+   *  working directory, like the sqlite and blob paths. Missing = no external
+   *  drivers. */
+  driversDir: string;
 }
 
 export class ConfigError extends Error {}
@@ -266,5 +270,6 @@ export function loadConfig(env: Env = process.env): YapConfig {
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),
+    driversDir: env.YAP_DRIVERS_DIR || "./drivers",
   };
 }

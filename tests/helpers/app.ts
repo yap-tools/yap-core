@@ -9,10 +9,11 @@ import { join } from "node:path";
 
 import { createBlobStore, type BlobStore } from "../../src/blob/index.js";
 import { loadConfig, type YapConfig } from "../../src/config.js";
+import { loadExternalDrivers } from "../../src/core/drivers/load.js";
 import { createDb, type Db } from "../../src/db/index.js";
 import { createLogger } from "../../src/logger.js";
 import { getFreeLoopbackPort } from "../../src/rest/edge.js";
-import { buildServer, type YapServer } from "../../src/server.js";
+import { buildServer, createDriverRegistry, type YapServer } from "../../src/server.js";
 
 export const TEST_SYSADMIN_KEY = "test-sysadmin-key-0123456789abcdef";
 
@@ -52,7 +53,11 @@ export async function bootTestApp(envOverrides: Record<string, string> = {}, db?
   if (!db) await database.migrate();
   const blob = await createBlobStore(config);
   const quiet = createLogger({ debug() {}, info() {}, log() {}, warn() {}, error: console.error.bind(console) });
-  const server = buildServer(config, database, blob, quiet);
+  // Mirrors serve.ts: the operator's drivers are loaded into the registry
+  // before the server is built, so tests exercise the real loader.
+  const registry = createDriverRegistry(config);
+  await loadExternalDrivers(config.driversDir, registry, quiet);
+  const server = buildServer(config, database, blob, quiet, registry);
   await server.start();
   return {
     server,

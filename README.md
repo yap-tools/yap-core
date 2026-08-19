@@ -175,6 +175,7 @@ local dev.
 | `YAP_BLOB` | `fs` | `fs` or `s3` |
 | `YAP_BLOB_FS_ROOT` | `./data/blobs` | Local blob root |
 | `YAP_S3_BUCKET` / `YAP_S3_REGION` / `YAP_S3_ENDPOINT` / `YAP_S3_ACCESS_KEY_ID` / `YAP_S3_SECRET_ACCESS_KEY` / `YAP_S3_FORCE_PATH_STYLE` | — | S3-compatible storage (R2/GCS-interop/MinIO via endpoint) |
+| `YAP_DRIVERS_DIR` | `./drivers` | Installed service drivers, one package folder each; loaded at startup |
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | Upload size cap |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` | 600 / 14400 / 600 | Link/token lifetimes |

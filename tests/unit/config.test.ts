@@ -30,6 +30,12 @@ describe("loadConfig", () => {
     expect(config.mimeAllowlist).toBe("*");
     expect(config.downloadTtlSeconds).toBe(14400);
     expect(config.hookTimeoutMs).toBe(30_000);
+    // Instance-relative, like the sqlite and blob paths.
+    expect(config.driversDir).toBe("./drivers");
+  });
+
+  it("takes the drivers directory from the environment", () => {
+    expect(loadConfig({ ...base, YAP_DRIVERS_DIR: "/srv/yap/drivers" }).driversDir).toBe("/srv/yap/drivers");
   });
 
   it("selects postgres and requires its url", () => {

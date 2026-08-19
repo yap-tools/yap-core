@@ -98,7 +98,28 @@ async function authenticateMcp(
   }
 }
 
-export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: YapLogger = createLogger()): YapServer {
+/**
+ * The registry a server starts from: the built-in drivers only. There is one
+ * per server, shared by every surface — services are authored against it over
+ * REST and run against it from REST and MCP alike. Callers that install more
+ * (serve.ts loads the operator's drivers/ directory into it) build it first
+ * and hand it to {@link buildServer}, so every surface — tools/list included —
+ * sees the same table from the first request on.
+ */
+export function createDriverRegistry(config: YapConfig): DriverRegistry {
+  const registry = new DriverRegistry();
+  // The built-in http driver is what every legacy hook was.
+  registry.register(createHttpDriver(config));
+  return registry;
+}
+
+export function buildServer(
+  config: YapConfig,
+  db: Db,
+  blob: BlobStore,
+  logger: YapLogger = createLogger(),
+  registry: DriverRegistry = createDriverRegistry(config),
+): YapServer {
   const mcp = new FastMCP<SessionAuth>({
     name: "yap",
     // fastmcp types version as a semver template literal; ours is a plain string.
@@ -125,12 +146,6 @@ Stored references are opaque — resolve before showing them to a user: file://{
   });
 
   let edge: HttpServer | undefined;
-
-  // One registry per server, shared by every surface: services are authored
-  // against it over REST and run against it from REST and MCP alike. The
-  // built-in http driver is what every legacy hook was.
-  const registry = new DriverRegistry();
-  registry.register(createHttpDriver(config));
 
   const server: YapServer = {
     mcp,

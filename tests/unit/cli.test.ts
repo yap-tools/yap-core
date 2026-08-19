@@ -83,7 +83,11 @@ describe("initInstance", () => {
     expect(content).toContain("YAP_SQLITE_PATH=./data/yap.db");
     expect(content).toContain("YAP_BLOB_FS_ROOT=./data/blobs");
 
+    expect(content).toContain("YAP_DRIVERS_DIR=./drivers");
+
     expect(statSync(join(dir, "data")).isDirectory()).toBe(true);
+    // Empty, but present: it is where an operator drops a driver package.
+    expect(statSync(join(dir, "drivers")).isDirectory()).toBe(true);
     expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain(".env");
   });
 
