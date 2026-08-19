@@ -7,7 +7,9 @@
  * - Egress: a driver that declares `egress: true` receives an `Egress` handle
  *   and MUST reach the network only through it — the handle is the single
  *   SSRF-guarded door (see egress.ts). A driver declaring `egress: false`
- *   receives `null` and has no sanctioned way out.
+ *   receives `null` and has no sanctioned way out. The handle is owned by the
+ *   runner, not the driver: the runner disposes it when the call ends, so a
+ *   driver must not retain it past its `run`.
  * - Writes: a driver receives a `writer` only for the write surfaces it
  *   declared. Undeclared writes are simply not reachable — `writer` is null.
  * - Config: the decrypted service config reaches the driver only inside
@@ -21,9 +23,10 @@
 import type { Egress } from "./egress.js";
 
 /**
- * The guarded egress handle. Implemented by `createEgress` (egress.ts); the
- * interface lives beside it and is re-exported here so a driver module can
- * import the whole contract from one place.
+ * The guarded egress handle: `fetch`, `connect`, `assertPublic`, and the
+ * `dispose` its owner calls to release the connection pool. Implemented by
+ * `createEgress` (egress.ts); the interface lives beside it and is re-exported
+ * here so a driver module can import the whole contract from one place.
  */
 export type { Egress };
 
@@ -66,7 +69,8 @@ export interface RunContext {
   config: unknown;
   action: string;
   params: Record<string, string>;
-  /** The guarded network door; null when the driver declared `egress: false`. */
+  /** The guarded network door; null when the driver declared `egress: false`.
+   * Valid for the duration of this call only — the runner disposes it after. */
   egress: Egress | null;
   /** Bundle-scoped writes; null when the driver declared no writes. */
   writer: BundleWriter | null;

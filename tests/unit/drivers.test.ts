@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
+import http from "node:http";
 import net from "node:net";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { loadConfig, type YapConfig } from "../../src/config.js";
 import { DriverRegistry, validateDriverDefinition } from "../../src/core/drivers/registry.js";
@@ -36,6 +37,37 @@ function definition(overrides: Record<string, unknown> = {}): Record<string, unk
     },
     ...overrides,
   };
+}
+
+/** Runs `fn` against a throwaway loopback HTTP server, always closing it. */
+async function withHttpServer(
+  handler: http.RequestListener,
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  try {
+    await fn(port);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/** Captures the sockets `createEgress().connect` opens so a test can assert
+ * they were destroyed — egress only hands back a socket on success. */
+function captureSockets(): { sockets: net.Socket[]; restore: () => void } {
+  const sockets: net.Socket[] = [];
+  const actual = net.connect;
+  const spy = vi
+    .spyOn(net, "connect")
+    .mockImplementation(((...args: Parameters<typeof net.connect>) => {
+      const socket = (actual as (...a: unknown[]) => net.Socket)(...args);
+      sockets.push(socket);
+      return socket;
+    }) as typeof net.connect);
+  return { sockets, restore: () => spy.mockRestore() };
 }
 
 describe("validateDriverDefinition", () => {
@@ -208,6 +240,108 @@ describe("createEgress: fetch", () => {
   });
 });
 
+// The tests above inject fetchImpl, which skips the undici dispatcher entirely.
+// These exercise the real path: pinning Agent + createPinningLookup + manual
+// redirects, against a loopback server that only an allowlist can reach.
+describe("createEgress: fetch (real transport)", () => {
+  it("performs a real request through the pinning dispatcher", async () => {
+    await withHttpServer(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("real-pong");
+      },
+      async (port) => {
+        const egress = createEgress(testConfig(["127.0.0.1"]));
+        try {
+          const res = await egress.fetch(`http://127.0.0.1:${port}/x`, { method: "GET" });
+          expect(res.status).toBe(200);
+          expect(await res.text()).toBe("real-pong");
+        } finally {
+          await egress.dispose();
+        }
+      },
+    );
+  });
+
+  it("returns a 302 instead of following it", async () => {
+    let redirectTarget = "";
+    let privateHits = 0;
+    await withHttpServer(
+      (req, res) => {
+        if (req.url === "/private") {
+          privateHits += 1;
+          res.writeHead(200);
+          res.end("secret");
+          return;
+        }
+        res.writeHead(302, { location: redirectTarget });
+        res.end();
+      },
+      async (port) => {
+        redirectTarget = `http://127.0.0.1:${port}/private`;
+        const egress = createEgress(testConfig(["127.0.0.1"]));
+        try {
+          const res = await egress.fetch(`http://127.0.0.1:${port}/start`, { method: "GET" });
+          expect(res.status).toBe(302);
+          await res.text();
+          expect(privateHits).toBe(0);
+        } finally {
+          await egress.dispose();
+        }
+      },
+    );
+  });
+
+  it("rejects a private destination before any connection is made", async () => {
+    let hits = 0;
+    await withHttpServer(
+      (_req, res) => {
+        hits += 1;
+        res.writeHead(200);
+        res.end("reached");
+      },
+      async (port) => {
+        const egress = createEgress(testConfig()); // no allowlist
+        try {
+          await expect(egress.fetch(`http://127.0.0.1:${port}/x`, { method: "GET" })).rejects.toThrow(
+            YapError,
+          );
+          expect(hits).toBe(0);
+        } finally {
+          await egress.dispose();
+        }
+      },
+    );
+  });
+});
+
+describe("createEgress: dispose", () => {
+  it("is a no-op when nothing ever fetched, and is idempotent", async () => {
+    const egress = createEgress(testConfig());
+    await expect(egress.dispose()).resolves.toBeUndefined();
+    await expect(egress.dispose()).resolves.toBeUndefined();
+  });
+
+  it("releases the pool and refuses further use", async () => {
+    await withHttpServer(
+      (_req, res) => {
+        res.writeHead(200);
+        res.end("ok");
+      },
+      async (port) => {
+        const egress = createEgress(testConfig(["127.0.0.1"]));
+        const res = await egress.fetch(`http://127.0.0.1:${port}/x`, { method: "GET" });
+        await res.text();
+        await egress.dispose();
+        await egress.dispose(); // idempotent after a pool was actually opened
+        await expect(egress.fetch(`http://127.0.0.1:${port}/x`, { method: "GET" })).rejects.toThrow(
+          /disposed/,
+        );
+      },
+    );
+  });
+});
+
 describe("createEgress: connect", () => {
   it("rejects a blocked address with the SSRF pin error code", async () => {
     const egress = createEgress(testConfig());
@@ -240,5 +374,50 @@ describe("createEgress: connect", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("rejects a port that is not an integer in 1-65535, naming the field", async () => {
+    const egress = createEgress(testConfig(["127.0.0.1"]));
+    for (const port of [0, -1, 1.5, 65536, Number.NaN]) {
+      await expect(egress.connect("127.0.0.1", port), String(port)).rejects.toThrow(/port/);
+    }
+  });
+
+  // 203.0.113.0/24 is TEST-NET-3: not in ssrf.ts's PRIVATE_V4_RANGES, so it
+  // passes the guard, and it is unroutable, so the connect never completes.
+  it("rejects with an AbortError and destroys the socket when the signal fires", async () => {
+    const { sockets, restore } = captureSockets();
+    try {
+      const egress = createEgress(testConfig());
+      const controller = new AbortController();
+      const pending = egress.connect("203.0.113.1", 80, { signal: controller.signal, timeoutMs: 5000 });
+      setTimeout(() => controller.abort(), 50);
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.destroyed).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("times out a connect that never completes and destroys the socket", async () => {
+    const { sockets, restore } = captureSockets();
+    try {
+      const egress = createEgress(testConfig());
+      await expect(egress.connect("203.0.113.1", 80, { timeoutMs: 200 })).rejects.toThrow(
+        /timed out after 200ms/,
+      );
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.destroyed).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const egress = createEgress(testConfig(["127.0.0.1"]));
+    await expect(
+      egress.connect("127.0.0.1", 9, { signal: AbortSignal.abort() }),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });

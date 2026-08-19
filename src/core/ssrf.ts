@@ -96,7 +96,10 @@ function ipv6Hextets(ip: string): number[] | null {
 
 export type Resolver = (hostname: string) => Promise<string[]>;
 
-const defaultResolver: Resolver = async (hostname) => {
+/** The production resolver: `dns.lookup` with every address returned. Exported
+ * so other guarded surfaces (egress.ts) share one definition rather than
+ * keeping copies that can drift apart. */
+export const defaultResolver: Resolver = async (hostname) => {
   const records = await dns.lookup(hostname, { all: true, verbatim: true });
   return records.map((r) => r.address);
 };
