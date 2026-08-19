@@ -28,7 +28,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { extract as tarExtract } from "tar-stream";
@@ -104,17 +104,43 @@ function runNpmInstall(cwd: string): void {
   }
 }
 
-/** Extracts a `npm pack` tarball (root entry `package/`) into `destDir`. */
-async function extractTarball(tarballPath: string, destDir: string): Promise<void> {
+/**
+ * Extracts a `npm pack` tarball (root entry `package/`) into `destDir`.
+ *
+ * `tar-stream` passes `header.name` (and, for link entries, `header.linkname`)
+ * through verbatim — a crafted entry such as `package/../../../etc/x` would
+ * otherwise resolve outside `destDir` (a "tar-slip" arbitrary-file-write).
+ * Every entry's resolved path is therefore checked to stay within `destDir`
+ * before anything is written, and link/symlink entries — which a driver
+ * package has no legitimate reason to contain — are rejected outright.
+ */
+export async function extractTarball(tarballPath: string, destDir: string): Promise<void> {
+  const realDestDir = resolve(destDir);
   const extract = tarExtract();
   extract.on("entry", (header, stream, next) => {
+    // Rejecting an entry destroys the underlying extract stream, which in
+    // turn destroys this entry's own per-entry stream — re-emitting the same
+    // error on it. Nothing else listens for that (tar-stream's own iterator
+    // has the identical workaround), so without this it surfaces as an
+    // unhandled 'error' event instead of the pipeline rejection callers await.
+    stream.on("error", () => {});
+    if (header.type === "symlink" || header.type === "link") {
+      stream.resume();
+      next(new CliError(`refusing to extract ${JSON.stringify(header.name)}: ${header.type} entries are not allowed in a driver package`));
+      return;
+    }
     const relPath = header.name.replace(/^package\//, "").replace(/^\/+/, "");
     if (relPath === "") {
       stream.resume();
       next();
       return;
     }
-    const target = join(destDir, relPath);
+    const target = resolve(realDestDir, relPath);
+    if (target !== realDestDir && !target.startsWith(realDestDir + sep)) {
+      stream.resume();
+      next(new CliError(`refusing to extract ${JSON.stringify(header.name)}: it resolves outside the extraction directory`));
+      return;
+    }
     if (header.type === "directory") {
       mkdirSync(target, { recursive: true });
       stream.resume();
@@ -170,7 +196,12 @@ export async function cmdDriverAdd(dir: string, spec: string): Promise<void> {
     assertDriverAvailable(target, name);
 
     mkdirSync(driversDir(dir), { recursive: true });
-    cpSync(extractTmp, target, { recursive: true });
+    try {
+      cpSync(extractTmp, target, { recursive: true });
+    } catch (err) {
+      rmSync(target, { recursive: true, force: true });
+      throw err;
+    }
     rmSync(extractTmp, { recursive: true, force: true });
     extractTmp = undefined;
 

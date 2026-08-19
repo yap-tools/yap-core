@@ -5,12 +5,20 @@
  * unknown one). The real `npm pack`/install/import round trip is covered by
  * the integration test, which is slow by nature.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
+import { pack as tarPack } from "tar-stream";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { assertDriverAvailable, cmdDriverRemove, deriveDriverName } from "../../src/cli/driver-impl.js";
+import {
+  assertDriverAvailable,
+  cmdDriverRemove,
+  deriveDriverName,
+  extractTarball,
+} from "../../src/cli/driver-impl.js";
 
 const tempDirs: string[] = [];
 function tempDir(): string {
@@ -84,5 +92,76 @@ describe("cmdDriverRemove", () => {
   it("says none are installed when the drivers directory is empty or missing", () => {
     const dir = tempDir();
     expect(() => cmdDriverRemove(dir, "bogus")).toThrow(/no driver named "bogus" installed.*none are installed/s);
+  });
+});
+
+/** Builds a gzipped tarball at `outPath` from entries, hostile ones included. */
+async function buildTarball(
+  entries: Array<{ name: string; type?: "file" | "symlink" | "link"; linkname?: string; content?: string }>,
+  outPath: string,
+): Promise<void> {
+  const packStream = tarPack();
+  for (const e of entries) {
+    if (e.type === "symlink" || e.type === "link") {
+      packStream.entry({ name: e.name, type: e.type, linkname: e.linkname ?? "/etc/passwd" });
+    } else {
+      packStream.entry({ name: e.name }, e.content ?? "");
+    }
+  }
+  packStream.finalize();
+  await pipeline(packStream, createGzip(), createWriteStream(outPath));
+}
+
+describe("extractTarball", () => {
+  it("extracts a well-formed tarball into destDir", async () => {
+    const dir = tempDir();
+    const tarballPath = join(dir, "good.tgz");
+    await buildTarball(
+      [
+        { name: "package/package.json", content: '{"name":"yap-driver-echo"}' },
+        { name: "package/index.js", content: "module.exports = {};" },
+      ],
+      tarballPath,
+    );
+    const destDir = join(dir, "extract");
+    mkdirSync(destDir, { recursive: true });
+    await extractTarball(tarballPath, destDir);
+    expect(existsSync(join(destDir, "package.json"))).toBe(true);
+    expect(existsSync(join(destDir, "index.js"))).toBe(true);
+  });
+
+  it("rejects a path-traversal entry and writes nothing outside destDir", async () => {
+    const dir = tempDir();
+    const tarballPath = join(dir, "evil.tgz");
+    await buildTarball([{ name: "package/../escape.txt", content: "pwned" }], tarballPath);
+    const destDir = join(dir, "extract");
+    mkdirSync(destDir, { recursive: true });
+
+    await expect(extractTarball(tarballPath, destDir)).rejects.toThrow(/package\/\.\.\/escape\.txt/);
+
+    // The escape target ("<dir>/escape.txt", one level up from destDir) was
+    // never written, nor was anything else written into the parent tmp dir.
+    expect(existsSync(join(dir, "escape.txt"))).toBe(false);
+    expect(readdirSync(dir).sort()).toEqual(["evil.tgz", "extract"]);
+  });
+
+  it("rejects a symlink entry, naming it", async () => {
+    const dir = tempDir();
+    const tarballPath = join(dir, "symlink.tgz");
+    await buildTarball([{ name: "package/link", type: "symlink", linkname: "/etc/passwd" }], tarballPath);
+    const destDir = join(dir, "extract");
+    mkdirSync(destDir, { recursive: true });
+
+    await expect(extractTarball(tarballPath, destDir)).rejects.toThrow(/package\/link/);
+  });
+
+  it("rejects a hardlink entry, naming it", async () => {
+    const dir = tempDir();
+    const tarballPath = join(dir, "hardlink.tgz");
+    await buildTarball([{ name: "package/link", type: "link", linkname: "package/package.json" }], tarballPath);
+    const destDir = join(dir, "extract");
+    mkdirSync(destDir, { recursive: true });
+
+    await expect(extractTarball(tarballPath, destDir)).rejects.toThrow(/package\/link/);
   });
 });
