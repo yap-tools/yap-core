@@ -103,18 +103,20 @@ export function buildServer(config: YapConfig, db: Db, blob: BlobStore, logger: 
     name: "yap",
     // fastmcp types version as a semver template literal; ours is a plain string.
     version: VERSION as `${number}.${number}.${number}`,
-    instructions: `Yap serves navigable context: spaces hold bundles; a bundle holds docs, item-types (schemas with items), files, and hooks.
+    instructions: `Yap serves navigable context: spaces hold bundles; a bundle holds docs, item-types (schemas with items), files, and services.
 
-Engage Yap whenever a request involves its spaces, stored items, files, or hooks, or names a space or bundle. Discovery is progressive — follow this order:
+Engage Yap whenever a request involves its spaces, stored items, files, or services, or names a space or bundle. Discovery is progressive — follow this order:
 1. load — the spaces you can reach (with bundle names), your autoloading user docs, and a lightweight second-tier tool manifest.
 2. load_space(space_id) — the space's operator instructions and bundle descriptions.
-3. load_bundle(bundle_ids) — REQUIRED before call: binding docs, item-type schemas, files, hooks.
+3. load_bundle(bundle_ids) — REQUIRED before call: binding docs, item-type schemas, files, services.
 4. get_tools(names?) — when full second-tier descriptions or parameter specs are needed, expand the manifest by name; omit names to fetch the manifest directly.
 5. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
 
+A service is a named capability the bundle can run; you supply its declared parameters and never see its configuration. Running is async: run_service starts a run and get_run polls it until status is succeeded or failed (list_runs is the log). Services are authored over REST only.
+
 If several spaces or bundles could match the user's intent, ask the user rather than guessing. Run the discovery chain silently — do not narrate loading calls.
 
-Stored references are opaque — resolve before showing them to a user: file://{uuid} via show_file (returns an expiring link), item://{uuid} via get_items. Never surface raw reference URIs, durable storage locations, or hook transports. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items".`,
+Stored references are opaque — resolve before showing them to a user: file://{uuid} via show_file (returns an expiring link), item://{uuid} via get_items. Never surface raw reference URIs, durable storage locations, or a service's destination. When reporting results, refer to items by their item-type name (e.g. "3 Todos"), never as "items".`,
     logger,
     authenticate: (request) => authenticateMcp(request, db, config),
     health: { enabled: true, path: "/health", message: "ok" },
@@ -126,7 +128,7 @@ Stored references are opaque — resolve before showing them to a user: file://{
 
   // One registry per server, shared by every surface: services are authored
   // against it over REST and run against it from REST and MCP alike. The
-  // built-in http driver is what every hook was.
+  // built-in http driver is what every legacy hook was.
   const registry = new DriverRegistry();
   registry.register(createHttpDriver(config));
 

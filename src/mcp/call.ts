@@ -2,10 +2,10 @@
  * The second-tier catalog: tools dispatched through `call`, each a thin
  * adapter over the core (which enforces the capability gates itself). The
  * table also carries the metadata `load` and `load_bundle` use to advertise
- * the catalog. File and hook tools register here in their milestones.
+ * the catalog. File and service tools register here in their milestones.
  */
 import type { BlobStore } from "../blob/index.js";
-import type { YapConfig } from "../config.js";
+import { DEFAULT_RUN_WAIT_CAP_MS, type YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
@@ -143,6 +143,23 @@ function grantTargetFor(env: CallEnv): Promise<grantsCore.GrantTarget> {
   return env.bundleId
     ? bundlesCore.bundleGrantTarget(env.db, env.bundleId)
     : grantsCore.spaceGrantTarget(env.db, env.spaceId);
+}
+
+/**
+ * Clamps an agent's requested run wait into [0, config.runWaitCapMs]. The
+ * clamp lives here, at the adapter, because the core deliberately does not do
+ * it: internal callers (the `fire_hook` alias) must be able to wait past the
+ * cap to keep their synchronous contract, while an agent's ask is untrusted
+ * input that would otherwise pin an MCP request open for as long as it liked.
+ * An undefined wait stays undefined — that is "don't wait", not "wait 0".
+ */
+function clampWaitMs(config: YapConfig, value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const ms = Number(value);
+  if (!Number.isFinite(ms)) {
+    throw new YapError("invalid_request", `wait_ms must be a number of milliseconds (got ${JSON.stringify(value)})`);
+  }
+  return Math.min(Math.max(0, Math.floor(ms)), config.runWaitCapMs);
 }
 
 /** The single canonical `capabilities` param accepts a scalar or an array — normalized here; core rejects an empty list. */
@@ -348,9 +365,50 @@ export const secondTier: Record<string, SecondTierTool> = {
       return { result: { deleted: true } };
     },
   },
+  run_service: {
+    description:
+      'Start a run of one of the bundle\'s services, supplying values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the service\'s configuration. Returns the run — poll get_run until status is terminal (succeeded|failed). wait_ms (max ' +
+      `${DEFAULT_RUN_WAIT_CAP_MS}` +
+      ') folds the first poll into the dispatch: the run comes back already finished if it lands inside that window, and keeps going on the server if it does not. Params: "id" — the service\'s name or id (both are in load_bundle); "action" — which of the service\'s actions to run (omit when it has only one); "params" — an object of the declared parameter values, nested, NOT alongside id; "wait_ms". Example: {id: "notify", params: {message: "deploy finished", channel: "ops"}, wait_ms: 5000}. A failed run is a returned record with status "failed" and an error string, not a call error — read run.status before reporting success.',
+    capability: "run_services",
+    params: { id: { required: true }, action: {}, params: {}, wait_ms: {} },
+    handler: async (env, params) => ({
+      result: await runsCore.runService(env, env.userId, env.bundleId, {
+        service: String(params.id),
+        action: params.action as string | undefined,
+        params: params.params as Record<string, unknown> | undefined,
+        waitMs: clampWaitMs(env.config, params.wait_ms),
+      }),
+    }),
+  },
+  get_run: {
+    description:
+      "Read one run back: its status, the parameters it was given, the result or error, and any items it wrote. Poll this after run_service until status is succeeded or failed. Params: id (the run id run_service returned).",
+    capability: "run_services",
+    params: idParam,
+    // Access is decided by the run's *own* bundle, not by the bundle_id this
+    // call targets — that one only routes the call. A run the caller cannot see
+    // is a 404, indistinguishable from an id that never existed.
+    handler: async (env, params) => ({
+      result: await runsCore.getRun(env, env.userId, String(params.id)),
+    }),
+  },
+  list_runs: {
+    description:
+      "List the targeted bundle's runs, newest first, as {data, nextCursor}. Params: service (name or id — only that service's runs), cursor, limit.",
+    capability: "run_services",
+    params: { service: {}, cursor: {}, limit: {} },
+    handler: async (env, params) => ({
+      result: await runsCore.listRuns(env, env.userId, env.bundleId, {
+        service: params.service as string | undefined,
+        cursor: params.cursor as string | undefined,
+        limit: params.limit as number | undefined,
+      }),
+    }),
+  },
   fire_hook: {
     description:
-      'Fire a hook with values for its declared (allowlisted) parameters only — you cannot add, rename, or inject anything else, and you never see the hook\'s transport. Synchronous with a fixed timeout, no automatic retries; returns the raw response status and body. Two params: "id" — the hook\'s name or id (both are in load_bundle); and "params" — an object of the hook\'s declared parameter values. The declared values go inside the nested params object, NOT alongside id. Example: {id: "notify", params: {message: "deploy finished", channel: "ops"}}.',
+      'Deprecated alias for run_service (kept until 1.0): starts a run and waits like the old synchronous hook fire. Prefer run_service. Two params: "id" — the service\'s name or id; and "params" — an object of its declared parameter values, nested, NOT alongside id. Returns the raw response status and body on success; a failure arrives as a call error rather than as a run record.',
     capability: "run_services",
     params: { id: { required: true }, params: {} },
     // A fire is synchronous by contract, so this internal caller waits past the
@@ -373,8 +431,8 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
 
   // ---- Management (parity with the REST management plane) -----------------------
-  // Hook authoring (edit_hooks) is deliberately absent — defining a hook's
-  // destination and secrets stays REST-only by design.
+  // Service authoring (edit_services) is deliberately absent — defining a
+  // service's driver configuration and secrets stays REST-only by design.
 
   // manage_space (space-scoped)
   update_space: {
@@ -455,7 +513,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     }),
   },
   delete_bundle: {
-    description: "Delete the targeted bundle and everything in it (item-types, items, files, hooks).",
+    description: "Delete the targeted bundle and everything in it (item-types, items, files, services).",
     capability: "edit_bundles",
     params: noParams,
     handler: async (env) => {

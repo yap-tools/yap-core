@@ -6,8 +6,10 @@
  *
  * This is the hooks suite carried onto the services surface — every security
  * property the hook surface pinned is pinned again here, on the routes that
- * replace it. (The legacy `/hooks` mounts keep their own suite in
- * `hooks-compat.test.ts`; MCP running arrives with Task 8.)
+ * replace it. The last block covers the same ground over MCP: `run_service` /
+ * `get_run` / `list_runs`, the adapter's wait clamp, and what `load_bundle`
+ * shows. (The legacy `/hooks` mounts keep their own suite in
+ * `hooks-compat.test.ts`.)
  */
 import { createServer, type Server } from "node:http";
 import { eq } from "drizzle-orm";
@@ -607,6 +609,243 @@ describeEachAdapter("services", (adapter) => {
       } finally {
         await capped.stop();
       }
+    });
+  });
+
+  describe("running over MCP", () => {
+    /** One second-tier call, returning the per-call result. */
+    const mcpCall = async (
+      client: McpTestClient,
+      bundle: string,
+      tool: string,
+      params: Record<string, unknown> = {},
+    ) => {
+      const res = await client.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: bundle, tool, params }],
+      });
+      return res.results[0];
+    };
+
+    const terminal = (status: string) => status === "succeeded" || status === "failed";
+
+    /** Polls get_run over MCP until the run reaches a terminal status. */
+    const pollRun = async (client: McpTestClient, bundle: string, runId: string) => {
+      let record: any;
+      for (let i = 0; i < 80; i++) {
+        const got = await mcpCall(client, bundle, "get_run", { id: runId });
+        expect(got.ok).toBe(true);
+        record = got.result;
+        if (terminal(record.status)) return record;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return record;
+    };
+
+    it("run_service with a wait returns the finished run inline", async () => {
+      received.length = 0;
+      const started = await mcpCall(aliceMcp, bundleId, "run_service", {
+        id: "notify",
+        params: { message: "over MCP", channel: "ops" },
+        wait_ms: 5_000,
+      });
+      expect(started.ok).toBe(true);
+      expect(started.result.status).toBe("succeeded");
+      expect(started.result.serviceName).toBe("notify");
+      expect(started.result.action).toBe("fire");
+      expect(started.result.id).toEqual(expect.any(String));
+      expect(started.result.result.status).toBe(200);
+      expect(JSON.parse(started.result.result.body)).toEqual({ received: true });
+      expect(received).toHaveLength(1);
+      // The configuration stays server-side on this surface too.
+      expect(JSON.stringify(started)).not.toContain("super-secret-token");
+    });
+
+    it("wait_ms: 0 hands back a pending run that get_run polls to terminal", async () => {
+      const pending = await mcpCall(aliceMcp, bundleId, "run_service", {
+        id: "notify",
+        params: { message: "async", channel: "ops" },
+        wait_ms: 0,
+      });
+      expect(pending.ok).toBe(true);
+      expect(["queued", "running"]).toContain(pending.result.status);
+      expect(pending.result.result).toBeNull();
+
+      const finished = await pollRun(aliceMcp, bundleId, pending.result.id);
+      expect(finished.status).toBe("succeeded");
+      expect(finished.id).toBe(pending.result.id);
+      expect(finished.result.status).toBe(200);
+    });
+
+    it("run_service rejects an undeclared parameter as a per-call failure", async () => {
+      const bad = await mcpCall(aliceMcp, bundleId, "run_service", {
+        id: "notify",
+        params: { message: "x", url: "http://evil.example" },
+      });
+      expect(bad.ok).toBe(false);
+      expect(bad.error.code).toBe("invalid_request");
+      expect(bad.error.message).toContain('unknown parameter "url"');
+    });
+
+    it("get_run hides a run in a bundle the caller cannot see behind a 404", async () => {
+      const mine = await mcpCall(aliceMcp, bundleId, "run_service", {
+        id: "notify",
+        params: { message: "private", channel: "ops" },
+        wait_ms: 5_000,
+      });
+      expect(mine.ok).toBe(true);
+
+      // Carol can reach the space (a grant on the sibling bundle) but has no
+      // foothold at all in the bundle that holds the run.
+      const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+      const c = await sysadmin.post("/v1/users", { name: "Carol" });
+      await alice.post(`/v1/bundles/${siblingBundleId}/grants`, {
+        userId: c.body.user.id,
+        capabilities: ["run_services"],
+        effect: "allow",
+      });
+      const carolMcp = await connectMcp(app.baseUrl, c.body.initialKey.key);
+      try {
+        const denied = await mcpCall(carolMcp, siblingBundleId, "get_run", { id: mine.result.id });
+        expect(denied.ok).toBe(false);
+        expect(denied.error.code).toBe("not_found");
+        // Neither the run's bundle nor its service may be named.
+        expect(denied.error.message).not.toContain(bundleId);
+        expect(denied.error.message).not.toContain("notify");
+        // An id that never existed is indistinguishable.
+        const missing = await mcpCall(carolMcp, siblingBundleId, "get_run", { id: "no-such-run" });
+        expect(missing.error.code).toBe("not_found");
+      } finally {
+        await carolMcp.close();
+      }
+    });
+
+    it("list_runs pages the bundle's runs newest-first as {data, nextCursor}", async () => {
+      const first = await mcpCall(aliceMcp, bundleId, "list_runs", { service: "notify", limit: 1 });
+      expect(first.ok).toBe(true);
+      expect(Object.keys(first.result).sort()).toEqual(["data", "nextCursor"]);
+      expect(first.result.data).toHaveLength(1);
+      expect(first.result.data[0].serviceName).toBe("notify");
+      expect(first.result.nextCursor).toEqual(expect.any(String));
+
+      const next = await mcpCall(aliceMcp, bundleId, "list_runs", {
+        service: "notify",
+        limit: 1,
+        cursor: first.result.nextCursor,
+      });
+      expect(next.ok).toBe(true);
+      expect(next.result.data).toHaveLength(1);
+      expect(next.result.data[0].id).not.toBe(first.result.data[0].id);
+
+      // Unfiltered, the bundle's other services show up too.
+      const all = await mcpCall(aliceMcp, bundleId, "list_runs", {});
+      expect(all.result.data.length).toBeGreaterThan(first.result.data.length);
+      expect(new Set(all.result.data.map((r: any) => r.serviceName)).size).toBeGreaterThan(1);
+    });
+
+    it("clamps wait_ms to the server's cap rather than honouring what the agent asked", async () => {
+      const capped = await bootTestApp({
+        YAP_HOOK_ALLOW_HOSTS: "127.0.0.1",
+        YAP_HOOK_TIMEOUT_MS: "700",
+        YAP_RUN_WAIT_CAP_MS: "50",
+      });
+      let cappedMcp: McpTestClient | undefined;
+      try {
+        const sysadmin = apiClient(capped.baseUrl, TEST_SYSADMIN_KEY);
+        const u = await sysadmin.post("/v1/users", { name: "Waiter" });
+        const user = apiClient(capped.baseUrl, u.body.initialKey.key);
+        const sid = (await user.post("/v1/spaces", { name: "S" })).body.id;
+        const bid = (await user.post(`/v1/spaces/${sid}/bundles`, { name: "b" })).body.id;
+        const created = await user.post(`/v1/bundles/${bid}/services`, {
+          name: "slow",
+          config: { url: `http://127.0.0.1:${targetPort}/slow`, method: "GET" },
+        });
+        expect(created.status).toBe(201);
+
+        cappedMcp = await connectMcp(capped.baseUrl, u.body.initialKey.key);
+        const res = await cappedMcp.call("call", {
+          space_id: sid,
+          calls: [{ bundle_id: bid, tool: "run_service", params: { id: "slow", wait_ms: 999_999 } }],
+        });
+        const started = res.results[0];
+        expect(started.ok).toBe(true);
+        // 50ms cap, well inside the action's own 700ms budget.
+        expect(["queued", "running"]).toContain(started.result.status);
+        expect(started.durationMs).toBeLessThan(600);
+
+        // …and the run finishes on the row regardless, for get_run to pick up.
+        let polled = started.result;
+        for (let i = 0; i < 80 && !terminal(polled.status); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          polled = (await user.get(`/v1/runs/${started.result.id}`)).body;
+        }
+        expect(polled.status).toBe("failed");
+        expect(polled.error).toMatch(/timed out after 700ms/);
+      } finally {
+        await cappedMcp?.close();
+        await capped.stop();
+      }
+    });
+
+    it("load_bundle lists services with their effective params, plus the legacy hooks key", async () => {
+      const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
+      const bundle = loaded.bundles[0];
+
+      const notify = bundle.services.find((s: any) => s.name === "notify");
+      expect(Object.keys(notify).sort()).toEqual(["actions", "description", "driver", "id", "name"]);
+      expect(notify.driver).toBe("http");
+      expect(notify.description).toBe("Send a notification");
+      expect(notify.actions.map((a: any) => a.name)).toEqual(["fire"]);
+      expect(notify.actions[0].params.map((p: any) => p.name)).toEqual(["message", "channel"]);
+
+      // Pinned parameters are configuration: absent from the effective specs.
+      const pinned = bundle.services.find((s: any) => s.name === "pinned");
+      expect(pinned.actions[0].params.map((p: any) => p.name)).toEqual(["message"]);
+
+      // Never the config, on this surface either.
+      const serialized = JSON.stringify(bundle.services);
+      expect(serialized).not.toContain("super-secret-token");
+      expect(serialized).not.toContain(String(targetPort));
+
+      // The legacy key still carries the http subset in the old four-field shape.
+      expect(Array.isArray(bundle.hooks)).toBe(true);
+      for (const hook of bundle.hooks) {
+        expect(Object.keys(hook).sort()).toEqual(["description", "id", "name", "params"]);
+      }
+      const httpIds = bundle.services.filter((s: any) => s.driver === "http").map((s: any) => s.id);
+      expect(bundle.hooks.map((h: any) => h.id).sort()).toEqual([...httpIds].sort());
+    });
+
+    it("lists a service whose driver is not installed, with no actions and no crash", async () => {
+      const { services } = app.db.tables;
+      await app.db.client.insert(services).values({
+        id: "orphaned-driver-service",
+        bundleId: siblingBundleId,
+        name: "orphaned",
+        description: "authored against a driver this server no longer has",
+        driver: "smoke-signal",
+        params: JSON.stringify([{ name: "message" }]),
+        pins: "{}",
+        configEncrypted: encryptSecret(JSON.stringify({ smoke: "grey" }), app.config.masterKey),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [siblingBundleId] });
+      const bundle = loaded.bundles[0];
+      expect(bundle.error).toBeUndefined();
+      const orphan = bundle.services.find((s: any) => s.name === "orphaned");
+      // The row is real and an operator must see it — the driver's absence is
+      // reported as an empty action list, not as a failed listing.
+      expect(orphan.driver).toBe("smoke-signal");
+      expect(orphan.actions).toEqual([]);
+      // It is not an http service, so the legacy view never shows it.
+      expect(bundle.hooks.some((h: any) => h.name === "orphaned")).toBe(false);
+
+      // Running it explains the missing driver rather than crashing.
+      const attempted = await mcpCall(aliceMcp, siblingBundleId, "run_service", { id: "orphaned" });
+      expect(attempted.ok).toBe(false);
+      expect(attempted.error.message).toMatch(/"smoke-signal" driver, which is not installed/);
     });
   });
 });

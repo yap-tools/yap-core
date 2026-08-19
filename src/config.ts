@@ -5,6 +5,14 @@
  * timeout, SSRF allowlist).
  */
 
+/**
+ * Default ceiling on how long a caller may ask to wait for a run. Named
+ * because the MCP `run_service` description quotes it to agents, and a static
+ * tool table has no config to read it from — an operator who raises
+ * YAP_RUN_WAIT_CAP_MS only makes the advertised figure conservative.
+ */
+export const DEFAULT_RUN_WAIT_CAP_MS = 25_000;
+
 export interface SqliteDbConfig {
   dialect: "sqlite";
   /** File path or ":memory:". */
@@ -83,7 +91,9 @@ export interface YapConfig {
   hookTimeoutMs: number;
   /** Hostnames allowed to resolve to private ranges (SSRF override). */
   hookAllowHosts: string[];
-  /** Ceiling the adapters clamp a caller's `wait_ms` to when starting a run. */
+  /** Ceiling the adapters clamp a caller's `wait_ms` to when starting a run.
+   *  Defaults to {@link DEFAULT_RUN_WAIT_CAP_MS}, the figure the `run_service`
+   *  tool description quotes to agents. */
   runWaitCapMs: number;
   /** Operator ceiling on a driver action's own timeout; unset = no cap. */
   runTimeoutCapMs?: number;
@@ -251,7 +261,7 @@ export function loadConfig(env: Env = process.env): YapConfig {
     mimeAllowlist,
     hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000),
     hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
-    runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", 25_000),
+    runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS),
     runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS"),
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),

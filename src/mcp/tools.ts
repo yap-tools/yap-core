@@ -223,7 +223,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load",
     description:
-      "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or hooks, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → get_tools if you need full second-tier params → call. Run the chain silently — do not narrate loading calls.",
+      "Entry point — call this first whenever a request involves Yap: its spaces, stored items, files, or services, or a space or bundle the user names. Returns the spaces you can reach (id, name, description, keywords, bundle names, and your role — match the user's intent against this metadata before descending; if several spaces could match, ask the user which one), your autoloading user docs, and the space-level tool specs. Then descend: load_space → load_bundle → get_tools if you need full second-tier params → call. Run the chain silently — do not narrate loading calls.",
     annotations: { readOnlyHint: true, title: "Load context" },
     execute: async (_args, ctx) => {
       try {
@@ -263,7 +263,7 @@ export function registerMcpTools(server: YapServer): void {
           tools: {
             load_space: "Load a space's context, instructions, and bundles. Params: space_id.",
             load_bundle:
-              "Load bundles' docs, item-type schemas, files, and hooks. Required before call. Params: bundle_ids.",
+              "Load bundles' docs, item-type schemas, files, and services. Required before call. Params: bundle_ids.",
             get_tools: "Return the second-tier manifest, or full second-tier descriptions and params by name. Params: names?.",
             call: {
               description:
@@ -328,7 +328,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load_bundle",
     description:
-      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the available hooks (id, name, description, and declared parameters — never the transport). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
+      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the services the bundle can run (id, name, description, driver, and each action's declared parameters — never the configuration; start one with the run_service call tool). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
     parameters: z.object({ bundle_ids: z.array(z.string()).min(1) }),
     annotations: { readOnlyHint: true, title: "Load bundles" },
     execute: async (args, ctx) => {
@@ -340,6 +340,11 @@ export function registerMcpTools(server: YapServer): void {
             const bundleCtx = await getBundleContext(db, bundleId);
             await requireBundleReadAccess(db, userId, bundleCtx);
             const docRows = await bundleDocsCore.listDocsUnchecked(db, bundleId);
+            // Listed once and viewed twice: `services` is the real surface,
+            // `hooks` the legacy projection of it. A service whose driver is
+            // no longer installed still lists — with its driver name and an
+            // empty action list — rather than taking the bundle down with it.
+            const services = await listServicesUnchecked({ db, config, registry }, bundleId);
             results.push({
               id: bundleCtx.bundle.id,
               space_id: bundleCtx.space.id,
@@ -368,9 +373,10 @@ export function registerMcpTools(server: YapServer): void {
                 }),
               })),
               files: await listFilesUnchecked(db, bundleId),
-              // Still the legacy hook view: http services rendered in the old
-              // shape. Task 8 replaces this with the full services listing.
-              hooks: (await listServicesUnchecked({ db, config, registry }, bundleId))
+              services,
+              // The legacy hook view — http services in the old four-field
+              // shape, for clients written before services existed. Dies at 1.0.
+              hooks: services
                 .filter((s) => s.driver === "http")
                 .map((s) => ({
                   id: s.id,
@@ -426,7 +432,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "help",
     description:
-      "Reference documentation for core Yap concepts (spaces, bundles, items, hooks, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
+      "Reference documentation for core Yap concepts (spaces, bundles, items, services and runs, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
     annotations: { readOnlyHint: true, title: "Help" },
     execute: async () => HELP_TEXT,
   });
