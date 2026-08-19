@@ -17,14 +17,14 @@
  *   drivers/ directory is not a failure — it is the ordinary case of an
  *   instance running only the built-ins.
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { YapLogger } from "../../logger.js";
 import { validateDriverDefinition } from "./registry.js";
 import type { DriverRegistry } from "./registry.js";
-import { DRIVER_API } from "./types.js";
+import { DRIVER_API, type DriverDefinition } from "./types.js";
 
 /** A driver the operator installed could not be loaded. Always names the folder. */
 export class DriverLoadError extends Error {
@@ -43,6 +43,62 @@ function reason(err: unknown): string {
 
 function describe(value: unknown): string {
   return value === undefined ? "nothing" : JSON.stringify(value);
+}
+
+/**
+ * Loads and validates the driver in a single folder: reads its package.json,
+ * checks the `yap.driverApi` handshake, imports the entry module, and runs
+ * `validateDriverDefinition` on its default export. Shared by boot-time
+ * loading (below) and `yap driver add|list`, which load exactly one folder
+ * each and want the same failure messages.
+ *
+ * Always throws {@link DriverLoadError} naming `dir` on any failure — a
+ * missing package.json included, since a caller of this function already
+ * knows `dir` is meant to be a driver folder (unlike the boot-time scan,
+ * which uses a missing package.json to mean "not a driver folder at all").
+ */
+export async function loadDriverFolder(dir: string): Promise<DriverDefinition> {
+  const fail: (message: string) => never = (message) => {
+    throw new DriverLoadError(`driver in ${dir}: ${message}`, dir);
+  };
+
+  let manifest: string;
+  try {
+    manifest = await readFile(join(dir, "package.json"), "utf8");
+  } catch (err) {
+    fail(`its package.json could not be read: ${reason(err)}`);
+  }
+
+  let pkg: { main?: unknown; yap?: { driverApi?: unknown } };
+  try {
+    pkg = JSON.parse(manifest) as typeof pkg;
+  } catch (err) {
+    fail(`its package.json is not valid JSON: ${reason(err)}`);
+  }
+
+  const declared = pkg.yap?.driverApi;
+  if (declared !== DRIVER_API) {
+    fail(
+      `its package.json declares yap.driverApi ${describe(declared)}; this build supports driver api ` +
+        `${DRIVER_API}. Install a version of the driver written for driver api ${DRIVER_API}, or remove ` +
+        `the folder.`,
+    );
+  }
+
+  const main = typeof pkg.main === "string" && pkg.main.trim() !== "" ? pkg.main : "index.js";
+  const entryPath = resolve(dir, main);
+  let module: { default?: unknown };
+  try {
+    module = (await import(pathToFileURL(entryPath).href)) as { default?: unknown };
+  } catch (err) {
+    fail(`its entry module ${entryPath} could not be imported: ${reason(err)}`);
+  }
+
+  try {
+    return validateDriverDefinition(module.default);
+  } catch (err) {
+    fail(reason(err));
+  }
 }
 
 /**
@@ -69,51 +125,18 @@ export async function loadExternalDrivers(
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.isFile()) continue;
     const dir = join(root, entry.name);
-    const fail: (message: string) => never = (message) => {
-      throw new DriverLoadError(`driver in ${dir}: ${message}`, dir);
-    };
 
-    let manifest: string;
+    // No package.json — not a driver folder at all. Anything else (an
+    // unreadable file, a broken symlink) is a real failure.
     try {
-      manifest = await readFile(join(dir, "package.json"), "utf8");
+      await stat(join(dir, "package.json"));
     } catch (err) {
-      // No package.json — not a driver folder at all. Anything else (an
-      // unreadable file, a broken symlink) is a real failure.
       if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-      fail(`its package.json could not be read: ${reason(err)}`);
+      throw new DriverLoadError(`driver in ${dir}: its package.json could not be read: ${reason(err)}`, dir);
     }
 
-    let pkg: { main?: unknown; yap?: { driverApi?: unknown } };
-    try {
-      pkg = JSON.parse(manifest) as typeof pkg;
-    } catch (err) {
-      fail(`its package.json is not valid JSON: ${reason(err)}`);
-    }
-
-    const declared = pkg.yap?.driverApi;
-    if (declared !== DRIVER_API) {
-      fail(
-        `its package.json declares yap.driverApi ${describe(declared)}; this build supports driver api ` +
-          `${DRIVER_API}. Install a version of the driver written for driver api ${DRIVER_API}, or remove ` +
-          `the folder.`,
-      );
-    }
-
-    const main = typeof pkg.main === "string" && pkg.main.trim() !== "" ? pkg.main : "index.js";
-    const entryPath = resolve(dir, main);
-    let module: { default?: unknown };
-    try {
-      module = (await import(pathToFileURL(entryPath).href)) as { default?: unknown };
-    } catch (err) {
-      fail(`its entry module ${entryPath} could not be imported: ${reason(err)}`);
-    }
-
-    try {
-      const def = validateDriverDefinition(module.default);
-      registry.register(def);
-      logger.info(`driver "${def.name}" loaded from ${dir} (${Object.keys(def.actions).length} actions)`);
-    } catch (err) {
-      fail(reason(err));
-    }
+    const def = await loadDriverFolder(dir);
+    registry.register(def);
+    logger.info(`driver "${def.name}" loaded from ${dir} (${Object.keys(def.actions).length} actions)`);
   }
 }

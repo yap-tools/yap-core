@@ -8,6 +8,7 @@
 import { createRequire } from "node:module";
 
 import { cmdBackup, cmdRestore } from "./cli/backup.js";
+import { cmdDriver } from "./cli/driver.js";
 import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
 import { cmdCreate, cmdInit, cmdService, cmdUpgrade } from "./cli/setup.js";
@@ -39,6 +40,11 @@ Run:
   start | stop | status               Detached background process (.yap/yap.pid)
   logs [-n N] [-f]                    Show .yap/logs/yap.log
   service install|uninstall [--name]  Generate a systemd/launchd unit for real supervision
+
+Drivers (service backends installed into this instance):
+  driver add <spec>                   Install a driver package (npm spec: name, git, tarball, local path)
+  driver remove <name>                Uninstall a driver
+  driver list                         List installed drivers
 
 Manage (over the instance API, authenticated via .yap/credentials.json):
   user create <name>                  Create a user (sysadmin lane); saves the CLI credential
@@ -103,6 +109,10 @@ try {
     case "service":
       assertLocal(target, command);
       await cmdService(dir, rest);
+      break;
+    case "driver":
+      assertLocal(target, command);
+      await cmdDriver(dir, rest);
       break;
     case "user": {
       if (rest[0] !== "create") throw new CliError("usage: yap user create <name>");

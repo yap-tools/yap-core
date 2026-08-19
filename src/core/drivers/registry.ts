@@ -15,7 +15,8 @@
 import { invalid, notFound } from "../errors.js";
 import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverParamSpec } from "./types.js";
 
-const DRIVER_NAME = /^[a-z][a-z0-9-]{1,63}$/;
+/** Stable identifier used in service records and CLI (also enforced by `yap driver add`). */
+export const DRIVER_NAME = /^[a-z][a-z0-9-]{1,63}$/;
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 
