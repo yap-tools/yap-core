@@ -243,4 +243,71 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     expect(noId.ok).toBe(false);
     expect(noId.error.code).toBe("invalid_request");
   });
+
+  it("keeps a rejection raised at fire time a 400 on both fire surfaces", async () => {
+    // The driver refuses a CRLF in a substituted header (it would split the
+    // header and inject another). That verdict is raised *inside* the run, so
+    // it reaches these surfaces as a failed run rather than as a throw — and
+    // must still arrive as the caller's mistake, not as a server fault.
+    const created = await alice.post(`/v1/bundles/${bundleId}/hooks`, {
+      name: "headered",
+      params: [{ name: "message", required: true }],
+      transport: {
+        url: `http://127.0.0.1:${targetPort}/headered`,
+        method: "GET",
+        headers: { "x-note": "{{message}}" },
+      },
+    });
+    expect(created.status).toBe(201);
+
+    received.length = 0;
+    const crlf = { message: "fine\r\nx-injected: yes" };
+    const fired = await alice.post(`/v1/hooks/${created.body.id}/fire`, { params: crlf });
+    expect(fired.status).toBe(400);
+    expect(fired.body.error.code).toBe("invalid_request");
+    expect(fired.body.error.message).toMatch(/must not contain a line break/);
+    expect(received).toHaveLength(0); // rejected before anything left the process
+
+    const viaMcp = await fireViaMcp({ id: "headered", params: crlf });
+    expect(viaMcp.ok).toBe(false);
+    expect(viaMcp.error.code).toBe("invalid_request");
+    expect(viaMcp.error.message).toMatch(/must not contain a line break/);
+
+    // …and the code the surfaces translate through is on the run record itself,
+    // not inferred from the message.
+    const runs = (await alice.get(`/v1/bundles/${bundleId}/runs`)).body.data;
+    const failed = runs.find((r: any) => r.serviceName === "headered");
+    expect(failed.status).toBe("failed");
+    expect(failed.errorCode).toBe("invalid_request");
+
+    // A timeout is still the server's fault: 500, and `internal` on the row.
+    const slowId = (await alice.get(`/v1/bundles/${bundleId}/hooks`)).body.data.find(
+      (h: any) => h.name === "slow",
+    ).id;
+    const timedOut = await alice.post(`/v1/hooks/${slowId}/fire`, {});
+    expect(timedOut.status).toBe(500);
+    expect(timedOut.body.error.code).toBe("internal");
+  });
+
+  it("still exposes hooks to load_bundle in the legacy shape", async () => {
+    // Pinned now so Task 8's rewrite of load_bundle cannot quietly drop the
+    // key or change its fields: legacy clients read `hooks` and nothing else.
+    const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
+    const hooks = loaded.bundles[0].hooks;
+    expect(Array.isArray(hooks)).toBe(true);
+    expect(hooks.length).toBeGreaterThan(0);
+    for (const hook of hooks) {
+      expect(Object.keys(hook).sort()).toEqual(["description", "id", "name", "params"]);
+    }
+
+    // The same records, under the same ids, as the legacy REST list — which is
+    // itself the http-driver subset of the services surface.
+    const legacy = (await alice.get(`/v1/bundles/${bundleId}/hooks`)).body.data;
+    expect(hooks).toEqual(legacy);
+    const serviceIds = (await alice.get(`/v1/bundles/${bundleId}/services`)).body.data
+      .filter((s: any) => s.driver === "http")
+      .map((s: any) => s.id);
+    expect(hooks.map((h: any) => h.id).sort()).toEqual([...serviceIds].sort());
+    expect(JSON.stringify(hooks)).not.toContain("super-secret-token");
+  });
 });

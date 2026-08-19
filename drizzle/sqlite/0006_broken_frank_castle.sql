@@ -14,6 +14,7 @@ CREATE TABLE `runs` (
 	`params` text DEFAULT '{}' NOT NULL,
 	`result` text,
 	`error` text,
+	`error_code` text,
 	`writes` text DEFAULT '[]' NOT NULL,
 	`created_at` text NOT NULL,
 	`started_at` text,

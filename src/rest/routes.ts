@@ -54,6 +54,20 @@ async function jsonBody(c: Context): Promise<unknown> {
   }
 }
 
+/**
+ * A body that may be absent entirely: running a service with no parameters
+ * (and firing a legacy hook) is a bare POST, which `jsonBody` would reject.
+ */
+async function optionalJsonBody(c: Context): Promise<unknown> {
+  const rawText = await c.req.text();
+  if (!rawText) return {};
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    throw invalid("request body must be valid JSON");
+  }
+}
+
 function pageOpts(c: Context): { cursor?: string; limit?: string } {
   return { cursor: c.req.query("cursor"), limit: c.req.query("limit") };
 }
@@ -883,20 +897,6 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  /**
-   * A body that may be absent entirely: running a service with no parameters
-   * (and firing a legacy hook) is a bare POST, which `jsonBody` would reject.
-   */
-  async function optionalJsonBody(c: Context): Promise<unknown> {
-    const rawText = await c.req.text();
-    if (!rawText) return {};
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      throw invalid("request body must be valid JSON");
-    }
-  }
-
   /** Adapters clamp what a caller asks to wait; internal callers do not. */
   const clampWait = (waitMs?: number): number | undefined =>
     waitMs === undefined ? undefined : Math.min(waitMs, config.runWaitCapMs);
@@ -1051,11 +1051,10 @@ export function registerRestRoutes(server: YapServer): void {
         waitMs,
       });
       if (run.status === "succeeded") return c.json(run.result as Record<string, unknown>);
-      // The old mapping: a destination the guard refused was a 403, everything
-      // else a 500. The run's error is already agent-safe (the driver sanitizes
-      // it), so it is what the caller sees, unchanged.
-      const message = run.error ?? `hook did not finish within ${waitMs}ms`;
-      throw new YapError(/blocked by the SSRF guard/.test(message) ? "forbidden" : "internal", message);
+      // The old mapping, now taken from the driver's own verdict rather than
+      // guessed back out of the message. The run's error is already agent-safe
+      // (the driver sanitizes it), so it is what the caller sees, unchanged.
+      throw runsCore.runFailureError(run, `hook did not finish within ${waitMs}ms`);
     }),
   );
 

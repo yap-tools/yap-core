@@ -46,7 +46,7 @@ import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { createEgress, type Egress } from "./drivers/egress.js";
 import type { DriverRegistry } from "./drivers/registry.js";
 import type { DriverDefinition, DriverParamSpec } from "./drivers/types.js";
-import { invalid, notFound, YapError } from "./errors.js";
+import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
 import { createBundleWriter, type ScopedBundleWriter } from "./services.js";
 import type { Resolver } from "./ssrf.js";
@@ -69,9 +69,15 @@ export interface RunRecord {
   bundleId: string;
   action: string;
   status: RunStatus;
+  /** Only what the caller supplied — pinned values are configuration and never
+   *  land on the row. See `buildParams`. */
   params: Record<string, string>;
   result: unknown | null;
   error: string | null;
+  /** The `YapError` code behind `error`, so a translating caller (the legacy
+   *  fire surfaces) can re-throw the *driver's* verdict instead of guessing it
+   *  back out of the message. Null unless the run failed. */
+  errorCode: string | null;
   writes: unknown[];
   createdAt: string;
   startedAt: string | null;
@@ -106,6 +112,7 @@ interface RunRow {
   params: string;
   result: string | null;
   error: string | null;
+  errorCode: string | null;
   writes: string;
   createdAt: string;
   startedAt: string | null;
@@ -123,6 +130,7 @@ function toRecord(row: RunRow): RunRecord {
     params: JSON.parse(row.params) as Record<string, string>,
     result: row.result === null ? null : (JSON.parse(row.result) as unknown),
     error: row.error,
+    errorCode: row.errorCode,
     writes: JSON.parse(row.writes) as unknown[],
     createdAt: row.createdAt,
     startedAt: row.startedAt,
@@ -143,13 +151,16 @@ async function readRun(db: Db, runId: string): Promise<RunRecord> {
  * same order hooks used, so ids and names stay interchangeable everywhere).
  * An empty reference is the flattening mistake — declared values put where the
  * service name belongs — so it gets a shape-explaining error rather than a
- * bare not_found that reads as a wiring problem.
+ * bare not_found that reads as a wiring problem. The wording names no tool
+ * parameter: this same message reaches `run_service`, the legacy `fire_hook`
+ * alias, and REST, each of which spells that field differently.
  */
 async function resolveService(db: Db, bundleId: string, ref: string | undefined): Promise<ServiceRow> {
   const wanted = ref?.trim();
   if (!wanted) {
     throw invalid(
-      'no service specified — set run_service\'s "service" parameter to the service\'s name or id (both are in load_bundle) and put the declared values in the nested params object, e.g. {service: "notify", params: {message: "…"}}',
+      "no service specified — pass the service name or id (both are in load_bundle), and put the declared " +
+        'values in the nested params object, e.g. {service: "notify", params: {message: "…"}}',
     );
   }
   const { services } = db.tables;
@@ -210,13 +221,20 @@ function effectiveSpecs(def: DriverDefinition, service: ServiceRow, action: stri
  * values must match the *callable* specs exactly: pinned names are not among
  * them, so naming one is an explicit error rather than a silent override, and
  * the pinned values are merged only once the caller's half has been validated.
+ *
+ * The two halves are kept apart on the way out. `params` is the caller's own
+ * set and is the only one that reaches the run row: a pin is configuration —
+ * a fixed recipient, an embedded token — and echoing it back on a record any
+ * `run_services` holder can read would hand it to exactly the caller pins
+ * exist to keep it from. `values` is the merged set, which lives only as long
+ * as the driver call.
  */
 function buildParams(
   def: DriverDefinition,
   service: ServiceRow,
   action: string,
   supplied: Record<string, unknown>,
-): Record<string, string> {
+): { params: Record<string, string>; values: Record<string, string> } {
   const pins = JSON.parse(service.pins) as Record<string, unknown>;
   const specs = effectiveSpecs(def, service, action);
   const callable = specs.filter((spec) => !Object.hasOwn(pins, spec.name));
@@ -237,8 +255,9 @@ function buildParams(
       throw invalid(`required parameter "${spec.name}" is missing`);
     }
   }
-  for (const [name, pinned] of Object.entries(pins)) values[name] = String(pinned);
-  return values;
+  const merged = { ...values };
+  for (const [name, pinned] of Object.entries(pins)) merged[name] = String(pinned);
+  return { params: values, values: merged };
 }
 
 interface Job {
@@ -258,26 +277,40 @@ interface Job {
  *
  * `writes` rides along with both endings on purpose: a run that failed halfway
  * may still have written, and that half has to reach the audit column.
+ *
+ * A failure carries the driver's `YapError` code alongside its message. That
+ * code is the only faithful record of *what kind* of failure it was: by the
+ * time a legacy fire surface translates the run back into a thrown error, the
+ * message alone is just prose, and guessing a code out of it (as the old
+ * regex-matching translators did) turns a rejected header into a 500.
  */
-type Ending = { status: "succeeded"; result: string } | { status: "failed"; error: string };
+type Failure = { status: "failed"; error: string; errorCode: ErrorCode };
+type Ending = { status: "succeeded"; result: string } | Failure;
 type Outcome = Ending & { writes: unknown[] };
 
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
-/** Turns whatever the driver threw into one agent-safe line. */
-function failureMessage(err: unknown, timedOut: boolean, budgetMs: number, log: (m: string) => void): string {
+/** Turns whatever the driver threw into one agent-safe line plus its code. */
+function failureOf(
+  err: unknown,
+  timedOut: boolean,
+  budgetMs: number,
+  log: (m: string) => void,
+): { error: string; errorCode: ErrorCode } {
   // Only the runner's own deadline may claim a timeout. A driver that throws
   // its own AbortError while the budget is still live — an internal race of its
   // own, a caller-side abort it invented — is an ordinary failure; saying
   // "timed out" there would misreport it (and quote a budget that never fired).
-  if (timedOut) return timedOutMessage(budgetMs);
+  // The deadline is the runner's fault, not the caller's: "internal".
+  if (timedOut) return { error: timedOutMessage(budgetMs), errorCode: "internal" };
   // The driver contract requires a YapError's message to be agent-safe (the
-  // http driver, for instance, collapses SSRF and transport errors itself).
-  if (err instanceof YapError) return err.message;
+  // http driver, for instance, collapses SSRF and transport errors itself), and
+  // its code to be the honest verdict — so both are kept verbatim.
+  if (err instanceof YapError) return { error: err.message, errorCode: err.code };
   // Anything else can carry internals — a hidden host, a stack, a stray
   // secret — so it goes to the log ring and never to the row.
   log(`unexpected driver failure: ${String((err as Error | undefined)?.message ?? err)}`);
-  return "run failed";
+  return { error: "run failed", errorCode: "internal" };
 }
 
 /** Runs the driver under the run's budget. Never throws; returns the outcome. */
@@ -336,10 +369,10 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     const result = await Promise.race([running, abortedBy(controller.signal)]);
     // The driver may also have *won* the race by resolving after the deadline
     // already fired. The run is over either way: a late success is a timeout.
-    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs), writes };
+    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs), errorCode: "internal", writes };
     return { ...serialize(result, log), writes };
   } catch (err) {
-    return { status: "failed", error: failureMessage(err, timedOut, budgetMs, log), writes };
+    return { status: "failed", ...failureOf(err, timedOut, budgetMs, log), writes };
   } finally {
     clearTimeout(timer);
     // Same reason the egress handle is disposed: a signal-deaf driver is still
@@ -383,7 +416,7 @@ function serialize(result: unknown, log: (m: string) => void): Ending {
     return { status: "succeeded", result: JSON.stringify(result ?? null) ?? "null" };
   } catch (err) {
     log(`result serialization failed: ${String((err as Error | undefined)?.message ?? err)}`);
-    return { status: "failed", error: "run result could not be serialized" };
+    return { status: "failed", error: "run result could not be serialized", errorCode: "internal" };
   }
 }
 
@@ -396,7 +429,9 @@ async function execute(env: RunEnv, job: Job): Promise<void> {
       .update(runs)
       .set({
         status: outcome.status,
-        ...(outcome.status === "succeeded" ? { result: outcome.result } : { error: outcome.error }),
+        ...(outcome.status === "succeeded"
+          ? { result: outcome.result }
+          : { error: outcome.error, errorCode: outcome.errorCode }),
         writes: JSON.stringify(outcome.writes),
         finishedAt: nowIso(),
       })
@@ -440,7 +475,7 @@ export async function runService(
   const service = await resolveService(db, bundleId, input.service);
   const def = driverFor(env.registry, service);
   const action = resolveAction(def, service.name, input.action);
-  const values = buildParams(def, service, action, input.params ?? {});
+  const { params, values } = buildParams(def, service, action, input.params ?? {});
 
   const runId = newId();
   const { runs } = db.tables;
@@ -451,9 +486,10 @@ export async function runService(
     serviceName: service.name,
     action,
     status: "queued",
-    // What the driver actually receives, pins included: the audit trail should
-    // show the call as delivered, not just the caller's half of it.
-    params: JSON.stringify(values),
+    // The caller's half only. Pins are configuration — the merged set exists
+    // just long enough to reach the driver and is never written down, so a run
+    // record cannot become a read-back channel for a pinned secret.
+    params: JSON.stringify(params),
     writes: "[]",
     createdAt: nowIso(),
   });
@@ -477,6 +513,26 @@ export async function runService(
   );
   if (input.waitMs !== undefined && input.waitMs > 0) await raceWithTimer(execution, input.waitMs);
   return await readRun(db, runId);
+}
+
+/**
+ * Turns a non-succeeded run back into a thrown error, for the legacy fire
+ * surfaces (`POST /v1/hooks/:id/fire` and the `fire_hook` call alias) whose
+ * contract is synchronous: they promised a result or an error, never a run id.
+ *
+ * The verdict comes from `run.errorCode`, which the executor copied off the
+ * driver's own `YapError` — so a destination the guard refused is still a 403
+ * and a call the driver rejected (a CRLF in a substituted header, say) is
+ * still a 400, rather than both collapsing into a 500. Codes outside that pair
+ * are deliberately flattened to `internal`: a timeout, an unserializable
+ * result, or a driver bug are all "the server could not complete this", and a
+ * 404/409 leaking out here would read as a statement about the *hook*.
+ */
+export function runFailureError(run: RunRecord, fallbackMessage: string): YapError {
+  const message = run.error ?? fallbackMessage;
+  const code: ErrorCode =
+    run.errorCode === "forbidden" || run.errorCode === "invalid_request" ? run.errorCode : "internal";
+  return new YapError(code, message);
 }
 
 /**
@@ -550,7 +606,12 @@ export async function recoverInterruptedRuns(db: Db): Promise<number> {
   if (stranded.length === 0) return 0;
   await db.client
     .update(runs)
-    .set({ status: "failed", error: "interrupted by server restart", finishedAt: nowIso() })
+    .set({
+      status: "failed",
+      error: "interrupted by server restart",
+      errorCode: "internal",
+      finishedAt: nowIso(),
+    })
     .where(
       inArray(
         runs.id,

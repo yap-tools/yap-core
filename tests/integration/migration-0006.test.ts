@@ -151,6 +151,7 @@ describeEachAdapter("migration-0006", (adapter) => {
           params: "{}",
           result: "ok",
           error: null,
+          error_code: null,
           writes: "[]",
           created_at: now,
           started_at: now,
@@ -168,6 +169,9 @@ describeEachAdapter("migration-0006", (adapter) => {
         serviceName: "notify",
         action: "send",
         status: "succeeded",
+        // The error-code column the fire surfaces translate through: nullable,
+        // and null on anything that did not fail.
+        errorCode: null,
       });
 
       await db.client.delete(bundles).where(eq(bundles.id, "b1"));

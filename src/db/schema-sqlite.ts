@@ -215,6 +215,7 @@ export const runs = sqliteTable(
     params: text("params").notNull().default("{}"), // JSON: the call's arguments
     result: text("result"),
     error: text("error"),
+    errorCode: text("error_code"), // the YapError code behind `error`, for faithful re-throws
     writes: text("writes").notNull().default("[]"), // JSON: write-backs applied
     createdAt: text("created_at").notNull(),
     startedAt: text("started_at"),

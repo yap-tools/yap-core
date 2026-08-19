@@ -422,7 +422,13 @@ describeEachAdapter("services", (adapter) => {
       const ok = await run(alice, id, { params: { message: "hello" } });
       expect(ok.body.status).toBe("succeeded");
       expect(received[0]!.url).toBe("/pinned?channel=ops");
-      expect(ok.body.params).toEqual({ message: "hello", channel: "ops" });
+      // The run record shows the caller's half only. A pin is configuration —
+      // often a token or a fixed recipient — and the record is readable by
+      // anyone who can run the service, so the merged set is never written
+      // down: it exists only long enough to reach the driver.
+      expect(ok.body.params).toEqual({ message: "hello" });
+      expect(ok.body.params).not.toHaveProperty("channel");
+      expect(JSON.stringify(ok.body.params)).not.toContain("ops");
     });
 
     it("returns non-2xx upstream results raw — the caller decides what to do", async () => {

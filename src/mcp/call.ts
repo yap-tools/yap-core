@@ -365,8 +365,10 @@ export const secondTier: Record<string, SecondTierTool> = {
         waitMs,
       });
       if (run.status === "succeeded") return { result: run.result };
-      const message = run.error ?? `hook did not finish within ${waitMs}ms`;
-      throw new YapError(/blocked by the SSRF guard/.test(message) ? "forbidden" : "internal", message);
+      // The driver's own verdict, carried on the run, rather than a guess made
+      // from the message: a rejected call stays a 400, a blocked destination a
+      // 403, everything else a 500.
+      throw runsCore.runFailureError(run, `hook did not finish within ${waitMs}ms`);
     },
   },
 

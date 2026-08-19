@@ -425,7 +425,11 @@ describeEachAdapter("runs", (adapter) => {
       });
       expect(run.status).toBe("succeeded");
       expect(received[0]!.url).toBe("/notify?to=ops&message=hi");
-      expect(run.params).toEqual({ to: "ops", message: "hi" });
+      // The pinned value reached the driver but not the row: a run record is
+      // readable by every run_services holder, so echoing pins back there would
+      // hand out the very values pinning exists to keep private.
+      expect(run.params).toEqual({ message: "hi" });
+      expect(JSON.stringify(run)).not.toContain("ops");
     });
 
     it("rejects unknown and missing parameters", async () => {
@@ -482,7 +486,11 @@ describeEachAdapter("runs", (adapter) => {
       });
       expect(byId.status).toBe("succeeded");
 
-      await expect(runService(env, aliceId, bundleId, { service: "  " })).rejects.toThrow(/run_service/);
+      // Shape-explaining, and deliberately free of any tool's own field names:
+      // the same message surfaces through run_service, fire_hook, and REST.
+      await expect(runService(env, aliceId, bundleId, { service: "  " })).rejects.toThrow(
+        /no service specified — pass the service name or id/,
+      );
       await expect(runService(env, aliceId, bundleId, { service: "ghost" })).rejects.toThrow(/not found/);
     });
 

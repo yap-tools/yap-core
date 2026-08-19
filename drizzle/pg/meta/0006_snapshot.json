@@ -1296,6 +1296,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "error_code": {
+          "name": "error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "writes": {
           "name": "writes",
           "type": "text",
