@@ -1,6 +1,6 @@
 ---
 name: yap
-description: Use when working with a Yap (yap-core) instance — connecting an agent or MCP client, storing or querying context (spaces, bundles, item-types, items, docs, files, hooks) over REST or MCP, or installing, running, upgrading, and administering an instance with the yap CLI. Triggers include "store this in Yap", "my Yap instance", yap init/start/serve, port 8787, or yap-tools/yap-core.
+description: Use when working with a Yap (yap-core) instance — connecting an agent or MCP client, storing or querying context (spaces, bundles, item-types, items, docs, files, services — the driver-backed capabilities that generalized hooks) over REST or MCP, or installing, running, upgrading, and administering an instance with the yap CLI. Triggers include "store this in Yap", "my Yap instance", yap init/start/serve, port 8787, or yap-tools/yap-core.
 ---
 
 # Yap
@@ -17,7 +17,7 @@ space                (top level; spaces do not nest)
     ├── docs         (named bundle docs; autoloaded binding instructions and read-on-demand docs)
     ├── item-types   (schemas; each holds many items — this is where "todos" live)
     ├── files
-    └── hooks        (pre-configured outbound HTTP calls; agents fire, never define)
+    └── services     (named, driver-backed capabilities; agents run, never define)
 ```
 
 Autoloaded bundle docs are where binding operating instructions belong; non-autoloaded bundle docs stay available to read on demand. Outside the tree: **user docs** — account-level notes that travel with the user (optionally autoloaded). A free-form note with no bundle context → user doc. Structured data → items of an item-type inside a bundle. If several spaces or bundles could match the user's intent, ask the user rather than guessing.
@@ -87,5 +87,5 @@ All commands resolve the instance from the current directory — run them inside
 | Inventing endpoints (`/v1/notes`, `/v1/todos`) | Only the tree resources exist — see reference.md |
 | Using the sysadmin key as a user credential | Rejected. It only provisions users (`yap user create`, `--sysadmin`) |
 | Showing `item://<id>` / `file://<id>` values to users | Opaque references — resolve them first (get items / `GET /v1/files/<id>/link`) |
-| Defining hook URLs via MCP or as an agent | Hook authoring is deliberately REST-only; agents may only fire hooks |
+| Defining a service's driver/config via MCP or as an agent | Service authoring is deliberately REST-only; agents may only run services (`run_service`, or the deprecated `fire_hook` alias) |
 | Expecting open access | Default deny. Grants resolve most-specific-wins: bundle beats space, deny beats allow |

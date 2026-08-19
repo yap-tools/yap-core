@@ -217,7 +217,7 @@ describe("createHttpDriver: run", () => {
       async fetch() {
         throw new YapError(
           "invalid_request",
-          "hook destination 192.168.0.1 resolves to a private, link-local, or localhost address",
+          "service destination 192.168.0.1 resolves to a private, link-local, or localhost address",
         );
       },
       async connect() {

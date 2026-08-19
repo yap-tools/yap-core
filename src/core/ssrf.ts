@@ -1,10 +1,13 @@
 /**
- * The SSRF guard. Yap's server fetches hook destinations, which makes hooks a
- * server-side request forgery vector against the operator's own network. The
- * guard (normative per the brief): destination URLs resolving to private,
- * link-local, or localhost ranges are denied by default — checked at hook
- * creation AND re-checked at fire time, since DNS can change — with an
- * operator-overridable allowlist for legitimate internal targets.
+ * The SSRF guard. Yap's server fetches service destinations (the http
+ * driver's requests, and any driver's guarded egress), which makes a service
+ * a server-side request forgery vector against the operator's own network.
+ * The guard (normative per the brief, written when this was hooks-only):
+ * destination URLs resolving to private, link-local, or localhost ranges are
+ * denied by default — checked at service authoring AND re-checked at run
+ * time, since DNS can change — with an operator-overridable allowlist
+ * (`YAP_HOOK_ALLOW_HOSTS`, which keeps its pre-services name) for legitimate
+ * internal targets.
  */
 import type { LookupOptions } from "node:dns";
 import dns from "node:dns/promises";
@@ -133,10 +136,10 @@ export async function assertPublicDestination(
   try {
     url = new URL(rawUrl);
   } catch {
-    throw invalid(`hook destination is not a valid URL: ${JSON.stringify(rawUrl)}`);
+    throw invalid(`service destination is not a valid URL: ${JSON.stringify(rawUrl)}`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw invalid(`hook destination must be http(s), got ${url.protocol}`);
+    throw invalid(`service destination must be http(s), got ${url.protocol}`);
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, ""); // strip ipv6 brackets
   if (hostAllowed(hostname, allowHosts)) return;
@@ -145,7 +148,7 @@ export async function assertPublicDestination(
   const blocked = blockedAddresses(hostname, addresses, allowHosts);
   if (blocked.length > 0) {
     throw invalid(
-      `hook destination ${hostname} resolves to a private, link-local, or localhost address (${blocked.join(", ")}); ` +
+      `service destination ${hostname} resolves to a private, link-local, or localhost address (${blocked.join(", ")}); ` +
         `denied by default — add the host to YAP_HOOK_ALLOW_HOSTS to permit internal targets`,
     );
   }
@@ -157,7 +160,7 @@ async function resolveOrFail(hostname: string, resolver: Resolver): Promise<stri
     if (addresses.length === 0) throw new Error("no addresses");
     return addresses;
   } catch {
-    throw invalid(`hook destination ${hostname} could not be resolved`);
+    throw invalid(`service destination ${hostname} could not be resolved`);
   }
 }
 

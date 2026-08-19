@@ -1,6 +1,6 @@
 /**
  * Bundles: the unit a user authors and stores — docs, item-types, files, and
- * hooks live inside. Creation validates the entire design first and applies
+ * services live inside. Creation validates the entire design first and applies
  * it atomically-in-effect: invalid input is rejected with actionable errors,
  * never partially applied.
  */
@@ -218,7 +218,7 @@ export async function requireBundleReadAccess(db: Db, userId: string, ctx: Bundl
 
 /**
  * The capability gate for everything *inside* a bundle (items, item-types,
- * docs, files, hooks). It keeps the bundle's existence hidden the same way the
+ * docs, files, services). It keeps the bundle's existence hidden the same way the
  * bundle resource does: a true outsider — reached by no grant and holding no
  * other capability here — gets a 404, never a 403 that would confirm the
  * bundle exists. Anyone who can already see the bundle but lacks this one

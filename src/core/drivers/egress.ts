@@ -123,7 +123,7 @@ function describeValue(value: unknown): string {
 /**
  * Builds the egress handle for one driver invocation (or authoring-time
  * validation). `resolver` and `fetchImpl` are injectable for tests, mirroring
- * HookEnv; when a fetch is injected the undici pinning dispatcher is skipped
+ * RunEnv; when a fetch is injected the undici pinning dispatcher is skipped
  * (the injected implementation does its own transport), so the pre-flight
  * guard is the check that runs.
  *

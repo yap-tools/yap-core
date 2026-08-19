@@ -1,8 +1,9 @@
 /**
  * Environment-level configuration. This is the layer that holds the sysadmin
  * key and the master encryption key, selects storage adapters, and carries
- * the operator-overridable operational policy (file limits, link TTLs, hook
- * timeout, SSRF allowlist).
+ * the operator-overridable operational policy (file limits, link TTLs, the
+ * http driver's timeout, SSRF allowlist, run wait/timeout caps and
+ * retention).
  */
 
 /**
@@ -74,7 +75,7 @@ export interface YapConfig {
   baseUrl: string;
   /** Environment credential for REST-only system administration. */
   sysadminKey: string;
-  /** 32-byte master key: hook-secret encryption and link/token signing. */
+  /** 32-byte master key: service-config encryption and link/token signing. */
   masterKey: Buffer;
   db: SqliteDbConfig | PgDbConfig;
   blob: FsBlobConfig | S3BlobConfig;

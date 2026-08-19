@@ -37,8 +37,8 @@ export function initInstance(dir: string, options: { port?: string } = {}): Init
 
 # Environment credential for user provisioning over REST (never MCP).
 YAP_SYSADMIN_KEY=${sysadminKey}
-# Base64-encoded 32 bytes: hook-secret encryption + link/token signing.
-# Changing it orphans encrypted hook secrets and invalidates minted links.
+# Base64-encoded 32 bytes: service-config encryption + link/token signing.
+# Changing it orphans encrypted service configs and invalidates minted links.
 YAP_MASTER_KEY=${masterKey}
 
 # Paths resolve relative to this directory.
