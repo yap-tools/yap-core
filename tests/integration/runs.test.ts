@@ -2,14 +2,17 @@
  * Runs: the always-async service executor. Services are authored through REST
  * only from Task 7 onwards, so this suite plants service rows directly and
  * drives `src/core/runs.ts` against a registry holding the built-in http
- * driver plus a tiny in-test driver (short budgets, a sleeper, a thrower).
+ * driver plus a tiny in-test driver: short budgets, a well-behaved sleeper, a
+ * thrower, and the misbehaving trio the runner has to survive on its own — a
+ * driver that ignores its abort signal forever, one that succeeds after the
+ * deadline, and one whose result cannot be serialized.
  *
  * What is pinned here: the wait/poll contract, the timeout budget, pinned and
  * declared parameter handling, the audit rows a run leaves behind, the
  * capability gates, and the boot/retention helpers.
  */
 import { createServer, type Server } from "node:http";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { DriverRegistry } from "../../src/core/drivers/registry.js";
@@ -61,8 +64,43 @@ const testDriver: DriverDefinition = {
       params: [],
       timeoutMs: 5_000,
     },
+    stuck: {
+      description: "Ignores the abort signal and never settles at all.",
+      params: [],
+      timeoutMs: 100,
+    },
+    late: {
+      description: "Ignores the abort signal and succeeds well after the deadline.",
+      params: [],
+      timeoutMs: 100,
+    },
+    circular: {
+      description: "Succeeds with a result JSON cannot represent.",
+      params: [],
+      timeoutMs: 5_000,
+    },
+    abortive: {
+      description: "Throws its own AbortError while the budget is still live.",
+      params: [],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
+    // Deliberately signal-deaf: the runner's deadline, not the driver, has to
+    // end these two runs.
+    if (ctx.action === "stuck") return await new Promise(() => {});
+    if (ctx.action === "late") {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { finished: "too late" };
+    }
+    if (ctx.action === "circular") {
+      const cycle: Record<string, unknown> = { name: "loop" };
+      cycle.self = cycle;
+      return cycle;
+    }
+    if (ctx.action === "abortive") {
+      throw Object.assign(new Error("driver's own abort, nothing to do with the budget"), { name: "AbortError" });
+    }
     if (ctx.action === "sleep") {
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => resolve({ slept: true }), 10_000);
@@ -237,7 +275,72 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.finishedAt).not.toBeNull();
     });
 
+    it("fails a run whose driver ignores the signal and never settles", async () => {
+      await plantService({ name: "deaf", driver: "test", config: {} });
+      // The driver's promise never settles and it never looks at ctx.signal:
+      // only the runner owning the budget can end this run. If it did not, the
+      // wait below would expire with the row still `running`.
+      const run = await runService(env, aliceId, bundleId, {
+        service: "deaf",
+        action: "stuck",
+        waitMs: 3_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run timed out after 100ms");
+      expect(run.result).toBeNull();
+      expect(run.finishedAt).not.toBeNull();
+    });
+
+    it("fails a signal-ignoring run that succeeds after the deadline", async () => {
+      await plantService({ name: "tardy", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "tardy",
+        action: "late",
+        waitMs: 3_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run timed out after 100ms");
+      expect(run.result).toBeNull();
+
+      // And it stays failed: the driver's late success must not overwrite the
+      // row after the fact.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const later = await getRun(env, aliceId, run.id);
+      expect(later.status).toBe("failed");
+      expect(later.error).toBe("run timed out after 100ms");
+    });
+
+    it("fails a run whose result cannot be serialized instead of stranding it", async () => {
+      await plantService({ name: "knotted", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "knotted",
+        action: "circular",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run result could not be serialized");
+      expect(run.result).toBeNull();
+      expect(run.finishedAt).not.toBeNull();
+    });
+
+    it("does not call a driver's own AbortError a timeout", async () => {
+      await plantService({ name: "self-aborter", driver: "test", config: {} });
+      // The budget here is 5s and never fires; the AbortError is the driver's
+      // own, so it must collapse to the generic failure like any other throw.
+      const run = await runService(env, aliceId, bundleId, {
+        service: "self-aborter",
+        action: "abortive",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("run failed");
+      expect(run.error).not.toMatch(/timed out/);
+    });
+
     it("caps an action's budget with runTimeoutCapMs", async () => {
+      // The cap is read at boot, so this case needs its own app. That second
+      // bootTestApp takes no adapter db, so it always runs on SQLite — this
+      // leg exercises sqlite even when the outer matrix is on Postgres.
       const capped = await bootTestApp({ YAP_RUN_TIMEOUT_CAP_MS: "80" });
       try {
         const registry = new DriverRegistry();
@@ -468,6 +571,21 @@ describeEachAdapter("runs", (adapter) => {
     it("an unknown run id is a not_found", async () => {
       await expect(getRun(env, aliceId, "no-such-run")).rejects.toMatchObject({ code: "not_found" });
     });
+
+    it("a run in an invisible bundle 404s as the run, never naming the bundle", async () => {
+      const run = await runService(env, aliceId, bundleId, {
+        service: "notify",
+        params: { message: "private" },
+        waitMs: 8_000,
+      });
+      // An outsider polling a real run id must not be able to tell it apart
+      // from an unknown one — the message names the run, never the bundle id
+      // the bundle-level not_found would have handed over.
+      await expect(getRun(env, outsiderId, run.id)).rejects.toMatchObject({
+        code: "not_found",
+        message: `run ${run.id} not found`,
+      });
+    });
   });
 
   describe("boot recovery and retention", () => {
@@ -508,8 +626,19 @@ describeEachAdapter("runs", (adapter) => {
       expect(row.error).toBe("interrupted by server restart");
       expect(row.finishedAt).not.toBeNull();
 
-      // Idempotent: a second pass finds nothing left to recover.
-      expect(await recoverInterruptedRuns(app.db)).toBe(0);
+      // Idempotent, asserted over the planted rows only: the suite's own
+      // waitMs:0 runs may legitimately be in flight when this executes, so the
+      // global return count is not something to pin.
+      const planted = ["interrupted-running", "interrupted-queued"];
+      const before = await app.db.client.select().from(runs).where(inArray(runs.id, planted));
+      await recoverInterruptedRuns(app.db);
+      const after = await app.db.client.select().from(runs).where(inArray(runs.id, planted));
+      const summarize = (rows: typeof after) =>
+        rows
+          .map((r) => `${r.id}:${r.status}:${r.error}:${r.finishedAt}`)
+          .sort()
+          .join("|");
+      expect(summarize(after)).toBe(summarize(before));
     });
 
     it("prunes terminal runs older than the retention window only", async () => {
@@ -573,13 +702,22 @@ describeEachAdapter("runs", (adapter) => {
       expect(left.map((r) => r.id).sort()).toEqual(["old-running", "young-succeeded"]);
     });
 
-    it("leaves rows in other bundles alone when pruning by age", async () => {
+    it("leaves fresh rows in other bundles alone when pruning by age", async () => {
       const { runs } = app.db.tables;
-      const survivors = await app.db.client
-        .select()
-        .from(runs)
-        .where(and(eq(runs.bundleId, bundleId), eq(runs.status, "succeeded")));
-      expect(survivors.length).toBeGreaterThan(0);
+      const scoped = () =>
+        app.db.client
+          .select()
+          .from(runs)
+          .where(and(eq(runs.bundleId, bundleId), eq(runs.status, "succeeded")));
+      const before = await scoped();
+      expect(before.length).toBeGreaterThan(0);
+
+      // Pruning is age-scoped, not bundle-scoped: a real sweep against the
+      // real clock must leave every run this suite just made, wherever it is.
+      await pruneRuns(app.db, 7);
+
+      const after = await scoped();
+      expect(after.map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
     });
   });
 });

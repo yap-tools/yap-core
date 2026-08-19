@@ -24,10 +24,18 @@
  *   which the driver contract requires to be sanitized) is collapsed into a
  *   flat "run failed" — the underlying message can name a hidden host.
  *
- * Timeouts are the runner's business, not the driver's: one AbortController
- * per run, fired at `min(action.timeoutMs, config.runTimeoutCapMs)`, reaches
- * the driver as `ctx.signal`. The egress handle is likewise created and
- * disposed here — one per run, released in a `finally`.
+ * Timeouts are the runner's business, not the driver's, and the runner *owns*
+ * the budget rather than merely asking for it: one AbortController per run,
+ * fired at `min(action.timeoutMs, config.runTimeoutCapMs)`, reaches the driver
+ * as `ctx.signal`, and the driver's promise is raced against that deadline. A
+ * driver that ignores its signal therefore still loses the race and still
+ * lands a `failed` row; only its own in-flight work outlives the run. The
+ * egress handle is likewise created and disposed here — one per run, released
+ * in a `finally` at race end.
+ *
+ * The outcome is serialized inside the attempt, not while writing the row: a
+ * result JSON cannot represent (circular, BigInt) is the driver's bug and
+ * becomes an ordinary failure, never a run stranded in `running`.
  */
 import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 
@@ -240,13 +248,23 @@ interface Job {
   configEncrypted: string;
 }
 
-type Outcome = { status: "succeeded"; result: unknown } | { status: "failed"; error: string };
+/**
+ * What `attempt` hands back. The success payload is already JSON *text*:
+ * serializing inside the attempt is what keeps a non-serializable driver
+ * result from throwing during the row write, where it would be swallowed and
+ * leave the run `running` forever.
+ */
+type Outcome = { status: "succeeded"; result: string } | { status: "failed"; error: string };
+
+const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
 /** Turns whatever the driver threw into one agent-safe line. */
 function failureMessage(err: unknown, timedOut: boolean, budgetMs: number, log: (m: string) => void): string {
-  if (timedOut || (err as Error | undefined)?.name === "AbortError") {
-    return `run timed out after ${budgetMs}ms`;
-  }
+  // Only the runner's own deadline may claim a timeout. A driver that throws
+  // its own AbortError while the budget is still live — an internal race of its
+  // own, a caller-side abort it invented — is an ordinary failure; saying
+  // "timed out" there would misreport it (and quote a budget that never fired).
+  if (timedOut) return timedOutMessage(budgetMs);
   // The driver contract requires a YapError's message to be agent-safe (the
   // http driver, for instance, collapses SSRF and transport errors itself).
   if (err instanceof YapError) return err.message;
@@ -284,7 +302,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     // The decrypted config exists only here, only in memory.
     const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
-    const result = await job.def.run({
+    const running = job.def.run({
       config: serviceConfig,
       action: job.action,
       params: job.values,
@@ -293,18 +311,61 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       signal: controller.signal,
       log,
     });
-    return { status: "succeeded", result };
+    // Losing the race orphans this promise while the driver is still working,
+    // so neuter it up front: a late settlement is discarded (the row is already
+    // written), and a late *rejection* can never surface as an unhandled one.
+    void running.then(() => {}).catch(() => {});
+    // `ctx.signal` is a request; this race is the enforcement. Awaiting the
+    // driver alone would let one that never checks its signal hold the run open
+    // forever — row stuck `running`, egress never disposed.
+    const result = await Promise.race([running, abortedBy(controller.signal)]);
+    // The driver may also have *won* the race by resolving after the deadline
+    // already fired. The run is over either way: a late success is a timeout.
+    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs) };
+    return serialize(result, log);
   } catch (err) {
     return { status: "failed", error: failureMessage(err, timedOut, budgetMs, log) };
   } finally {
     clearTimeout(timer);
     if (egress) {
       try {
+        // Safe even while a signal-ignoring driver still holds the handle:
+        // dispose poisons it, so the rogue call fails rather than escaping the
+        // guard. Whatever socket work such a driver has already started is its
+        // own leak — the driver contract is to honour `ctx.signal`.
         await egress.dispose();
       } catch {
         // Pool teardown is best-effort; it must not change the run's outcome.
       }
     }
+  }
+}
+
+/**
+ * A promise that rejects when `signal` aborts and never settles otherwise —
+ * the deadline's side of the race in `attempt`.
+ */
+function abortedBy(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    const fail = (): void => reject(Object.assign(new Error("run budget elapsed"), { name: "AbortError" }));
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
+/**
+ * JSON-encodes a driver result. A value JSON cannot represent (circular,
+ * BigInt) is the driver's bug: it fails the run with a message that quotes
+ * nothing of the value, rather than throwing where it would strand the row.
+ */
+function serialize(result: unknown, log: (m: string) => void): Outcome {
+  try {
+    // `?? "null"` covers the values JSON drops outright (a function, a bare
+    // undefined): the run succeeded, it just has no result to show.
+    return { status: "succeeded", result: JSON.stringify(result ?? null) ?? "null" };
+  } catch (err) {
+    log(`result serialization failed: ${String((err as Error | undefined)?.message ?? err)}`);
+    return { status: "failed", error: "run result could not be serialized" };
   }
 }
 
@@ -317,15 +378,14 @@ async function execute(env: RunEnv, job: Job): Promise<void> {
       .update(runs)
       .set({
         status: outcome.status,
-        ...(outcome.status === "succeeded"
-          ? { result: JSON.stringify(outcome.result ?? null) }
-          : { error: outcome.error }),
+        ...(outcome.status === "succeeded" ? { result: outcome.result } : { error: outcome.error }),
         finishedAt: nowIso(),
       })
       .where(eq(runs.id, job.runId));
   } catch {
-    // The row is the only channel there is; if writing the outcome fails the
-    // run stays `running` and boot recovery will retire it.
+    // Only a genuine write failure can land here now — the outcome was already
+    // serialized inside `attempt`. The row is the only channel there is; if the
+    // write fails the run stays `running` and boot recovery will retire it.
   }
 }
 
@@ -393,11 +453,25 @@ export async function runService(
   return await readRun(db, runId);
 }
 
+/**
+ * Reads one run. Existence hiding here is about the *run*: an id that does not
+ * exist and a run living in a bundle the caller cannot see must be
+ * indistinguishable, and neither may name the bundle — the bundle-level
+ * not_found would hand an outsider a bundle id it was never allowed to learn.
+ * A genuine 403 still passes through unchanged: per the bundle-existence
+ * convention, a caller who already has a foothold in the bundle gets the
+ * informative "missing capability run_services" rather than a 404.
+ */
 export async function getRun(env: RunEnv, userId: string, runId: string): Promise<RunRecord> {
   const { db } = env;
   const record = await readRun(db, runId);
-  const bundleCtx = await getBundleContext(db, record.bundleId);
-  await requireBundleCapability(db, userId, "run_services", bundleCtx);
+  try {
+    const bundleCtx = await getBundleContext(db, record.bundleId);
+    await requireBundleCapability(db, userId, "run_services", bundleCtx);
+  } catch (err) {
+    if (err instanceof YapError && err.code === "not_found") throw notFound("run", runId);
+    throw err;
+  }
   return record;
 }
 
@@ -437,6 +511,10 @@ export async function listRuns(
 /**
  * Boot housekeeping: a run that was in flight when the process died has no one
  * left to finish it, so it is retired rather than left to look live forever.
+ *
+ * This assumes a single yap process owns the database — running it while
+ * another instance is live would kill that instance's in-flight runs, since
+ * "in flight" and "abandoned" look identical from the row.
  */
 export async function recoverInterruptedRuns(db: Db): Promise<number> {
   const { runs } = db.tables;
