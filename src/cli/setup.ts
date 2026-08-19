@@ -1,5 +1,5 @@
 /**
- * init / upgrade / create / service — commands that shape an instance rather
+ * init / upgrade / create / daemon — commands that shape an instance rather
  * than talk to it. The one network act is vendoring the server from GitHub;
  * everything else is local file generation.
  */
@@ -142,7 +142,7 @@ export async function cmdCreate(argv: string[]): Promise<void> {
   console.log(`Instance ready in ${dir}.`);
 }
 
-export async function cmdService(dir: string, argv: string[]): Promise<void> {
+export async function cmdDaemon(dir: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: { name: { type: "string" } },
@@ -168,5 +168,5 @@ export async function cmdService(dir: string, argv: string[]): Promise<void> {
     for (const cmd of plan.deactivate) console.log(`  ${cmd}`);
     return;
   }
-  throw new CliError("usage: yap service install|uninstall [--name <name>]");
+  throw new CliError("usage: yap daemon install|uninstall [--name <name>]");
 }

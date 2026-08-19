@@ -135,9 +135,9 @@ Three ways to run an instance, by how much you need it to survive:
 |---|---|---|---|
 | Foreground | `yap` / `yap serve` | no | no |
 | Detached | `yap start` / `stop` | yes | no |
-| Supervised | `yap service install` | yes | yes |
+| Supervised | `yap daemon install` | yes | yes |
 
-`yap service install` generates a systemd unit (Linux) or launchd plist
+`yap daemon install` generates a systemd unit (Linux) or launchd plist
 (macOS) pointing at the instance directory and prints the activation
 commands — the OS owns supervision; the CLI deliberately is not a process
 manager. `yap upgrade [version]` reinstalls the vendored server and restarts
