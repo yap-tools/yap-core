@@ -70,6 +70,16 @@ function captureSockets(): { sockets: net.Socket[]; restore: () => void } {
   return { sockets, restore: () => spy.mockRestore() };
 }
 
+/** A resolver that parks until the test releases it — lets a test land a
+ * `dispose()`, an abort, or a timeout squarely inside the DNS phase. */
+function stallingResolver(): { resolver: () => Promise<string[]>; release: (addresses: string[]) => void } {
+  let release!: (addresses: string[]) => void;
+  const gate = new Promise<string[]>((resolve) => {
+    release = resolve;
+  });
+  return { resolver: () => gate, release: (addresses) => release(addresses) };
+}
+
 describe("validateDriverDefinition", () => {
   it("accepts a well-formed definition and returns it", () => {
     const def = definition();
@@ -340,6 +350,45 @@ describe("createEgress: dispose", () => {
       },
     );
   });
+
+  it("refuses to open a pool when dispose() lands while the pre-flight is parked", async () => {
+    let hits = 0;
+    await withHttpServer(
+      (_req, res) => {
+        hits += 1;
+        res.writeHead(200);
+        res.end("ok");
+      },
+      async (port) => {
+        // "localhost" is not allowlisted by name, so the pre-flight resolves it
+        // (and parks there); the address it resolves to IS allowlisted, so the
+        // guard would pass and the request would go out — unless the handle
+        // notices it was disposed while it waited.
+        const { resolver, release } = stallingResolver();
+        const egress = createEgress(testConfig(["127.0.0.1"]), resolver);
+        const pending = egress.fetch(`http://localhost:${port}/x`, { method: "GET" });
+        await egress.dispose();
+        release(["127.0.0.1"]);
+        await expect(pending).rejects.toThrow(/disposed/);
+        expect(hits).toBe(0); // no Agent was ever created, so nothing dispatched
+      },
+    );
+  });
+
+  it("refuses to open a socket when dispose() lands while connect is resolving", async () => {
+    const { sockets, restore } = captureSockets();
+    try {
+      const { resolver, release } = stallingResolver();
+      const egress = createEgress(testConfig(["127.0.0.1"]), resolver);
+      const pending = egress.connect("localhost", 9, { timeoutMs: 5000 });
+      await egress.dispose();
+      release(["127.0.0.1"]);
+      await expect(pending).rejects.toThrow(/disposed/);
+      expect(sockets).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("createEgress: connect", () => {
@@ -381,10 +430,67 @@ describe("createEgress: connect", () => {
     for (const port of [0, -1, 1.5, 65536, Number.NaN]) {
       await expect(egress.connect("127.0.0.1", port), String(port)).rejects.toThrow(/port/);
     }
+    // NaN must be reported as itself: JSON.stringify(NaN) would say "null".
+    await expect(egress.connect("127.0.0.1", Number.NaN)).rejects.toThrow(/got NaN/);
   });
 
-  // 203.0.113.0/24 is TEST-NET-3: not in ssrf.ts's PRIVATE_V4_RANGES, so it
-  // passes the guard, and it is unroutable, so the connect never completes.
+  it("rejects a timeoutMs that is not a positive integer, naming the field", async () => {
+    const egress = createEgress(testConfig(["127.0.0.1"]));
+    for (const timeoutMs of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        egress.connect("127.0.0.1", 9, { timeoutMs }),
+        String(timeoutMs),
+      ).rejects.toThrow(/timeoutMs/);
+    }
+    await expect(egress.connect("127.0.0.1", 9, { timeoutMs: Number.NaN })).rejects.toThrow(/got NaN/);
+  });
+
+  // The DNS phase is bounded by the same signal and budget as the socket: an
+  // injected resolver makes these fully deterministic (no network involved).
+  it("aborts while the resolver is still working, before any socket exists", async () => {
+    const { sockets, restore } = captureSockets();
+    try {
+      const egress = createEgress(
+        testConfig(["127.0.0.1"]),
+        () => new Promise<string[]>((resolve) => setTimeout(() => resolve(["127.0.0.1"]), 300)),
+      );
+      const controller = new AbortController();
+      const started = Date.now();
+      const pending = egress.connect("localhost", 9, { signal: controller.signal, timeoutMs: 5000 });
+      setTimeout(() => controller.abort(), 10);
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(Date.now() - started).toBeLessThan(200); // not waiting out the resolver
+      // The late resolution must be discarded, not connected to.
+      await new Promise<void>((resolve) => setTimeout(resolve, 350));
+      expect(sockets).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("times out the whole flow when the resolver never answers", async () => {
+    const { sockets, restore } = captureSockets();
+    try {
+      const egress = createEgress(testConfig(["127.0.0.1"]), () => new Promise<string[]>(() => {}));
+      const started = Date.now();
+      await expect(egress.connect("localhost", 9, { timeoutMs: 100 })).rejects.toMatchObject({
+        code: "ETIMEDOUT",
+      });
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(90);
+      expect(elapsed).toBeLessThan(2000); // bounded, not waiting on DNS forever
+      expect(sockets).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  // The two tests below reach the socket phase, which needs a destination that
+  // neither answers nor refuses: 203.0.113.0/24 is TEST-NET-3, so it is not in
+  // ssrf.ts's PRIVATE_V4_RANGES (it passes the guard) and it is unroutable (the
+  // connect never completes). A network that answers TEST-NET-3 with an ICMP
+  // unreachable would fail them with ENETUNREACH instead. The DNS-phase tests
+  // above need no such assumption; these exist to cover socket teardown.
   it("rejects with an AbortError and destroys the socket when the signal fires", async () => {
     const { sockets, restore } = captureSockets();
     try {

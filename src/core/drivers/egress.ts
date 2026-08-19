@@ -24,12 +24,18 @@
  *   against the IP, which is the correct identity in that case.
  *
  * Both doors are also bounded. `connect` takes a timeout (default 30s) and an
- * optional AbortSignal, and every failure path destroys the socket exactly
- * once, so a driver cannot strand a half-open connection. The undici Agent is
- * created lazily, at most once per handle, and released by `dispose()` — which
- * the caller that built the handle MUST call in a `finally`, or the connection
+ * optional AbortSignal, and both cover the *whole* flow — DNS resolution
+ * included, not just the socket — so a slow or hanging resolver cannot make a
+ * connect unbounded; every failure path destroys the socket exactly once, so a
+ * driver cannot strand a half-open connection. The undici Agent is created
+ * lazily, at most once per handle, and released by `dispose()` — which the
+ * caller that built the handle MUST call in a `finally`, or the connection
  * pool outlives the invocation (the same leak `hooks.ts` avoids by destroying
- * its per-fire agent).
+ * its per-fire agent). `dispose()` releases only the fetch pool: a socket
+ * already handed back by `connect()` belongs to the driver, which must close
+ * it itself. Because a call can be parked on an `await` when `dispose()` lands,
+ * the disposed flag is re-checked after every internal await that precedes
+ * acquiring a resource — otherwise a disposed handle could still open a pool.
  *
  * Errors surface raw: this layer names the host and the blocked address,
  * which is what an operator needs. Callers that expose failures to an agent
@@ -70,18 +76,22 @@ export interface EgressConnectOptions {
   tls?: boolean;
   /** SNI/certificate name; defaults to the hostname, omitted for IP literals. */
   servername?: string;
-  /** Aborts a connect still in flight; rejects with an `AbortError`. */
+  /** Aborts a connect still in flight — DNS phase included; rejects with an
+   * `AbortError`. */
   signal?: AbortSignal;
-  /** Connect budget in ms; defaults to 30000. */
+  /** Budget in ms for resolution *and* connect together; defaults to 30000. */
   timeoutMs?: number;
 }
 
 export interface Egress {
   fetch(url: string, init: EgressFetchInit): Promise<EgressResponse>;
+  /** Resolves to a connected socket that is the *caller's* to close. */
   connect(host: string, port: number, opts?: EgressConnectOptions): Promise<Duplex>;
   assertPublic(url: string): Promise<void>;
   /** Releases the connection pool this handle may have opened. Idempotent, and
-   * a no-op when no fetch ever happened; using the handle afterwards throws. */
+   * a no-op when no fetch ever happened; using the handle afterwards throws.
+   * Sockets already returned by `connect()` are not touched — those belong to
+   * the driver that asked for them. */
   dispose(): Promise<void>;
 }
 
@@ -99,6 +109,15 @@ function abortError(message: string): Error {
 
 function timeoutError(message: string): Error {
   return Object.assign(new Error(message), { code: "ETIMEDOUT" });
+}
+
+/** Renders a rejected argument for an error message. Numbers go through
+ * `String` because `JSON.stringify(NaN)` is `"null"`, which would report the
+ * wrong input; everything else keeps the quoting that distinguishes `"5000"`
+ * from `5000`. */
+function describeValue(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 /**
@@ -132,6 +151,10 @@ export function createEgress(config: YapConfig, resolver?: Resolver, fetchImpl?:
     async fetch(url: string, init: EgressFetchInit): Promise<EgressResponse> {
       assertUsable();
       await assertPublicDestination(url, allowHosts, resolve);
+      // The pre-flight awaited, so dispose() may have landed while this call
+      // was parked: re-check before acquiring anything, or a disposed handle
+      // would lazily open a pool nobody will ever destroy.
+      assertUsable();
       const request = {
         method: init.method,
         ...(init.headers ? { headers: init.headers } : {}),
@@ -150,76 +173,100 @@ export function createEgress(config: YapConfig, resolver?: Resolver, fetchImpl?:
     async connect(host: string, port: number, opts?: EgressConnectOptions): Promise<Duplex> {
       assertUsable();
       if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw invalid(`egress connect port must be an integer between 1 and 65535, got ${JSON.stringify(port)}`);
+        throw invalid(`egress connect port must be an integer between 1 and 65535, got ${describeValue(port)}`);
       }
       const timeoutMs = opts?.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
-        throw invalid(`egress connect timeoutMs must be a positive integer, got ${JSON.stringify(timeoutMs)}`);
+        throw invalid(`egress connect timeoutMs must be a positive integer, got ${describeValue(timeoutMs)}`);
       }
       const signal = opts?.signal;
       if (signal?.aborted) throw abortError(`connection to ${host}:${port} was aborted`);
 
       const hostname = host.replace(/^\[|\]$/g, ""); // strip ipv6 brackets
       const isIpLiteral = net.isIP(hostname) !== 0;
-      let addresses: string[];
-      if (isIpLiteral) {
-        addresses = [hostname];
-      } else {
-        try {
-          addresses = await resolve(hostname);
-        } catch {
-          throw new Error(`${hostname} could not be resolved`);
-        }
-        if (addresses.length === 0) throw new Error(`${hostname} could not be resolved`);
-      }
-      const blocked = blockedAddresses(hostname, addresses, allowHosts);
-      if (blocked.length > 0) {
-        throw pinError(`SSRF guard blocked ${hostname} → ${blocked.join(", ")}`);
-      }
-      // Connect to a validated address, never to the name: re-resolving inside
-      // net/tls would reopen the rebinding window we just closed. `servername`
-      // keeps SNI/certificate validation pinned to the real hostname; for an IP
-      // literal it is omitted, since SNI must not carry an IP (RFC 6066) and
-      // the certificate is then matched against the address itself.
-      const address = addresses[0]!;
-      const servername = opts?.servername ?? (isIpLiteral ? undefined : hostname);
       const readyEvent = opts?.tls ? "secureConnect" : "connect";
+      // The whole flow — DNS resolution included — races the signal and one
+      // overall deadline. Attaching the abort listener and arming the timer
+      // before resolving is what makes the DNS phase bounded: a resolver that
+      // never answers used to hang here forever, because the socket (and its
+      // own timeout) only existed after resolution.
       return await new Promise<Duplex>((resolvePromise, reject) => {
-        const socket = opts?.tls
-          ? tls.connect({ host: address, port, ...(servername !== undefined ? { servername } : {}) })
-          : net.connect({ host: address, port });
         let settled = false;
-        const cleanup = (): void => {
-          // Detach everything before settling: a late `error` (or a connect
-          // that lands after the timeout) must not fire a second time.
-          socket.setTimeout(0);
-          socket.removeListener("error", onError);
-          socket.removeListener("timeout", onTimeout);
-          socket.removeListener(readyEvent, onReady);
+        let socket: net.Socket | undefined;
+        const detach = (): void => {
           signal?.removeEventListener("abort", onAbort);
+          clearTimeout(deadline);
         };
         const fail = (err: Error): void => {
           if (settled) return;
           settled = true;
-          cleanup();
-          socket.destroy(); // exactly once: every failure path routes through here
+          detach();
+          socket?.destroy(); // exactly once: every failure path routes through here
           reject(err);
         };
-        const onError = (err: Error): void => fail(err);
-        const onTimeout = (): void =>
-          fail(timeoutError(`connection to ${hostname}:${port} timed out after ${timeoutMs}ms`));
         const onAbort = (): void => fail(abortError(`connection to ${hostname}:${port} was aborted`));
-        const onReady = (): void => {
-          if (settled) return;
-          settled = true;
-          cleanup(); // clears the connect timeout; the socket is the caller's now
-          resolvePromise(socket);
-        };
-        socket.setTimeout(timeoutMs);
-        socket.once("timeout", onTimeout);
-        socket.once("error", onError);
-        socket.once(readyEvent, onReady);
         signal?.addEventListener("abort", onAbort, { once: true });
+        const deadline = setTimeout(
+          () => fail(timeoutError(`connection to ${hostname}:${port} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+
+        void (async () => {
+          try {
+            let addresses: string[];
+            if (isIpLiteral) {
+              addresses = [hostname];
+            } else {
+              try {
+                addresses = await resolve(hostname);
+              } catch {
+                throw new Error(`${hostname} could not be resolved`);
+              }
+              if (addresses.length === 0) throw new Error(`${hostname} could not be resolved`);
+              // Resolution awaited: a late answer for an already-aborted or
+              // timed-out connect is discarded, and a dispose() that landed
+              // meanwhile must not still get a socket opened for it.
+              if (settled) return;
+              assertUsable();
+            }
+            const blocked = blockedAddresses(hostname, addresses, allowHosts);
+            if (blocked.length > 0) {
+              throw pinError(`SSRF guard blocked ${hostname} → ${blocked.join(", ")}`);
+            }
+            // Connect to a validated address, never to the name: re-resolving
+            // inside net/tls would reopen the rebinding window we just closed.
+            // `servername` keeps SNI/certificate validation pinned to the real
+            // hostname; for an IP literal it is omitted, since SNI must not
+            // carry an IP (RFC 6066) and the certificate is then matched
+            // against the address itself.
+            const address = addresses[0]!;
+            const servername = opts?.servername ?? (isIpLiteral ? undefined : hostname);
+            const opened = opts?.tls
+              ? tls.connect({ host: address, port, ...(servername !== undefined ? { servername } : {}) })
+              : net.connect({ host: address, port });
+            if (settled) {
+              opened.destroy(); // settled in the same tick: never strand it
+              return;
+            }
+            socket = opened;
+            const onError = (err: Error): void => fail(err);
+            const onReady = (): void => {
+              if (settled) return;
+              settled = true;
+              detach();
+              opened.removeListener("error", onError);
+              // The caller attaches its own handlers on the next tick at the
+              // earliest; an `error` in that window would be unhandled and
+              // take the process down, so leave an inert listener behind.
+              opened.on("error", () => {});
+              resolvePromise(opened);
+            };
+            opened.once("error", onError);
+            opened.once(readyEvent, onReady);
+          } catch (err) {
+            fail(err as Error);
+          }
+        })();
       });
     },
 

@@ -9,7 +9,9 @@
  *   SSRF-guarded door (see egress.ts). A driver declaring `egress: false`
  *   receives `null` and has no sanctioned way out. The handle is owned by the
  *   runner, not the driver: the runner disposes it when the call ends, so a
- *   driver must not retain it past its `run`.
+ *   driver must not retain it past its `run`. Disposal releases only the fetch
+ *   pool — a socket returned by `connect()` is the driver's, and the driver
+ *   must close it itself.
  * - Writes: a driver receives a `writer` only for the write surfaces it
  *   declared. Undeclared writes are simply not reachable — `writer` is null.
  * - Config: the decrypted service config reaches the driver only inside
@@ -24,7 +26,8 @@ import type { Egress } from "./egress.js";
 
 /**
  * The guarded egress handle: `fetch`, `connect`, `assertPublic`, and the
- * `dispose` its owner calls to release the connection pool. Implemented by
+ * `dispose` its owner calls to release the fetch connection pool (sockets from
+ * `connect()` are the driver's to close, not dispose's). Implemented by
  * `createEgress` (egress.ts); the interface lives beside it and is re-exported
  * here so a driver module can import the whole contract from one place.
  */
