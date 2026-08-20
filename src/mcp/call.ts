@@ -17,6 +17,7 @@ import * as grantsCore from "../core/grants.js";
 import type { DriverRegistry } from "../core/drivers/registry.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
+import * as legacyHooks from "../core/legacyHooks.js";
 import * as runsCore from "../core/runs.js";
 import * as spacesCore from "../core/spaces.js";
 import type { PropertyConfig } from "../core/propertyConfig.js";
@@ -418,23 +419,20 @@ export const secondTier: Record<string, SecondTierTool> = {
     // action's own budget (deliberately uncapped) and always has a terminal run
     // to translate into the old shape: the result on success, a thrown error —
     // matching today's per-call error shape — on failure.
-    handler: async (env, params) => {
-      const waitMs = env.config.hookTimeoutMs + 500;
-      // The alias speaks the old http-only shape: a service on any other
-      // driver is not a hook, and reports as a per-call not_found rather than
-      // being fired through a contract that cannot describe its result.
-      await runsCore.assertLegacyHook(env, env.userId, env.bundleId, String(params.id));
-      const run = await runsCore.runService(env, env.userId, env.bundleId, {
-        service: String(params.id),
-        params: params.params as Record<string, unknown> | undefined,
-        waitMs,
-      });
-      if (run.status === "succeeded") return { result: run.result };
-      // The driver's own verdict, carried on the run, rather than a guess made
-      // from the message: a rejected call stays a 400, a blocked destination a
-      // 403, everything else a 500.
-      throw runsCore.runFailureError(run, `hook did not finish within ${waitMs}ms`);
-    },
+    // The alias speaks the old http-only shape: a service on any other driver
+    // is not a hook, and reports as a per-call not_found rather than being
+    // fired through a contract that cannot describe its result. Gate, wait and
+    // error mapping are the core's, shared with `POST /v1/hooks/:id/fire`; a
+    // failure arrives thrown, carrying the driver's own verdict.
+    handler: async (env, params) => ({
+      result: await legacyHooks.fireLegacyHook(
+        env,
+        env.userId,
+        String(params.id),
+        params.params as Record<string, unknown> | undefined,
+        env.bundleId,
+      ),
+    }),
   },
 
   // ---- Management (parity with the REST management plane) -----------------------

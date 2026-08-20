@@ -23,6 +23,7 @@ import { YapError } from "../core/errors.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
 import { listItemTypesUnchecked } from "../core/itemTypes.js";
+import { LEGACY_DRIVER, toLegacyHookView } from "../core/legacyHooks.js";
 import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
 import { listServicesUnchecked } from "../core/services.js";
@@ -377,15 +378,9 @@ export function registerMcpTools(server: YapServer): void {
               files: await listFilesUnchecked(db, bundleId),
               services,
               // The legacy hook view — http services in the old four-field
-              // shape, for clients written before services existed. Dies at 1.0.
-              hooks: services
-                .filter((s) => s.driver === "http")
-                .map((s) => ({
-                  id: s.id,
-                  name: s.name,
-                  description: s.description,
-                  params: s.actions[0]?.params ?? [],
-                })),
+              // shape, for clients written before services existed. Dies at 1.0
+              // along with the rest of core/legacyHooks.ts.
+              hooks: services.filter((s) => s.driver === LEGACY_DRIVER).map(toLegacyHookView),
             });
           } catch (err) {
             if (err instanceof YapError) {

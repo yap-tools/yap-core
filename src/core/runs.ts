@@ -66,9 +66,6 @@ const INTERRUPTED: RunStatus[] = ["queued", "running"];
 /** How many driver log lines one run keeps. See `execute` — nothing is persisted. */
 const LOG_RING_SIZE = 200;
 
-/** The driver every hook was, and the only one the legacy surfaces speak for. */
-const LEGACY_HOOK_DRIVER = "http";
-
 export interface RunRecord {
   id: string;
   /** Null once the service has been deleted — the run outlives it. */
@@ -105,7 +102,7 @@ export interface RunEnv {
   logger?: YapLogger;
 }
 
-interface ServiceRow {
+export interface ServiceRow {
   id: string;
   bundleId: string;
   name: string;
@@ -167,8 +164,12 @@ async function readRun(db: Db, runId: string): Promise<RunRecord> {
  * bare not_found that reads as a wiring problem. The wording names no tool
  * parameter: this same message reaches `run_service`, the legacy `fire_hook`
  * alias, and REST, each of which spells that field differently.
+ *
+ * Exported for the legacy hook gate, which resolves the same way this does
+ * (id, then name, within one bundle) before deciding whether the row it found
+ * is a hook at all.
  */
-async function resolveService(db: Db, bundleId: string, ref: string | undefined): Promise<ServiceRow> {
+export async function resolveServiceRow(db: Db, bundleId: string, ref: string | undefined): Promise<ServiceRow> {
   const wanted = ref?.trim();
   if (!wanted) {
     throw invalid(
@@ -520,7 +521,7 @@ export async function runService(
   const bundleCtx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "run_services", bundleCtx);
 
-  const service = await resolveService(db, bundleId, input.service);
+  const service = await resolveServiceRow(db, bundleId, input.service);
   const def = driverFor(env.registry, service);
   const action = resolveAction(def, service.name, input.action);
   const { params, values } = buildParams(def, service, action, input.params ?? {});
@@ -565,45 +566,6 @@ export async function runService(
 }
 
 /**
- * The gate in front of the legacy fire surfaces (`POST /v1/hooks/:id/fire` and
- * the `fire_hook` call alias): a hook *was* an http service, and those surfaces
- * still speak the old shape — `{status, body}` out, the old error mapping back.
- * A service on any other driver has no old shape to be rendered in, so it must
- * look like no hook at all rather than being fired through a contract that was
- * never meant to carry it (and answered with whatever that driver returns).
- *
- * The bundle gate is checked first, in the same order `runService` checks it,
- * so this cannot become an existence oracle for a caller without run_services.
- */
-export async function assertLegacyHook(env: RunEnv, userId: string, bundleId: string, ref: string): Promise<void> {
-  const { db } = env;
-  const bundleCtx = await getBundleContext(db, bundleId);
-  await requireBundleCapability(db, userId, "run_services", bundleCtx);
-  const service = await resolveService(db, bundleId, ref);
-  if (service.driver !== LEGACY_HOOK_DRIVER) throw notFound("hook", ref);
-}
-
-/**
- * Turns a non-succeeded run back into a thrown error, for the legacy fire
- * surfaces (`POST /v1/hooks/:id/fire` and the `fire_hook` call alias) whose
- * contract is synchronous: they promised a result or an error, never a run id.
- *
- * The verdict comes from `run.errorCode`, which the executor copied off the
- * driver's own `YapError` — so a destination the guard refused is still a 403
- * and a call the driver rejected (a CRLF in a substituted header, say) is
- * still a 400, rather than both collapsing into a 500. Codes outside that pair
- * are deliberately flattened to `internal`: a timeout, an unserializable
- * result, or a driver bug are all "the server could not complete this", and a
- * 404/409 leaking out here would read as a statement about the *hook*.
- */
-export function runFailureError(run: RunRecord, fallbackMessage: string): YapError {
-  const message = run.error ?? fallbackMessage;
-  const code: ErrorCode =
-    run.errorCode === "forbidden" || run.errorCode === "invalid_request" ? run.errorCode : "internal";
-  return new YapError(code, message);
-}
-
-/**
  * Reads one run. Existence hiding here is about the *run*: an id that does not
  * exist and a run living in a bundle the caller cannot see must be
  * indistinguishable, and neither may name the bundle — the bundle-level
@@ -641,7 +603,7 @@ export async function listRuns(
   // A blank filter is "no filter" — an empty `?service=` should not read as
   // the flattening mistake resolveService warns about.
   if (opts.service !== undefined && opts.service.trim() !== "") {
-    const service = await resolveService(db, bundleId, opts.service);
+    const service = await resolveServiceRow(db, bundleId, opts.service);
     conditions.push(eq(db.tables.runs.serviceId, service.id));
   }
 

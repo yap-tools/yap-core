@@ -54,8 +54,9 @@ import { newId, nowIso } from "./util.js";
 /** The same rule the driver registry applies to a driver's own param specs. */
 const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 
-/** A service that names no driver gets the built-in one (what every hook was). */
-const DEFAULT_DRIVER = "http";
+/** A service that names no driver gets the built-in one (what every hook was —
+ *  legacyHooks.ts shares this constant rather than repeating the literal). */
+export const DEFAULT_DRIVER = "http";
 
 // Defined once: the zod schema validates the REST authoring boundary and the
 // TypeScript type is inferred from it, so the public surface and the runner
@@ -276,13 +277,14 @@ export async function getServiceBundleId(db: Db, serviceId: string): Promise<str
 }
 
 /**
- * The driver a service record is on. The legacy `/v1/hooks/:id` mounts use it
- * to stay http-only: a hook was an http service, so a service on any other
- * driver has no old shape to be edited or deleted through and must read as no
- * hook at all.
+ * The routing facts about a service, in one read: which bundle owns it (the
+ * gate to check) and which driver it is on (whether a legacy surface may speak
+ * for it at all). The legacy `/v1/hooks/:id` mounts need both and used to take
+ * two round trips to get them.
  */
-export async function getServiceDriver(db: Db, serviceId: string): Promise<string> {
-  return (await getServiceRow(db, serviceId)).driver;
+export async function getServiceRef(db: Db, serviceId: string): Promise<{ id: string; bundleId: string; driver: string }> {
+  const { id, bundleId, driver } = await getServiceRow(db, serviceId);
+  return { id, bundleId, driver };
 }
 
 async function assertNameFree(db: Db, bundleId: string, name: string, exceptId?: string): Promise<void> {

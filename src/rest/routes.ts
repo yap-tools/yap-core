@@ -15,13 +15,14 @@ import { z } from "zod";
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
-import { YapError, invalid, notFound, tooLarge, unauthorized } from "../core/errors.js";
+import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as keysCore from "../core/keys.js";
+import * as legacyHooks from "../core/legacyHooks.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as runsCore from "../core/runs.js";
 import * as servicesCore from "../core/services.js";
@@ -954,40 +955,9 @@ export function registerRestRoutes(server: YapServer): void {
   // Every hook was a service with the `http` driver, so these routes are pure
   // translation: `transport` is the service config, the driver is forced, and
   // the responses keep the old shapes — a flat `params` array with no driver or
-  // action fields, and `{status, body}` from a fire.
-
-  const LEGACY_DRIVER = "http";
-
-  /**
-   * The legacy mounts are http-only. A hook *was* an http service, so a
-   * service on any other driver has no old shape to be edited or deleted
-   * through — it must read as no hook at all rather than being reshaped into
-   * one (a smtp service patched through `transport`, say, or a legacy DELETE
-   * quietly removing something these routes never created).
-   *
-   * The driver check is behind an `edit_services` capability gate, same as
-   * `assertLegacyHook` in runs.ts: the two `notFound` messages this can throw
-   * ("service ... not found" from resolving the bundle, "hook ... not found"
-   * from the driver check) are distinguishable, so without the gate a caller
-   * with no access to the bundle could use the difference to learn "this id
-   * is a service, just not an http one" — an existence oracle the subsequent
-   * `updateService`/`deleteService` capability check would not otherwise let
-   * them have.
-   */
-  const requireLegacyHook = async (userId: string, id: string): Promise<void> => {
-    const bundleId = await servicesCore.getServiceBundleId(db, id);
-    const ctx = await bundlesCore.getBundleContext(db, bundleId);
-    await bundlesCore.requireBundleCapability(db, userId, "edit_services", ctx);
-    if ((await servicesCore.getServiceDriver(db, id)) !== LEGACY_DRIVER) throw notFound("hook", id);
-  };
-
-  /** The old hook view of a service: its single http action's parameters. */
-  const legacyHookView = (info: servicesCore.ServiceInfo) => ({
-    id: info.id,
-    name: info.name,
-    description: info.description,
-    params: info.actions[0]?.params ?? [],
-  });
+  // action fields, and `{status, body}` from a fire. The translation itself
+  // lives in core/legacyHooks.ts, shared with the MCP aliases; what is left
+  // here is only the HTTP shape of it.
 
   app.post(
     "/v1/bundles/:id/hooks",
@@ -1005,11 +975,11 @@ export function registerRestRoutes(server: YapServer): void {
       const created = await servicesCore.createService(serviceEnv, userId, param(c, "id"), {
         name: body.name,
         description: body.description,
-        driver: LEGACY_DRIVER,
+        driver: legacyHooks.LEGACY_DRIVER,
         params: body.params,
         config: body.transport,
       });
-      return c.json(legacyHookView(created), 201);
+      return c.json(legacyHooks.toLegacyHookView(created), 201);
     }),
   );
 
@@ -1020,7 +990,9 @@ export function registerRestRoutes(server: YapServer): void {
       const services = await servicesCore.listServices(serviceEnv, userId, param(c, "id"));
       // Only http services are hooks; a service on any other driver has no old
       // shape to be rendered in.
-      return c.json({ data: services.filter((s) => s.driver === LEGACY_DRIVER).map(legacyHookView) });
+      return c.json({
+        data: services.filter((s) => s.driver === legacyHooks.LEGACY_DRIVER).map(legacyHooks.toLegacyHookView),
+      });
     }),
   );
 
@@ -1038,14 +1010,14 @@ export function registerRestRoutes(server: YapServer): void {
         await jsonBody(c),
       );
       const hookId = param(c, "id");
-      await requireLegacyHook(userId, hookId);
+      await legacyHooks.requireLegacyHook(db, userId, hookId, "edit_services");
       const updated = await servicesCore.updateService(serviceEnv, userId, hookId, {
         name: body.name,
         description: body.description,
         params: body.params,
         config: body.transport,
       });
-      return c.json(legacyHookView(updated));
+      return c.json(legacyHooks.toLegacyHookView(updated));
     }),
   );
 
@@ -1054,7 +1026,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const hookId = param(c, "id");
-      await requireLegacyHook(userId, hookId);
+      await legacyHooks.requireLegacyHook(db, userId, hookId, "edit_services");
       await servicesCore.deleteService(serviceEnv, userId, hookId);
       return c.json({ deleted: true });
     }),
@@ -1068,26 +1040,11 @@ export function registerRestRoutes(server: YapServer): void {
         z.object({ params: z.record(z.string(), z.unknown()).optional() }),
         await optionalJsonBody(c),
       );
-      const hookId = param(c, "id");
-      const bundleId = await servicesCore.getServiceBundleId(db, hookId);
-      // Same http-only rule as the mounts above, checked behind the bundle's
-      // run_services gate so it cannot report on a service the caller may not
-      // reach.
-      await runsCore.assertLegacyHook(serviceEnv, userId, bundleId, hookId);
-      // A fire is synchronous by contract, so this internal caller waits past
-      // the action's own budget (deliberately uncapped) and always gets back a
-      // terminal run to translate.
-      const waitMs = config.hookTimeoutMs + 500;
-      const run = await runsCore.runService(serviceEnv, userId, bundleId, {
-        service: hookId,
-        params: body.params,
-        waitMs,
-      });
-      if (run.status === "succeeded") return c.json(run.result as Record<string, unknown>);
-      // The old mapping, now taken from the driver's own verdict rather than
-      // guessed back out of the message. The run's error is already agent-safe
-      // (the driver sanitizes it), so it is what the caller sees, unchanged.
-      throw runsCore.runFailureError(run, `hook did not finish within ${waitMs}ms`);
+      // The whole legacy fire — the http-only gate, the uncapped wait, and the
+      // old error mapping — is one core call, shared with the `fire_hook` MCP
+      // alias. A failure arrives as the driver's own verdict, thrown.
+      const result = await legacyHooks.fireLegacyHook(serviceEnv, userId, param(c, "id"), body.params);
+      return c.json(result as Record<string, unknown>);
     }),
   );
 
