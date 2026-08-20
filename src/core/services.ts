@@ -275,6 +275,16 @@ export async function getServiceBundleId(db: Db, serviceId: string): Promise<str
   return (await getServiceRow(db, serviceId)).bundleId;
 }
 
+/**
+ * The driver a service record is on. The legacy `/v1/hooks/:id` mounts use it
+ * to stay http-only: a hook was an http service, so a service on any other
+ * driver has no old shape to be edited or deleted through and must read as no
+ * hook at all.
+ */
+export async function getServiceDriver(db: Db, serviceId: string): Promise<string> {
+  return (await getServiceRow(db, serviceId)).driver;
+}
+
 async function assertNameFree(db: Db, bundleId: string, name: string, exceptId?: string): Promise<void> {
   const { services } = db.tables;
   const clash = await db.client

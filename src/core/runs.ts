@@ -61,6 +61,9 @@ const INTERRUPTED: RunStatus[] = ["queued", "running"];
 /** How many driver log lines one run keeps. See `execute` — nothing is persisted. */
 const LOG_RING_SIZE = 200;
 
+/** The driver every hook was, and the only one the legacy surfaces speak for. */
+const LEGACY_HOOK_DRIVER = "http";
+
 export interface RunRecord {
   id: string;
   /** Null once the service has been deleted — the run outlives it. */
@@ -554,6 +557,25 @@ export async function runService(
   );
   if (input.waitMs !== undefined && input.waitMs > 0) await raceWithTimer(execution, input.waitMs);
   return await readRun(db, runId);
+}
+
+/**
+ * The gate in front of the legacy fire surfaces (`POST /v1/hooks/:id/fire` and
+ * the `fire_hook` call alias): a hook *was* an http service, and those surfaces
+ * still speak the old shape — `{status, body}` out, the old error mapping back.
+ * A service on any other driver has no old shape to be rendered in, so it must
+ * look like no hook at all rather than being fired through a contract that was
+ * never meant to carry it (and answered with whatever that driver returns).
+ *
+ * The bundle gate is checked first, in the same order `runService` checks it,
+ * so this cannot become an existence oracle for a caller without run_services.
+ */
+export async function assertLegacyHook(env: RunEnv, userId: string, bundleId: string, ref: string): Promise<void> {
+  const { db } = env;
+  const bundleCtx = await getBundleContext(db, bundleId);
+  await requireBundleCapability(db, userId, "run_services", bundleCtx);
+  const service = await resolveService(db, bundleId, ref);
+  if (service.driver !== LEGACY_HOOK_DRIVER) throw notFound("hook", ref);
 }
 
 /**

@@ -12,11 +12,31 @@
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { DRIVER_API, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
 import { encryptSecret } from "../../src/crypto.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
+
+/**
+ * A live, installed, perfectly usable non-http driver. The legacy mounts must
+ * still refuse to speak for a service on it: those routes are the *hook*
+ * contract, and a hook was an http service.
+ */
+const echoDriver: DriverDefinition = {
+  name: "echo",
+  api: DRIVER_API,
+  description: "In-test driver that echoes its parameters.",
+  egress: false,
+  validateConfig(): void {},
+  actions: {
+    say: { description: "Echoes.", params: [{ name: "message" }], timeoutMs: 5_000 },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    return { echoed: ctx.params };
+  },
+};
 
 describeEachAdapter("legacy hook routes", (adapter) => {
   let app: TestApp;
@@ -61,6 +81,7 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
     alice = apiClient(app.baseUrl, a.body.initialKey.key);
     aliceMcp = await connectMcp(app.baseUrl, a.body.initialKey.key);
+    app.server.registry.register(echoDriver);
     spaceId = (await alice.post("/v1/spaces", { name: "Legacy" })).body.id;
     bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "hooked" })).body.id;
   });
@@ -242,6 +263,47 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     const noId = await fireViaMcp({ params: { message: "x" } });
     expect(noId.ok).toBe(false);
     expect(noId.error.code).toBe("invalid_request");
+  });
+
+  it("stays http-only: a service on another driver is not a hook", async () => {
+    const echo = await alice.post(`/v1/bundles/${bundleId}/services`, {
+      name: "echoer",
+      driver: "echo",
+      params: [{ name: "message" }],
+      config: {},
+    });
+    expect(echo.status).toBe(201);
+    const echoId = echo.body.id;
+
+    // The legacy list never showed it, and none of the legacy mounts speak for
+    // it either — the hook shape has nowhere to put an echo driver's result.
+    expect((await alice.get(`/v1/bundles/${bundleId}/hooks`)).body.data.map((h: any) => h.id)).not.toContain(echoId);
+
+    for (const res of [
+      await alice.post(`/v1/hooks/${echoId}/fire`, { params: { message: "hi" } }),
+      await alice.patch(`/v1/hooks/${echoId}`, { description: "reshaped" }),
+      await alice.delete(`/v1/hooks/${echoId}`),
+    ]) {
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe("not_found");
+      expect(res.body.error.message).toMatch(/hook/);
+    }
+
+    // The alias reports it the same way: a per-call not_found, not a run.
+    const viaMcp = await fireViaMcp({ id: "echoer", params: { message: "hi" } });
+    expect(viaMcp.ok).toBe(false);
+    expect(viaMcp.error.code).toBe("not_found");
+
+    // And the service itself is untouched and perfectly usable on its own
+    // surface — the legacy 404s are about the mount, not about the record.
+    const still = await alice.get(`/v1/bundles/${bundleId}/services`);
+    expect(still.body.data.find((s: any) => s.id === echoId)?.description).toBe("");
+    const run = await alice.post(`/v1/services/${echoId}/run`, {
+      params: { message: "hi" },
+      wait_ms: 5000,
+    });
+    expect(run.body.status).toBe("succeeded");
+    expect(run.body.result).toEqual({ echoed: { message: "hi" } });
   });
 
   it("keeps a rejection raised at fire time a 400 on both fire surfaces", async () => {

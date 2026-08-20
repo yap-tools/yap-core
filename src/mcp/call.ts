@@ -420,6 +420,10 @@ export const secondTier: Record<string, SecondTierTool> = {
     // matching today's per-call error shape — on failure.
     handler: async (env, params) => {
       const waitMs = env.config.hookTimeoutMs + 500;
+      // The alias speaks the old http-only shape: a service on any other
+      // driver is not a hook, and reports as a per-call not_found rather than
+      // being fired through a contract that cannot describe its result.
+      await runsCore.assertLegacyHook(env, env.userId, env.bundleId, String(params.id));
       const run = await runsCore.runService(env, env.userId, env.bundleId, {
         service: String(params.id),
         params: params.params as Record<string, unknown> | undefined,

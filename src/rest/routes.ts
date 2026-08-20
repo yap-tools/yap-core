@@ -15,7 +15,7 @@ import { z } from "zod";
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
-import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
+import { YapError, invalid, notFound, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
@@ -958,6 +958,17 @@ export function registerRestRoutes(server: YapServer): void {
 
   const LEGACY_DRIVER = "http";
 
+  /**
+   * The legacy mounts are http-only. A hook *was* an http service, so a
+   * service on any other driver has no old shape to be edited or deleted
+   * through — it must read as no hook at all rather than being reshaped into
+   * one (a smtp service patched through `transport`, say, or a legacy DELETE
+   * quietly removing something these routes never created).
+   */
+  const requireLegacyHook = async (id: string): Promise<void> => {
+    if ((await servicesCore.getServiceDriver(db, id)) !== LEGACY_DRIVER) throw notFound("hook", id);
+  };
+
   /** The old hook view of a service: its single http action's parameters. */
   const legacyHookView = (info: servicesCore.ServiceInfo) => ({
     id: info.id,
@@ -1014,7 +1025,9 @@ export function registerRestRoutes(server: YapServer): void {
         }),
         await jsonBody(c),
       );
-      const updated = await servicesCore.updateService(serviceEnv, userId, param(c, "id"), {
+      const hookId = param(c, "id");
+      await requireLegacyHook(hookId);
+      const updated = await servicesCore.updateService(serviceEnv, userId, hookId, {
         name: body.name,
         description: body.description,
         params: body.params,
@@ -1028,7 +1041,9 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/hooks/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      await servicesCore.deleteService(serviceEnv, userId, param(c, "id"));
+      const hookId = param(c, "id");
+      await requireLegacyHook(hookId);
+      await servicesCore.deleteService(serviceEnv, userId, hookId);
       return c.json({ deleted: true });
     }),
   );
@@ -1043,6 +1058,10 @@ export function registerRestRoutes(server: YapServer): void {
       );
       const hookId = param(c, "id");
       const bundleId = await servicesCore.getServiceBundleId(db, hookId);
+      // Same http-only rule as the mounts above, checked behind the bundle's
+      // run_services gate so it cannot report on a service the caller may not
+      // reach.
+      await runsCore.assertLegacyHook(serviceEnv, userId, bundleId, hookId);
       // A fire is synchronous by contract, so this internal caller waits past
       // the action's own budget (deliberately uncapped) and always gets back a
       // terminal run to translate.
