@@ -964,8 +964,20 @@ export function registerRestRoutes(server: YapServer): void {
    * through — it must read as no hook at all rather than being reshaped into
    * one (a smtp service patched through `transport`, say, or a legacy DELETE
    * quietly removing something these routes never created).
+   *
+   * The driver check is behind an `edit_services` capability gate, same as
+   * `assertLegacyHook` in runs.ts: the two `notFound` messages this can throw
+   * ("service ... not found" from resolving the bundle, "hook ... not found"
+   * from the driver check) are distinguishable, so without the gate a caller
+   * with no access to the bundle could use the difference to learn "this id
+   * is a service, just not an http one" — an existence oracle the subsequent
+   * `updateService`/`deleteService` capability check would not otherwise let
+   * them have.
    */
-  const requireLegacyHook = async (id: string): Promise<void> => {
+  const requireLegacyHook = async (userId: string, id: string): Promise<void> => {
+    const bundleId = await servicesCore.getServiceBundleId(db, id);
+    const ctx = await bundlesCore.getBundleContext(db, bundleId);
+    await bundlesCore.requireBundleCapability(db, userId, "edit_services", ctx);
     if ((await servicesCore.getServiceDriver(db, id)) !== LEGACY_DRIVER) throw notFound("hook", id);
   };
 
@@ -1026,7 +1038,7 @@ export function registerRestRoutes(server: YapServer): void {
         await jsonBody(c),
       );
       const hookId = param(c, "id");
-      await requireLegacyHook(hookId);
+      await requireLegacyHook(userId, hookId);
       const updated = await servicesCore.updateService(serviceEnv, userId, hookId, {
         name: body.name,
         description: body.description,
@@ -1042,7 +1054,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const hookId = param(c, "id");
-      await requireLegacyHook(hookId);
+      await requireLegacyHook(userId, hookId);
       await servicesCore.deleteService(serviceEnv, userId, hookId);
       return c.json({ deleted: true });
     }),

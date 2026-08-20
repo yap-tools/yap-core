@@ -113,12 +113,29 @@ describe("run config", () => {
     // Above MAX_TIMER_MS setTimeout wraps to ~1ms, so a huge budget would fire
     // at once — the opposite of what the operator asked for. The exact ceiling
     // is still accepted; one millisecond past it is not.
-    for (const name of ["YAP_HOOK_TIMEOUT_MS", "YAP_RUN_WAIT_CAP_MS", "YAP_RUN_TIMEOUT_CAP_MS"]) {
+    for (const name of ["YAP_RUN_WAIT_CAP_MS", "YAP_RUN_TIMEOUT_CAP_MS"]) {
       expect(loadConfig({ ...base, [name]: String(MAX_TIMER_MS) }), name).toBeTruthy();
       expect(() => loadConfig({ ...base, [name]: String(MAX_TIMER_MS + 1) }), name).toThrow(
         /must be at most 2147483647/,
       );
     }
+  });
+
+  it("bounds YAP_HOOK_TIMEOUT_MS 500ms tighter than MAX_TIMER_MS", () => {
+    // The legacy fire paths wait hookTimeoutMs + 500; at exactly MAX_TIMER_MS
+    // that addition would itself overflow the 32-bit timer and clamp to 1ms,
+    // so the ceiling here sits 500ms below MAX_TIMER_MS.
+    expect(loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: String(MAX_TIMER_MS - 500) })).toBeTruthy();
+    expect(() => loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: String(MAX_TIMER_MS - 499) })).toThrow(
+      /must be at most 2147483147/,
+    );
+  });
+
+  it("rejects YAP_ORPHAN_SWEEP_INTERVAL_MS above the longest delay a timer can hold", () => {
+    expect(loadConfig({ ...base, YAP_ORPHAN_SWEEP_INTERVAL_MS: String(MAX_TIMER_MS) })).toBeTruthy();
+    expect(() => loadConfig({ ...base, YAP_ORPHAN_SWEEP_INTERVAL_MS: String(MAX_TIMER_MS + 1) })).toThrow(
+      /must be at most 2147483647/,
+    );
   });
 });
 

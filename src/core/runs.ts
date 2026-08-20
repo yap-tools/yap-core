@@ -29,9 +29,14 @@
  * fired at `min(action.timeoutMs, config.runTimeoutCapMs)`, reaches the driver
  * as `ctx.signal`, and the driver's promise is raced against that deadline. A
  * driver that ignores its signal therefore still loses the race and still
- * lands a `failed` row; only its own in-flight work outlives the run. The
- * egress handle is likewise created and disposed here — one per run, released
- * in a `finally` at race end.
+ * lands a `failed` row; only its own in-flight work outlives the run. One
+ * exception: an in-flight bundle write that has not yet settled defers the
+ * row write until it does (see the attempt's `finally`, which awaits the
+ * writer's drain unbounded, on purpose — audit integrity outweighs the tail
+ * risk), so a write a signal-deaf driver truly cannot finish leaves the row
+ * `running` rather than `failed` until boot recovery reclaims it. The egress
+ * handle is likewise created and disposed here — one per run, released in a
+ * `finally` at race end.
  *
  * The outcome is serialized inside the attempt, not while writing the row: a
  * result JSON cannot represent (circular, BigInt) is the driver's bug and
@@ -675,24 +680,28 @@ export async function recoverInterruptedRuns(db: Db): Promise<number> {
   const { runs } = db.tables;
   const stranded = await db.client.select({ id: runs.id }).from(runs).where(inArray(runs.status, INTERRUPTED));
   if (stranded.length === 0) return 0;
+  const strandedIds = stranded.map((row) => row.id);
+  const strandedError = "interrupted by server restart";
   await db.client
     .update(runs)
     .set({
       status: "failed",
-      error: "interrupted by server restart",
+      error: strandedError,
       errorCode: "internal",
       finishedAt: nowIso(),
     })
-    .where(
-      and(
-        inArray(
-          runs.id,
-          stranded.map((row) => row.id),
-        ),
-        inArray(runs.status, INTERRUPTED),
-      ),
-    );
-  return stranded.length;
+    .where(and(inArray(runs.id, strandedIds), inArray(runs.status, INTERRUPTED)));
+  // The UPDATE's own result shape isn't portable across the sqlite/pg
+  // adapters (drizzle surfaces a rowCount/changes differently per driver), so
+  // the actually-updated count is recovered by re-selecting: a candidate id
+  // now carrying this call's own error text is one the UPDATE actually
+  // touched, not one the status guard skipped because it raced to a terminal
+  // state between the SELECT and the UPDATE above.
+  const recovered = await db.client
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(inArray(runs.id, strandedIds), eq(runs.error, strandedError)));
+  return recovered.length;
 }
 
 /** Retention sweep: finished runs older than the window are deleted. */

@@ -805,8 +805,11 @@ describeEachAdapter("runs", (adapter) => {
           .where(eq(runs.id, "race-finisher"));
       });
 
-      await recoverInterruptedRuns(racingDb);
+      // Only race-stranded is actually flipped by the UPDATE; the return
+      // value must reflect that, not the pre-race SELECT's count of 2.
+      const recovered = await recoverInterruptedRuns(racingDb);
       expect(raced).toBe(true);
+      expect(recovered).toBe(1);
 
       const finisher = await getRun(env, aliceId, "race-finisher");
       expect(finisher.status).toBe("succeeded");

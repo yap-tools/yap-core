@@ -277,14 +277,17 @@ export function loadConfig(env: Env = process.env): YapConfig {
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
-    // The three settings that become timer delays are bounded by MAX_TIMER_MS:
-    // above it a value wraps and fires immediately instead of waiting.
-    hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000, MAX_TIMER_MS),
+    // The settings that become timer delays are bounded by MAX_TIMER_MS: above
+    // it a value wraps and fires immediately instead of waiting. hookTimeoutMs
+    // is bounded 500ms tighter because the legacy fire paths wait
+    // hookTimeoutMs + 500; at exactly MAX_TIMER_MS that addition itself
+    // overflows Node's 32-bit timer and clamps to 1ms.
+    hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000, MAX_TIMER_MS - 500),
     hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
     runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS, MAX_TIMER_MS),
     runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS", MAX_TIMER_MS),
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),
-    orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
+    orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000, MAX_TIMER_MS),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),
     driversDir: env.YAP_DRIVERS_DIR || "./drivers",
   };

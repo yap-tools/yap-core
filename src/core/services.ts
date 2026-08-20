@@ -427,6 +427,13 @@ export async function deleteService(env: ServiceEnv, userId: string, serviceId: 
  * at once and then waits for every in-flight write to settle — announcement
  * included — before it resolves. The runner awaits it before serializing the
  * outcome, which is what makes "an item with no audit trail" unreachable.
+ *
+ * That drain is deliberately unbounded — no timeout races it. Audit integrity
+ * outweighs the tail risk: a genuinely stalled write would strand the run's
+ * own row write regardless of whether this wait were capped, so a timeout here
+ * would only buy an inconsistent audit trail, not a faster run. A write that
+ * truly never settles leaves the run `running` rather than `failed`; boot
+ * recovery (`recoverInterruptedRuns`) is what reclaims it.
  */
 export interface ScopedBundleWriter extends BundleWriter {
   close(): Promise<void>;
