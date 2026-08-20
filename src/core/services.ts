@@ -44,15 +44,12 @@ import { encryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { createEgress } from "./drivers/egress.js";
-import type { DriverRegistry } from "./drivers/registry.js";
+import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleWriter, DriverDefinition } from "./drivers/types.js";
 import { invalid, notFound, YapError } from "./errors.js";
 import { createItemsUnchecked } from "./items.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
-
-/** The same rule the driver registry applies to a driver's own param specs. */
-const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 
 /** A service that names no driver gets the built-in one (what every hook was —
  *  legacyHooks.ts shares this constant rather than repeating the literal). */
@@ -448,7 +445,16 @@ export async function updateService(
       updatedAt: nowIso(),
     })
     .where(eq(services.id, serviceId));
-  return toInfo(env.registry, await getServiceRow(db, serviceId));
+  // Built from the row plus the patch rather than read back: every field of the
+  // view is already resolved above — the effective actions from the *post*-patch
+  // params and pins — so a second SELECT would only re-derive what is in hand.
+  return {
+    id: row.id,
+    name: name ?? row.name,
+    description: patch.description ?? row.description,
+    driver: row.driver,
+    actions: effectiveActions(def, params, pins as ServicePins),
+  };
 }
 
 export async function deleteService(env: ServiceEnv, userId: string, serviceId: string): Promise<void> {

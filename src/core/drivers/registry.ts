@@ -19,7 +19,10 @@ import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverPa
 /** Stable identifier used in service records and CLI (also enforced by `yap driver add`). */
 export const DRIVER_NAME = /^[a-z][a-z0-9-]{1,63}$/;
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
+/** The rule for a parameter name, wherever one is declared: in a driver's own
+ *  action specs (checked here) or on a service record (services.ts). One rule,
+ *  because a spec from either source ends up in the same allowlist. */
+export const PARAM_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

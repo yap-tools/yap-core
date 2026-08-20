@@ -89,7 +89,7 @@ export interface RunRecord {
   /** The `YapError` code behind `error`, so a translating caller (the legacy
    *  fire surfaces) can re-throw the *driver's* verdict instead of guessing it
    *  back out of the message. Null unless the run failed. */
-  errorCode: string | null;
+  errorCode: ErrorCode | null;
   writes: unknown[];
   createdAt: string;
   startedAt: string | null;
@@ -146,7 +146,9 @@ function toRecord(row: RunRow): RunRecord {
     params: JSON.parse(row.params) as Record<string, string>,
     result: row.result === null ? null : (JSON.parse(row.result) as unknown),
     error: row.error,
-    errorCode: row.errorCode,
+    // The column is text; every value in it was written from a `YapError` code
+    // by `execute`, so the narrowing is the row's own history, not a guess.
+    errorCode: row.errorCode as ErrorCode | null,
     writes: JSON.parse(row.writes) as unknown[],
     createdAt: row.createdAt,
     startedAt: row.startedAt,
@@ -493,6 +495,23 @@ async function execute(env: RunEnv, job: Job): Promise<void> {
   }
 }
 
+/**
+ * The adapters' clamp on a caller's requested wait, in one place because the
+ * split it implements is subtle: `runService` uses `waitMs` raw, deliberately,
+ * so an internal caller (the legacy fire path) can wait past the cap to keep
+ * its synchronous contract — while an agent's or client's ask is untrusted
+ * input that would otherwise pin a request open for as long as it liked. So
+ * every adapter clamps, and the core never does.
+ *
+ * `Math.floor`/`Math.max` are here rather than at each adapter because the
+ * clamp must be total: REST's zod has already narrowed to a non-negative
+ * integer, but MCP's coercion (which stays at that adapter, where its error
+ * message belongs) has only established that the number is finite.
+ */
+export function clampRunWait(config: YapConfig, value: number): number {
+  return Math.min(Math.max(0, Math.floor(value)), config.runWaitCapMs);
+}
+
 /** Resolves when `promise` settles or `ms` elapses, whichever comes first. */
 async function raceWithTimer(promise: Promise<void>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -644,26 +663,21 @@ export async function recoverInterruptedRuns(db: Db): Promise<number> {
   const stranded = await db.client.select({ id: runs.id }).from(runs).where(inArray(runs.status, INTERRUPTED));
   if (stranded.length === 0) return 0;
   const strandedIds = stranded.map((row) => row.id);
-  const strandedError = "interrupted by server restart";
-  await db.client
+  // `returning()` is portable across both adapters (see files.ts's single-use
+  // upload claim), so the ids the UPDATE actually touched come back from the
+  // UPDATE itself — no third statement, and no inferring the count from a
+  // re-SELECT. A candidate missing from this list is one the status guard
+  // skipped because it raced to a terminal state after the SELECT above.
+  const recovered = await db.client
     .update(runs)
     .set({
       status: "failed",
-      error: strandedError,
+      error: "interrupted by server restart",
       errorCode: "internal",
       finishedAt: nowIso(),
     })
-    .where(and(inArray(runs.id, strandedIds), inArray(runs.status, INTERRUPTED)));
-  // The UPDATE's own result shape isn't portable across the sqlite/pg
-  // adapters (drizzle surfaces a rowCount/changes differently per driver), so
-  // the actually-updated count is recovered by re-selecting: a candidate id
-  // now carrying this call's own error text is one the UPDATE actually
-  // touched, not one the status guard skipped because it raced to a terminal
-  // state between the SELECT and the UPDATE above.
-  const recovered = await db.client
-    .select({ id: runs.id })
-    .from(runs)
-    .where(and(inArray(runs.id, strandedIds), eq(runs.error, strandedError)));
+    .where(and(inArray(runs.id, strandedIds), inArray(runs.status, INTERRUPTED)))
+    .returning({ id: runs.id });
   return recovered.length;
 }
 
@@ -672,13 +686,8 @@ export async function pruneRuns(db: Db, retentionDays: number, nowMs?: number): 
   const { runs } = db.tables;
   const cutoff = new Date((nowMs ?? Date.now()) - retentionDays * 86_400_000).toISOString();
   const where = and(inArray(runs.status, TERMINAL), isNotNull(runs.finishedAt), lt(runs.finishedAt, cutoff));
-  const doomed = await db.client.select({ id: runs.id }).from(runs).where(where);
-  if (doomed.length === 0) return 0;
-  await db.client.delete(runs).where(
-    inArray(
-      runs.id,
-      doomed.map((row) => row.id),
-    ),
-  );
-  return doomed.length;
+  // One statement: the rows are chosen and deleted under the same predicate,
+  // and `returning()` (portable across both adapters) counts them.
+  const deleted = await db.client.delete(runs).where(where).returning({ id: runs.id });
+  return deleted.length;
 }

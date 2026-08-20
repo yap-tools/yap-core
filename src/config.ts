@@ -90,8 +90,10 @@ export interface YapConfig {
   /** "*" allows all MIME types. */
   mimeAllowlist: string[] | "*";
   hookTimeoutMs: number;
-  /** Hostnames allowed to resolve to private ranges (SSRF override). */
-  hookAllowHosts: string[];
+  /** Hostnames allowed to resolve to private ranges (SSRF override). Applies
+   *  to all driver egress, not just the http driver's — the env var keeps its
+   *  pre-services name (`YAP_HOOK_ALLOW_HOSTS`) for operator compatibility. */
+  egressAllowHosts: string[];
   /** Ceiling the adapters clamp a caller's `wait_ms` to when starting a run.
    *  Defaults to {@link DEFAULT_RUN_WAIT_CAP_MS}, the figure the `run_service`
    *  tool description quotes to agents. */
@@ -283,7 +285,7 @@ export function loadConfig(env: Env = process.env): YapConfig {
     // hookTimeoutMs + 500; at exactly MAX_TIMER_MS that addition itself
     // overflows Node's 32-bit timer and clamps to 1ms.
     hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000, MAX_TIMER_MS - 500),
-    hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
+    egressAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
     runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS, MAX_TIMER_MS),
     runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS", MAX_TIMER_MS),
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),

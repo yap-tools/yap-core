@@ -25,5 +25,6 @@ CREATE TABLE `runs` (
 --> statement-breakpoint
 CREATE INDEX `runs_bundle_created_idx` ON `runs` (`bundle_id`,`created_at`);--> statement-breakpoint
 CREATE INDEX `runs_service_created_idx` ON `runs` (`service_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `runs_finished_idx` ON `runs` (`status`,`finished_at`);--> statement-breakpoint
 UPDATE `grants` SET `capability` = 'run_services' WHERE `capability` = 'fire_hooks';--> statement-breakpoint
 UPDATE `grants` SET `capability` = 'edit_services' WHERE `capability` = 'edit_hooks';

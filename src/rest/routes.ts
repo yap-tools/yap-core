@@ -900,10 +900,6 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  /** Adapters clamp what a caller asks to wait; internal callers do not. */
-  const clampWait = (waitMs?: number): number | undefined =>
-    waitMs === undefined ? undefined : Math.min(waitMs, config.runWaitCapMs);
-
   app.post(
     "/v1/services/:id/run",
     handle(async (c, auth) => {
@@ -923,7 +919,8 @@ export function registerRestRoutes(server: YapServer): void {
           service: serviceId,
           action: body.action,
           params: body.params,
-          waitMs: clampWait(body.wait_ms),
+          // An absent wait stays absent — that is "don't wait", not "wait 0".
+          waitMs: body.wait_ms === undefined ? undefined : runsCore.clampRunWait(config, body.wait_ms),
         }),
       );
     }),

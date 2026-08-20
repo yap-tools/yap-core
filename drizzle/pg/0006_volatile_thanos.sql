@@ -26,5 +26,6 @@ ALTER TABLE "runs" ADD CONSTRAINT "runs_bundle_id_bundles_id_fk" FOREIGN KEY ("b
 ALTER TABLE "runs" ADD CONSTRAINT "runs_service_id_services_id_fk" FOREIGN KEY ("service_id") REFERENCES "public"."services"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "runs_bundle_created_idx" ON "runs" USING btree ("bundle_id","created_at");--> statement-breakpoint
 CREATE INDEX "runs_service_created_idx" ON "runs" USING btree ("service_id","created_at");--> statement-breakpoint
+CREATE INDEX "runs_finished_idx" ON "runs" USING btree ("status","finished_at");--> statement-breakpoint
 UPDATE "grants" SET "capability" = 'run_services' WHERE "capability" = 'fire_hooks';--> statement-breakpoint
 UPDATE "grants" SET "capability" = 'edit_services' WHERE "capability" = 'edit_hooks';

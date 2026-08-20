@@ -1246,6 +1246,14 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "runs_finished_idx": {
+          "name": "runs_finished_idx",
+          "columns": [
+            "status",
+            "finished_at"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {

@@ -66,7 +66,7 @@ describe("loadConfig", () => {
     });
     expect(config.maxFileSizeBytes).toBe(1024);
     expect(config.mimeAllowlist).toEqual(["image/png", "image/jpeg"]);
-    expect(config.hookAllowHosts).toEqual(["internal.example", "10.0.0.5"]);
+    expect(config.egressAllowHosts).toEqual(["internal.example", "10.0.0.5"]);
     expect(config.downloadTtlSeconds).toBe(60);
   });
 

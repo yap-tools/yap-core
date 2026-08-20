@@ -131,7 +131,7 @@ function describeValue(value: unknown): string {
  * builder is responsible for calling `dispose()` when the invocation ends.
  */
 export function createEgress(config: YapConfig, resolver?: Resolver, fetchImpl?: typeof fetch): Egress {
-  const allowHosts = config.hookAllowHosts;
+  const allowHosts = config.egressAllowHosts;
   // One resolved value for all three members: a default that lives in only one
   // place cannot drift between the pre-flight check and the connect check.
   const resolve = resolver ?? defaultResolver;

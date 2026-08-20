@@ -150,12 +150,11 @@ function grantTargetFor(env: CallEnv): Promise<grantsCore.GrantTarget> {
 }
 
 /**
- * Clamps an agent's requested run wait into [0, config.runWaitCapMs]. The
- * clamp lives here, at the adapter, because the core deliberately does not do
- * it: internal callers (the `fire_hook` alias) must be able to wait past the
- * cap to keep their synchronous contract, while an agent's ask is untrusted
- * input that would otherwise pin an MCP request open for as long as it liked.
- * An undefined wait stays undefined — that is "don't wait", not "wait 0".
+ * An agent's `wait_ms`, coerced and then clamped by `clampRunWait` (which
+ * documents why adapters clamp and the core does not). The coercion stays here
+ * because the error it raises is this surface's: an agent that sent nonsense
+ * needs to be told so per call, not have it silently read as 0. An undefined
+ * wait stays undefined — that is "don't wait", not "wait 0".
  */
 function clampWaitMs(config: YapConfig, value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
@@ -163,7 +162,7 @@ function clampWaitMs(config: YapConfig, value: unknown): number | undefined {
   if (!Number.isFinite(ms)) {
     throw new YapError("invalid_request", `wait_ms must be a number of milliseconds (got ${JSON.stringify(value)})`);
   }
-  return Math.min(Math.max(0, Math.floor(ms)), config.runWaitCapMs);
+  return runsCore.clampRunWait(config, ms);
 }
 
 /** The single canonical `capabilities` param accepts a scalar or an array — normalized here; core rejects an empty list. */

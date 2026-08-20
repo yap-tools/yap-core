@@ -402,7 +402,11 @@ be the instance's externally reachable origin (https except on loopback).
   `GET /v1/runs/:id`) until `status` is `succeeded` or `failed`. Every run is
   a durable, inspectable row — its params (the caller's half only; pins never
   land on a run record), result or error, and any items it wrote — pruned
-  after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal.
+  after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
+  carries its own time budget, and only the built-in `http` driver's is
+  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); an external driver declares its
+  budget itself, which an operator can bound downward — never upward — with
+  `YAP_RUN_TIMEOUT_CAP_MS`.
 
   **Trust model:** a driver is trusted code running in the server process.
   Installing one is the same class of decision as installing a plugin — it

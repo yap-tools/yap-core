@@ -218,6 +218,9 @@ export const runs = pgTable(
   (t) => [
     index("runs_bundle_created_idx").on(t.bundleId, t.createdAt),
     index("runs_service_created_idx").on(t.serviceId, t.createdAt),
+    // The retention sweep's predicate: terminal runs with a finished_at older
+    // than the window. Without it the sweep is a full scan of every run ever.
+    index("runs_finished_idx").on(t.status, t.finishedAt),
   ],
 );
 
