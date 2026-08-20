@@ -67,6 +67,15 @@ describeEachAdapter("services", (adapter) => {
           }, 2000);
           return;
         }
+        if (req.url?.includes("lag")) {
+          // Long enough that a run against it cannot be terminal by the time
+          // an unwaited dispatch returns, short enough to finish inside the
+          // action's 700ms budget.
+          setTimeout(() => {
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ received: true }));
+          }, 250);
+          return;
+        }
         if (req.url?.includes("fail")) {
           res.writeHead(502, { "content-type": "text/plain" }).end("upstream exploded");
           return;
@@ -662,9 +671,15 @@ describeEachAdapter("services", (adapter) => {
     });
 
     it("wait_ms: 0 hands back a pending run that get_run polls to terminal", async () => {
+      // A destination that answers slowly on purpose: against an instant one
+      // the run can legitimately be finished before the dispatch returns, and
+      // "still pending" is exactly what this test is about.
+      const lagging = await authorService(bundleId, {
+        name: "lagging",
+        config: { url: `http://127.0.0.1:${targetPort}/lag`, method: "GET" },
+      });
       const pending = await mcpCall(aliceMcp, bundleId, "run_service", {
-        id: "notify",
-        params: { message: "async", channel: "ops" },
+        id: lagging,
         wait_ms: 0,
       });
       expect(pending.ok).toBe(true);
