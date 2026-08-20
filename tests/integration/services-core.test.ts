@@ -407,6 +407,51 @@ describeEachAdapter("services core", (adapter) => {
         },
       ]);
     });
+
+    it("scopes a pin to the actions that declare its parameter", async () => {
+      // `note` is declared by `inspect` alone; `other` adopts the service's
+      // specs, which do not include it. A pin is per-parameter, so it reaches
+      // exactly the action that has that parameter.
+      const svc = await createService(env, aliceId, bundleId, {
+        name: "action-scoped-pin",
+        driver: "plain",
+        params: [{ name: "shared" }],
+        pins: { note: "fixed" },
+        config: {},
+      });
+      expect(svc.actions.find((a) => a.name === "inspect")!.params).toEqual([]);
+      // The other action is untouched: its own parameter stays callable and the
+      // pin adds nothing to it.
+      expect(svc.actions.find((a) => a.name === "other")!.params).toEqual([{ name: "shared" }]);
+
+      // The declaring action gets the pinned value injected…
+      const injected = await runService(env, aliceId, bundleId, {
+        service: svc.id,
+        action: "inspect",
+        waitMs: 5_000,
+      });
+      expect(injected.status).toBe("succeeded");
+      expect((injected.result as { params: Record<string, string> }).params).toEqual({ note: "fixed" });
+      // …and refuses to let the caller name it.
+      await expect(
+        runService(env, aliceId, bundleId, { service: svc.id, action: "inspect", params: { note: "mine" } }),
+      ).rejects.toThrow(/parameter "note" is fixed by this service configuration/);
+
+      // The action that never declared `note` neither receives it…
+      const untouched = await runService(env, aliceId, bundleId, {
+        service: svc.id,
+        action: "other",
+        params: { shared: "value" },
+        waitMs: 5_000,
+      });
+      expect(untouched.status).toBe("succeeded");
+      expect((untouched.result as { params: Record<string, string> }).params).toEqual({ shared: "value" });
+      // …nor treats it as a parameter of its own: it is simply unknown here,
+      // not "fixed by configuration".
+      await expect(
+        runService(env, aliceId, bundleId, { service: svc.id, action: "other", params: { note: "mine" } }),
+      ).rejects.toThrow(/unknown parameter "note"/);
+    });
   });
 
   describe("capability gates", () => {

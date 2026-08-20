@@ -128,13 +128,14 @@ function validateParamSpecs(params: ServiceParamSpec[]): void {
 /**
  * Every parameter name this service could ever pass to its driver: the specs
  * on the record (which an action declaring `params: null` adopts) plus the
- * specs the driver's actions declare themselves. A pin outside that set names
+ * specs the driver's actions declare themselves — the union of what
+ * `declaredSpecs` would return for each action. A pin outside that set names
  * nothing and would be injected into a call no action understands.
  */
 function declaredNames(def: DriverDefinition, params: ServiceParamSpec[]): string[] {
   const names = new Set(params.map((p) => p.name));
-  for (const action of Object.values(def.actions)) {
-    for (const spec of action.params ?? []) names.add(spec.name);
+  for (const action of Object.keys(def.actions)) {
+    for (const spec of declaredSpecs(def, action, params)) names.add(spec.name);
   }
   return [...names];
 }
@@ -201,11 +202,56 @@ async function validateDriverConfig(env: ServiceEnv, def: DriverDefinition, conf
 // ---- Listing ----------------------------------------------------------------
 
 /**
- * The effective, agent-visible action view. An action that declares its own
- * specs owns them; one declaring `null` (the http driver, whose parameters are
- * whatever its template uses) takes the service record's. Pinned names are
- * removed from both — they are configuration, and naming one in a call is an
- * error the runner raises.
+ * The specs one action declares: its own if it has any, else the service
+ * record's — which is what an action declaring `params: null` (the http
+ * driver, whose parameters are whatever its template uses) means by null.
+ */
+function declaredSpecs(def: DriverDefinition, actionName: string, serviceParams: ServiceParamSpec[]): ServiceParamSpec[] {
+  return (def.actions[actionName]?.params ?? serviceParams) as ServiceParamSpec[];
+}
+
+/**
+ * The one computation of "what this action's parameters are", used by the
+ * listing, by the runner's validation, and by the injection of pinned values —
+ * three places that each used to spell it slightly differently.
+ *
+ * The semantics, per action:
+ *
+ * - **declared** = the action's own specs if it has any, else the service
+ *   record's (see `declaredSpecs`).
+ * - **callable** = declared minus every pinned name. A pin is configuration:
+ *   it is stripped from the listing so an agent cannot even learn the name is
+ *   fixed, and supplying it in a call is an error rather than a silent
+ *   override.
+ * - **pinned** = only those pins the action actually declares. A pin naming a
+ *   parameter some *other* action declares is neither injected into this call
+ *   nor blocking for it: injecting it would hand the driver an argument this
+ *   action never asked for (and, for a template-substituting driver, one it
+ *   cannot place), so for this action the name is simply not a parameter at
+ *   all — supplying it reads as the ordinary "unknown parameter".
+ *
+ * Every driver shipped today has a single action, so on those the last rule is
+ * a distinction without a difference; it is what makes a multi-action driver's
+ * per-action parameter contract (see drivers/http.ts's header) honest.
+ */
+export function resolveActionParams(
+  def: DriverDefinition,
+  actionName: string,
+  serviceParams: ServiceParamSpec[],
+  pins: ServicePins,
+): { callable: ServiceParamSpec[]; pinned: ServicePins } {
+  const declared = declaredSpecs(def, actionName, serviceParams);
+  const callable = declared.filter((spec) => !Object.hasOwn(pins, spec.name));
+  const pinned: ServicePins = {};
+  for (const spec of declared) {
+    if (Object.hasOwn(pins, spec.name)) pinned[spec.name] = pins[spec.name]!;
+  }
+  return { callable, pinned };
+}
+
+/**
+ * The effective, agent-visible action view: every action with its callable
+ * parameters.
  *
  * A service whose driver is not installed lists with no actions rather than
  * failing the whole listing: the row is real, an operator needs to see it, and
@@ -214,19 +260,19 @@ async function validateDriverConfig(env: ServiceEnv, def: DriverDefinition, conf
 function effectiveActions(
   def: DriverDefinition | undefined,
   params: ServiceParamSpec[],
-  pins: Record<string, unknown>,
+  pins: ServicePins,
 ): ServiceActionInfo[] {
   if (!def) return [];
   return Object.entries(def.actions).map(([name, action]) => ({
     name,
     description: action.description,
-    params: ((action.params ?? params) as ServiceParamSpec[]).filter((spec) => !Object.hasOwn(pins, spec.name)),
+    params: resolveActionParams(def, name, params, pins).callable,
   }));
 }
 
 function toInfo(registry: DriverRegistry, row: ServiceRow): ServiceInfo {
   const params = JSON.parse(row.params) as ServiceParamSpec[];
-  const pins = JSON.parse(row.pins) as Record<string, unknown>;
+  const pins = JSON.parse(row.pins) as ServicePins;
   const def = registry.has(row.driver) ? registry.get(row.driver) : undefined;
   return {
     id: row.id,
@@ -342,7 +388,7 @@ export async function createService(
     createdAt: now,
     updatedAt: now,
   });
-  return { id, name, description, driver, actions: effectiveActions(def, params, pins) };
+  return { id, name, description, driver, actions: effectiveActions(def, params, pins as ServicePins) };
 }
 
 export async function updateService(

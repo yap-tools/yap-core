@@ -51,10 +51,16 @@ import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { createEgress, type Egress } from "./drivers/egress.js";
 import type { DriverRegistry } from "./drivers/registry.js";
-import type { DriverDefinition, DriverParamSpec } from "./drivers/types.js";
+import type { DriverDefinition } from "./drivers/types.js";
 import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
-import { createBundleWriter, type ScopedBundleWriter } from "./services.js";
+import {
+  createBundleWriter,
+  resolveActionParams,
+  type ScopedBundleWriter,
+  type ServiceParamSpec,
+  type ServicePins,
+} from "./services.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -219,22 +225,14 @@ function resolveAction(def: DriverDefinition, serviceName: string, requested?: s
 }
 
 /**
- * The effective parameter specs for one call: an action that declares its own
- * specs owns them; an action that declares `null` (the http driver, whose
- * parameters are whatever the service's template uses) takes the service
- * record's.
- */
-function effectiveSpecs(def: DriverDefinition, service: ServiceRow, action: string): DriverParamSpec[] {
-  const declared = def.actions[action]!.params;
-  if (declared) return declared;
-  return JSON.parse(service.params) as DriverParamSpec[];
-}
-
-/**
  * Parameter allowlisting — the safety hinge, inherited from fireHook. Supplied
  * values must match the *callable* specs exactly: pinned names are not among
  * them, so naming one is an explicit error rather than a silent override, and
  * the pinned values are merged only once the caller's half has been validated.
+ *
+ * Which specs are the action's, and which pins are its own, is
+ * `resolveActionParams` — the same computation the agent-visible listing runs,
+ * so what an agent is shown and what the runner accepts cannot diverge.
  *
  * The two halves are kept apart on the way out. `params` is the caller's own
  * set and is the only one that reaches the run row: a pin is configuration —
@@ -249,13 +247,16 @@ function buildParams(
   action: string,
   supplied: Record<string, unknown>,
 ): { params: Record<string, string>; values: Record<string, string> } {
-  const pins = JSON.parse(service.pins) as Record<string, unknown>;
-  const specs = effectiveSpecs(def, service, action);
-  const callable = specs.filter((spec) => !Object.hasOwn(pins, spec.name));
+  const { callable, pinned } = resolveActionParams(
+    def,
+    action,
+    JSON.parse(service.params) as ServiceParamSpec[],
+    JSON.parse(service.pins) as ServicePins,
+  );
 
   const values: Record<string, string> = {};
   for (const key of Object.keys(supplied)) {
-    if (Object.hasOwn(pins, key)) throw invalid(`parameter "${key}" is fixed by this service configuration`);
+    if (Object.hasOwn(pinned, key)) throw invalid(`parameter "${key}" is fixed by this service configuration`);
     if (!callable.some((spec) => spec.name === key)) {
       throw invalid(`unknown parameter "${key}" (declared: ${callable.map((s) => s.name).join(", ") || "none"})`);
     }
@@ -270,7 +271,7 @@ function buildParams(
     }
   }
   const merged = { ...values };
-  for (const [name, pinned] of Object.entries(pins)) merged[name] = String(pinned);
+  for (const [name, value] of Object.entries(pinned)) merged[name] = String(value);
   return { params: values, values: merged };
 }
 
