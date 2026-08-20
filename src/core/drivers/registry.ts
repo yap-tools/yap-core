@@ -12,6 +12,7 @@
  * than zod: the errors an operator reads have to point at
  * `actions.send.timeoutMs`, not at a schema path.
  */
+import { MAX_TIMER_MS } from "../../config.js";
 import { invalid, notFound } from "../errors.js";
 import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverParamSpec } from "./types.js";
 
@@ -84,6 +85,15 @@ function validateAction(name: string, raw: unknown): void {
   if (typeof action.timeoutMs !== "number" || !Number.isInteger(action.timeoutMs) || action.timeoutMs <= 0) {
     throw invalid(`driver ${field}.timeoutMs must be a positive integer, got ${describe(action.timeoutMs)}`);
   }
+  // The budget becomes a setTimeout delay in the runner, and Node stores that
+  // as a 32-bit signed int: anything above the ceiling silently wraps to ~1ms,
+  // turning "a very generous budget" into "aborts immediately". Refused here,
+  // where the message can still name the field, rather than at fire time.
+  if (action.timeoutMs > MAX_TIMER_MS) {
+    throw invalid(
+      `driver ${field}.timeoutMs must be at most ${MAX_TIMER_MS} (the longest delay a timer can hold), got ${action.timeoutMs}`,
+    );
+  }
 }
 
 /**
@@ -115,6 +125,13 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
       if (value !== undefined && typeof value !== "boolean") {
         throw invalid(`driver "${def.name}" writes.${surface} must be a boolean when present`);
       }
+    }
+    // The field is part of the declared shape but nothing is wired behind it:
+    // a driver declaring it would still get a writer with no file surface on
+    // it, and would fail at run time believing it had been granted one. Say so
+    // at install time instead.
+    if (def.writes.files === true) {
+      throw invalid(`driver "${def.name}" writes.files is reserved and not yet supported`);
     }
   }
   if (def.configDoc !== undefined && typeof def.configDoc !== "string") {

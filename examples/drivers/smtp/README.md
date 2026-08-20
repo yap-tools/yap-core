@@ -35,7 +35,8 @@ run. No listing, no agent-visible surface, and no run record ever shows it.
 ## The action
 
 `send` takes three parameters — `to`, `subject`, and `body` — and sends one UTF-8, plain-text message to one
-recipient. It returns `{"accepted": ["<recipient>"]}`.
+recipient. It returns `{"accepted": true}` and nothing more: a run's result is agent-visible, and `to` may be
+a pinned value the agent is not meant to learn, so the recipient is not echoed back.
 
 ## The worked example: a pinned recipient
 
@@ -64,7 +65,8 @@ The agent now sees an action with two parameters:
 `to` is gone from the listing entirely — a pin is configuration, so an agent cannot learn that it is fixed, let
 alone to what. Supplying it anyway is a hard error (`parameter "to" is fixed by this service configuration`),
 and the pinned value is merged in by the runner *after* the caller's parameters have been validated, so it can
-never be overridden. It is also kept off the run record, which any holder of `run_services` can read.
+never be overridden. It is also kept off the run record, which any holder of `run_services` can read — and off
+the run's *result*, which is why `send` answers `{"accepted": true}` rather than naming the recipient.
 
 ## Trust model
 

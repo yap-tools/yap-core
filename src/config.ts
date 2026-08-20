@@ -111,6 +111,16 @@ export interface YapConfig {
 
 export class ConfigError extends Error {}
 
+/**
+ * The longest delay a Node timer can hold: `setTimeout` stores it as a 32-bit
+ * signed integer, and anything larger silently wraps to ~1ms — a "generous"
+ * budget that fires at once. Every setting below that becomes a timer delay is
+ * refused above this rather than clamped, because a wait an operator asked for
+ * and did not get is a surprise either way, and the message can only explain
+ * the ceiling at the point the value is read.
+ */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 type Env = Record<string, string | undefined>;
 
 /**
@@ -119,21 +129,24 @@ type Env = Record<string, string | undefined>;
  * limits) all want whole numbers — but a value that truncates to zero is not a
  * positive integer at all, so it is refused.
  */
-function intEnv(env: Env, name: string, fallback: number): number {
+function intEnv(env: Env, name: string, fallback: number, max?: number): number {
   const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
   const n = Math.trunc(Number(raw));
   if (!Number.isFinite(n) || n <= 0) {
     throw new ConfigError(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
   }
+  if (max !== undefined && n > max) {
+    throw new ConfigError(`${name} must be at most ${max}, got ${JSON.stringify(raw)}`);
+  }
   return n;
 }
 
 /** Same rules as intEnv, but "unset" is a meaningful value (no ceiling). */
-function optionalIntEnv(env: Env, name: string): number | undefined {
+function optionalIntEnv(env: Env, name: string, max?: number): number | undefined {
   const raw = env[name];
   if (raw === undefined || raw === "") return undefined;
-  return intEnv(env, name, 0);
+  return intEnv(env, name, 0, max);
 }
 
 function listEnv(env: Env, name: string): string[] {
@@ -264,10 +277,12 @@ export function loadConfig(env: Env = process.env): YapConfig {
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
-    hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000),
+    // The three settings that become timer delays are bounded by MAX_TIMER_MS:
+    // above it a value wraps and fires immediately instead of waiting.
+    hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000, MAX_TIMER_MS),
     hookAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
-    runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS),
-    runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS"),
+    runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS, MAX_TIMER_MS),
+    runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS", MAX_TIMER_MS),
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-import { ConfigError, loadConfig } from "../../src/config.js";
+import { ConfigError, MAX_TIMER_MS, loadConfig } from "../../src/config.js";
 
 const base = {
   YAP_SYSADMIN_KEY: "sysadmin-key-0123456789",
@@ -107,6 +107,18 @@ describe("run config", () => {
     expect(() => loadConfig({ ...base, YAP_RUN_WAIT_CAP_MS: "nope" })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, YAP_RUN_TIMEOUT_CAP_MS: "0" })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, YAP_RUN_RETENTION_DAYS: "-3" })).toThrow(ConfigError);
+  });
+
+  it("refuses a timer setting above the longest delay a timer can hold", () => {
+    // Above MAX_TIMER_MS setTimeout wraps to ~1ms, so a huge budget would fire
+    // at once — the opposite of what the operator asked for. The exact ceiling
+    // is still accepted; one millisecond past it is not.
+    for (const name of ["YAP_HOOK_TIMEOUT_MS", "YAP_RUN_WAIT_CAP_MS", "YAP_RUN_TIMEOUT_CAP_MS"]) {
+      expect(loadConfig({ ...base, [name]: String(MAX_TIMER_MS) }), name).toBeTruthy();
+      expect(() => loadConfig({ ...base, [name]: String(MAX_TIMER_MS + 1) }), name).toThrow(
+        /must be at most 2147483647/,
+      );
+    }
   });
 });
 

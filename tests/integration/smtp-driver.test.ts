@@ -104,7 +104,11 @@ describe("smtp example driver", () => {
     expect(res.status).toBe(200);
     expect(res.body.error).toBe(null);
     expect(res.body.status).toBe("succeeded");
-    expect(res.body.result).toEqual({ accepted: [PINNED_TO] });
+    // The result says only that the mail was taken: echoing the recipient
+    // would hand the pinned address back through run.result, which any
+    // run_services holder can read.
+    expect(res.body.result).toEqual({ accepted: true });
+    expect(JSON.stringify(res.body)).not.toContain(PINNED_TO);
     // The pinned value never lands on the run row either.
     expect(res.body.params).toEqual({ subject: SUBJECT, body: BODY });
 

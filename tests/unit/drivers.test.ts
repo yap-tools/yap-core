@@ -3,7 +3,7 @@ import http from "node:http";
 import net from "node:net";
 import { describe, expect, it, vi } from "vitest";
 
-import { loadConfig, type YapConfig } from "../../src/config.js";
+import { MAX_TIMER_MS, loadConfig, type YapConfig } from "../../src/config.js";
 import { DriverRegistry, validateDriverDefinition } from "../../src/core/drivers/registry.js";
 import { createEgress } from "../../src/core/drivers/egress.js";
 import { DRIVER_API, type DriverDefinition } from "../../src/core/drivers/types.js";
@@ -136,6 +136,18 @@ describe("validateDriverDefinition", () => {
     }
   });
 
+  it("rejects a timeoutMs above the longest delay a timer can hold", () => {
+    // Node stores a setTimeout delay as a 32-bit signed int: one millisecond
+    // past the ceiling wraps to ~1ms, so a "very generous" budget would abort
+    // the run at once. The ceiling itself is still a legal budget.
+    const withBudget = (timeoutMs: number) =>
+      definition({ actions: { ping: { description: "Ping.", params: null, timeoutMs } } });
+    expect(validateDriverDefinition(withBudget(MAX_TIMER_MS))).toBeTruthy();
+    expect(() => validateDriverDefinition(withBudget(MAX_TIMER_MS + 1))).toThrow(
+      /actions\.ping\.timeoutMs must be at most 2147483647/,
+    );
+  });
+
   it("accepts null params (specs come from the service record)", () => {
     expect(
       validateDriverDefinition(
@@ -161,6 +173,14 @@ describe("validateDriverDefinition", () => {
       /writes\.items/,
     );
     expect(validateDriverDefinition(definition({ writes: { items: true } }))).toBeTruthy();
+  });
+
+  it("rejects writes.files, which is declared but not wired to anything", () => {
+    expect(() => validateDriverDefinition(definition({ writes: { files: true } }))).toThrow(
+      /writes\.files is reserved and not yet supported/,
+    );
+    // Declaring it as *not* wanted is simply nothing to grant.
+    expect(validateDriverDefinition(definition({ writes: { items: true, files: false } }))).toBeTruthy();
   });
 });
 

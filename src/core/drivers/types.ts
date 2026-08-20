@@ -54,6 +54,8 @@ export interface DriverActionSpec {
 /** Write surfaces a driver may reach through `RunContext.writer`. */
 export interface DriverWrites {
   items?: boolean;
+  /** Reserved: no file surface exists on the writer yet, so declaring this is
+   *  refused at load time rather than granting something that is not there. */
   files?: boolean;
 }
 
@@ -97,5 +99,11 @@ export interface DriverDefinition {
   /** Optional authoring-time network validation (e.g. http SSRF pre-check). */
   validateConfigOnline?(config: unknown, egress: Egress): Promise<void>;
   actions: Record<string, DriverActionSpec>;
+  /**
+   * Performs one action. Whatever it resolves to lands on the run row as
+   * `result`, which is agent-visible: never echo the service config or a
+   * pinned parameter value back through it — a pin exists precisely so the
+   * caller cannot learn it. Report what happened, not what it was aimed at.
+   */
   run(ctx: RunContext): Promise<unknown>;
 }

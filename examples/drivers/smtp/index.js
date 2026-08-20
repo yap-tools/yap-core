@@ -116,7 +116,11 @@ export default {
         // Best effort: the mail is accepted once the DATA terminator got its
         // 250, so a server that hangs up during QUIT has still taken it.
       }
-      return { accepted: [to] };
+      // Deliberately not `{accepted: [to]}`: a run's result is agent-visible,
+      // and `to` may be a pin — the fixed recipient an operator chose so the
+      // agent could send mail without choosing who receives it. Echoing it
+      // here would hand back exactly what the pin exists to withhold.
+      return { accepted: true };
     } finally {
       // The socket is the driver's — `egress.dispose()` does not touch it.
       // `end()` immediately followed by `destroy()` is not a belt-and-braces
