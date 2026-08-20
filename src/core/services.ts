@@ -410,9 +410,16 @@ export async function deleteService(env: ServiceEnv, userId: string, serviceId: 
  * ignores its abort signal is still running after its row is written — the
  * same reason the egress handle is disposed — and writes landing after that
  * point would be invisible in the run's audit trail.
+ *
+ * `close()` is async because refusing *future* calls is only half the job: a
+ * write already in flight when the run ends will still land its items, and its
+ * audit entry has to reach the run row with them. So closing rejects new calls
+ * at once and then waits for every in-flight write to settle — announcement
+ * included — before it resolves. The runner awaits it before serializing the
+ * outcome, which is what makes "an item with no audit trail" unreachable.
  */
 export interface ScopedBundleWriter extends BundleWriter {
-  close(): void;
+  close(): Promise<void>;
 }
 
 /**
@@ -425,7 +432,9 @@ export interface ScopedBundleWriter extends BundleWriter {
  *   bundle's item-types — an unknown type name is simply not found.
  * - Audit: every successful write is announced through `audit`, which the runs
  *   layer persists on the run row. A write with no trail is not a shape this
- *   handle can produce.
+ *   handle can produce — including at the end of the run, where `close()`
+ *   drains whatever is still in flight so a write that lands late is announced
+ *   before the row is written rather than after it.
  *
  * Validation is not relaxed for drivers: `createItemsUnchecked` runs every
  * check the gated path runs. Only the `edit_items` capability check is absent,
@@ -438,30 +447,48 @@ export function createBundleWriter(
   audit: (entry: unknown) => void,
 ): ScopedBundleWriter {
   let closed = false;
+  // Writes started but not yet announced. A driver need not await its own
+  // `createItems` — `void writer.createItems(...)` is legal JS — so the run can
+  // reach its end with items on the way to the database. Tracking them is what
+  // lets `close()` wait instead of walking away from their audit entries.
+  const inFlight = new Set<Promise<unknown>>();
   return {
     async createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]> {
       if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
-      const created = await createItemsUnchecked(db, bundleId, { itemType: itemTypeName, items: values }).catch(
-        (err: unknown) => {
-          // A uniqueness rejection is written by the *bundle's* data: the item
-          // layer's message quotes the colliding value and the id of the item
-          // that already holds it. A driver's failure lands on `run.error`,
-          // which is agent-visible, so that message is replaced by a flat one
-          // naming the rule and nothing else.
-          if (err instanceof YapError && (err.code === "conflict" || /must be unique/.test(err.message))) {
-            throw new YapError("conflict", "service write-back hit a uniqueness conflict");
-          }
-          throw err;
-        },
-      );
-      const ids = created.map((item) => item.id);
-      // The resolved type name, not the caller's reference: a driver may name
-      // an item-type by id, and the trail should read as a name.
-      audit({ type: "items", itemType: created[0]?.itemType ?? itemTypeName, ids });
-      return ids;
+      const landing = (async (): Promise<string[]> => {
+        const created = await createItemsUnchecked(db, bundleId, { itemType: itemTypeName, items: values }).catch(
+          (err: unknown) => {
+            // A uniqueness rejection is written by the *bundle's* data: the item
+            // layer's message quotes the colliding value and the id of the item
+            // that already holds it. A driver's failure lands on `run.error`,
+            // which is agent-visible, so that message is replaced by a flat one
+            // naming the rule and nothing else.
+            if (err instanceof YapError && (err.code === "conflict" || /must be unique/.test(err.message))) {
+              throw new YapError("conflict", "service write-back hit a uniqueness conflict");
+            }
+            throw err;
+          },
+        );
+        const ids = created.map((item) => item.id);
+        // The resolved type name, not the caller's reference: a driver may name
+        // an item-type by id, and the trail should read as a name.
+        audit({ type: "items", itemType: created[0]?.itemType ?? itemTypeName, ids });
+        return ids;
+      })();
+      // Held from before the first await to after the announcement, so a
+      // `close()` racing this write can never observe the gap between them.
+      inFlight.add(landing);
+      try {
+        return await landing;
+      } finally {
+        inFlight.delete(landing);
+      }
     },
-    close(): void {
+    async close(): Promise<void> {
+      // Future calls are refused first: nothing new can join the drain, so the
+      // wait below is bounded by the writes that already started.
       closed = true;
+      await Promise.allSettled([...inFlight]);
     },
   };
 }

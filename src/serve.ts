@@ -95,14 +95,17 @@ export async function serve(): Promise<void> {
     throw err;
   }
 
+  // A run in flight when the process died is stranded in a non-terminal state;
+  // nothing will ever finish it, so the restart is what closes it out. Before
+  // the listener opens, not after: once requests are being served, runs this
+  // process started itself are `queued`/`running` too, and a sweep meant for
+  // the *previous* process would retire them.
+  const recovered = await recoverInterruptedRuns(db);
+  if (recovered > 0) logger.info(`marked ${recovered} run(s) failed: interrupted by the previous shutdown`);
+
   const server = buildServer(config, db, blob, logger, registry);
   await server.start();
   logger.info(`yap listening on ${config.baseUrl} (REST under /v1, MCP at /mcp)`);
-
-  // A run in flight when the process died is stranded in a non-terminal state;
-  // nothing will ever finish it, so the restart is what closes it out.
-  const recovered = await recoverInterruptedRuns(db);
-  if (recovered > 0) logger.info(`marked ${recovered} run(s) failed: interrupted by the previous shutdown`);
 
   const sweeper = setInterval(() => {
     sweepOrphans({ db, blob, config }, config.orphanMaxAgeMs).catch((err) =>

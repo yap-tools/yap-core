@@ -99,12 +99,24 @@ const writingDriver: DriverDefinition = {
       params: [],
       timeoutMs: 5_000,
     },
+    detached: {
+      description: "Starts a write without awaiting it and returns at once.",
+      params: [{ name: "itemType", required: true }],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     const writer = ctx.writer!;
     if (ctx.action === "escape") {
       escapedWriter = writer;
       return { stashed: true };
+    }
+    if (ctx.action === "detached") {
+      // Deliberately not awaited: the write is still in flight when the run
+      // ends. The items land regardless, so their audit entry has to reach the
+      // run row too — the write handle drains before the outcome is written.
+      void writer.createItems(ctx.params.itemType!, [{ title: "landed late" }]).catch(() => {});
+      return { detached: true };
     }
     if (ctx.action === "batch") {
       return { ids: await writer.createItems(ctx.params.itemType!, [{ title: "one" }, { title: "two" }]) };
@@ -523,6 +535,25 @@ describeEachAdapter("services core", (adapter) => {
       // …but the stored value that caused it never reaches the agent-visible row.
       expect(clash.error).not.toContain("SECRET-SERIAL-42");
       expect(clash.writes).toEqual([]);
+    });
+
+    it("audits a write the driver never awaited", async () => {
+      await createService(env, aliceId, bundleId, { name: "detacher", driver: "writer", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "detacher",
+        action: "detached",
+        params: { itemType: "Note" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+
+      // The item really landed…
+      const items = (await queryItems(app.db, aliceId, bundleId, { itemType: "Note" })).data;
+      const landed = items.filter((i) => i.values.title === "landed late");
+      expect(landed).toHaveLength(1);
+      // …and it is on the run's trail, not floating in the bundle unexplained.
+      const finished = await getRun(env, aliceId, run.id);
+      expect(finished.writes).toEqual([{ type: "items", itemType: "Note", ids: [landed[0]!.id] }]);
     });
 
     it("hands a driver that declared no writes a null writer", async () => {

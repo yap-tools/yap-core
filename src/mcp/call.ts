@@ -7,6 +7,7 @@
 import type { BlobStore } from "../blob/index.js";
 import { DEFAULT_RUN_WAIT_CAP_MS, type YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
+import type { YapLogger } from "../logger.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import type { BundleDoc } from "../core/bundleDocs.js";
@@ -30,6 +31,8 @@ export interface CallEnv {
   blob: BlobStore;
   /** The installed drivers — what a service run resolves its driver against. */
   registry: DriverRegistry;
+  /** Operator-side sink the runs layer writes a failed run's detail to. */
+  logger?: YapLogger;
   userId: string;
   /** Always the call's space. */
   spaceId: string;

@@ -190,6 +190,11 @@ export function createHttpDriver(config: YapConfig): DriverDefinition {
         // Error/TypeError, never YapError — so treat any YapError as a
         // pre-flight SSRF rejection too.
         if (pinBlocked || err instanceof YapError) {
+          // Both collapses below throw away the only description of what
+          // actually went wrong, on purpose — the message can name the hidden
+          // host. The log ring is where it survives: in memory for the run,
+          // written to the server log if the run fails, never to the row.
+          ctx.log(String(err));
           throw new YapError(
             "forbidden",
             "service destination is blocked by the SSRF guard; ask an operator to review this service's configuration",
@@ -197,6 +202,9 @@ export function createHttpDriver(config: YapConfig): DriverDefinition {
         }
         // The underlying fetch error can embed the hidden host (e.g.
         // "ENOTFOUND internal.corp"); keep it out of the agent-facing message.
+        ctx.log(String(err));
+        // The cause carries the errno a bare TypeError("fetch failed") hides.
+        if (cause !== undefined) ctx.log(`cause: ${String(cause)}`);
         throw new YapError("internal", "service request failed to reach its destination");
       }
     },

@@ -11,7 +11,7 @@ import { createBlobStore, type BlobStore } from "../../src/blob/index.js";
 import { loadConfig, type YapConfig } from "../../src/config.js";
 import { loadExternalDrivers } from "../../src/core/drivers/load.js";
 import { createDb, type Db } from "../../src/db/index.js";
-import { createLogger } from "../../src/logger.js";
+import { createLogger, type YapLogger } from "../../src/logger.js";
 import { getFreeLoopbackPort } from "../../src/rest/edge.js";
 import { buildServer, createDriverRegistry, type YapServer } from "../../src/server.js";
 
@@ -35,11 +35,18 @@ export interface TestApp {
   config: YapConfig;
   db: Db;
   blob: BlobStore;
+  /** The logger the whole server (REST env, MCP env, runs layer) writes to —
+   *  pass one in to capture what a test's operator-side output would say. */
+  logger: YapLogger;
   baseUrl: string;
   stop(): Promise<void>;
 }
 
-export async function bootTestApp(envOverrides: Record<string, string> = {}, db?: Db): Promise<TestApp> {
+export async function bootTestApp(
+  envOverrides: Record<string, string> = {},
+  db?: Db,
+  logger?: YapLogger,
+): Promise<TestApp> {
   const port = await getFreePort();
   const config = loadConfig(
     testEnv({
@@ -52,7 +59,8 @@ export async function bootTestApp(envOverrides: Record<string, string> = {}, db?
   const database = db ?? (await createDb(config.db));
   if (!db) await database.migrate();
   const blob = await createBlobStore(config);
-  const quiet = createLogger({ debug() {}, info() {}, log() {}, warn() {}, error: console.error.bind(console) });
+  const quiet =
+    logger ?? createLogger({ debug() {}, info() {}, log() {}, warn() {}, error: console.error.bind(console) });
   // Mirrors serve.ts: the operator's drivers are loaded into the registry
   // before the server is built, so tests exercise the real loader.
   const registry = createDriverRegistry(config);
@@ -64,6 +72,7 @@ export async function bootTestApp(envOverrides: Record<string, string> = {}, db?
     config,
     db: database,
     blob,
+    logger: quiet,
     baseUrl: config.baseUrl,
     stop: async () => {
       await server.stop();

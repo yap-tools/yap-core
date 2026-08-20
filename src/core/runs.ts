@@ -42,6 +42,7 @@ import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 import type { YapConfig } from "../config.js";
 import { decryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
+import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { createEgress, type Egress } from "./drivers/egress.js";
 import type { DriverRegistry } from "./drivers/registry.js";
@@ -90,6 +91,10 @@ export interface RunEnv {
   registry: DriverRegistry;
   resolver?: Resolver;
   fetchImpl?: typeof fetch;
+  /** Operator-side sink for a failed run's detail — see `execute`. Optional so
+   *  a bare in-process caller (tests, scripts) need not build one; a run that
+   *  fails without it is simply undiagnosable, never broken. */
+  logger?: YapLogger;
 }
 
 interface ServiceRow {
@@ -263,6 +268,8 @@ function buildParams(
 interface Job {
   runId: string;
   bundleId: string;
+  /** For the operator-side failure line only — the row already carries it. */
+  serviceName: string;
   def: DriverDefinition;
   action: string;
   values: Record<string, string>;
@@ -283,10 +290,13 @@ interface Job {
  * time a legacy fire surface translates the run back into a thrown error, the
  * message alone is just prose, and guessing a code out of it (as the old
  * regex-matching translators did) turns a rejected header into a 500.
+ *
+ * `logs` is the run's log ring. It rides out of the attempt for the operator
+ * log in `execute` and goes nowhere near the row.
  */
 type Failure = { status: "failed"; error: string; errorCode: ErrorCode };
 type Ending = { status: "succeeded"; result: string } | Failure;
-type Outcome = Ending & { writes: unknown[] };
+type Outcome = Ending & { writes: unknown[]; logs: string[] };
 
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
@@ -369,15 +379,21 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     const result = await Promise.race([running, abortedBy(controller.signal)]);
     // The driver may also have *won* the race by resolving after the deadline
     // already fired. The run is over either way: a late success is a timeout.
-    if (timedOut) return { status: "failed", error: timedOutMessage(budgetMs), errorCode: "internal", writes };
-    return { ...serialize(result, log), writes };
+    if (timedOut) {
+      return { status: "failed", error: timedOutMessage(budgetMs), errorCode: "internal", writes, logs };
+    }
+    return { ...serialize(result, log), writes, logs };
   } catch (err) {
-    return { status: "failed", ...failureOf(err, timedOut, budgetMs, log), writes };
+    return { status: "failed", ...failureOf(err, timedOut, budgetMs, log), writes, logs };
   } finally {
     clearTimeout(timer);
     // Same reason the egress handle is disposed: a signal-deaf driver is still
     // running, and a write it lands now would never reach the audit column.
-    writer?.close();
+    // Awaited, and awaited *here*: closing refuses new writes at once and then
+    // drains the ones already in flight, so their audit entries are pushed onto
+    // `writes` before this attempt resolves and `execute` serializes it. An
+    // item that landed can therefore never be missing from the run's trail.
+    await writer?.close();
     if (egress) {
       try {
         // Safe even while a signal-ignoring driver still holds the handle:
@@ -420,9 +436,33 @@ function serialize(result: unknown, log: (m: string) => void): Ending {
   }
 }
 
+/**
+ * The one place a failed run's detail is readable.
+ *
+ * The row deliberately says as little as it can — "run failed" is what an agent
+ * gets, because the real cause can name a hidden host, quote a stored value, or
+ * carry a stack. That is right for the agent and useless for the operator, who
+ * is left with a failed run and nothing to debug it with. So the same failure
+ * is written once to the server log, where the audience is the operator: the
+ * run's identity, the driver's verdict, and the run's log ring — every line the
+ * driver put there, including the raw cause `failureOf` and the http driver
+ * kept off the row.
+ *
+ * One line per failed run, and nothing here ever flows back into the record.
+ */
+function logFailure(env: RunEnv, job: Job, outcome: Failure & { logs: string[] }): void {
+  if (!env.logger) return;
+  const detail = outcome.logs.length > 0 ? outcome.logs.map((line) => `\n    ${line}`).join("") : "";
+  env.logger.warn(
+    `run ${job.runId} failed: service "${job.serviceName}" action "${job.action}" ` +
+      `[${outcome.errorCode}] ${outcome.error}${detail}`,
+  );
+}
+
 /** The floating half of a run: never rejects, always lands on the row. */
 async function execute(env: RunEnv, job: Job): Promise<void> {
   const outcome = await attempt(env, job);
+  if (outcome.status === "failed") logFailure(env, job, outcome);
   const { runs } = env.db.tables;
   try {
     await env.db.client
@@ -500,6 +540,7 @@ export async function runService(
   const execution = execute(env, {
     runId,
     bundleId,
+    serviceName: service.name,
     def,
     action,
     values,
@@ -599,6 +640,14 @@ export async function listRuns(
  * This assumes a single yap process owns the database — running it while
  * another instance is live would kill that instance's in-flight runs, since
  * "in flight" and "abandoned" look identical from the row.
+ *
+ * The status condition is repeated on the UPDATE rather than trusting the ids
+ * the SELECT returned: between the two statements a run can legitimately reach
+ * a terminal state (this runs at boot, and boot is exactly when a listener may
+ * already be accepting calls), and flipping a run that just *succeeded* to
+ * "failed" would be a lie written over a good result. Which is also why
+ * serve.ts recovers before it starts the server: the window should not exist in
+ * the first place, and the condition is what makes it harmless if it does.
  */
 export async function recoverInterruptedRuns(db: Db): Promise<number> {
   const { runs } = db.tables;
@@ -613,9 +662,12 @@ export async function recoverInterruptedRuns(db: Db): Promise<number> {
       finishedAt: nowIso(),
     })
     .where(
-      inArray(
-        runs.id,
-        stranded.map((row) => row.id),
+      and(
+        inArray(
+          runs.id,
+          stranded.map((row) => row.id),
+        ),
+        inArray(runs.status, INTERRUPTED),
       ),
     );
   return stranded.length;

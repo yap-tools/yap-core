@@ -28,6 +28,8 @@ import {
   type RunRecord,
 } from "../../src/core/runs.js";
 import { encryptSecret } from "../../src/crypto.js";
+import { createLogger } from "../../src/logger.js";
+import type { Db } from "../../src/db/index.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
@@ -118,6 +120,53 @@ const testDriver: DriverDefinition = {
   },
 };
 
+/**
+ * Wraps a drizzle query builder so `effect` runs after the query resolves and
+ * before the awaiting caller sees the rows. Every chained method (`.from`,
+ * `.where`, …) hands back another wrapper, so the hook survives the chain.
+ */
+function afterResolve<T extends object>(builder: T, effect: () => Promise<void>): T {
+  return new Proxy(builder, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop) as unknown;
+      if (prop === "then") {
+        return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
+          (target as unknown as Promise<unknown>)
+            .then(async (rows) => {
+              await effect();
+              return rows;
+            })
+            .then(onFulfilled, onRejected);
+      }
+      if (typeof value === "function") {
+        return (...args: unknown[]) => {
+          const next = (value as (...a: unknown[]) => unknown).apply(target, args);
+          return next !== null && typeof next === "object" ? afterResolve(next as object, effect) : next;
+        };
+      }
+      return value;
+    },
+  });
+}
+
+/**
+ * A `Db` that runs `effect` the first time a SELECT resolves — the only way to
+ * land something *between* the two statements `recoverInterruptedRuns` issues
+ * without depending on scheduling luck.
+ */
+function dbFinishingAfterSelect(db: Db, effect: () => Promise<void>): Db {
+  const client = new Proxy(db.client, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop) as unknown;
+      if (typeof value !== "function") return value;
+      const method = value as (...a: unknown[]) => unknown;
+      if (prop !== "select") return method.bind(target);
+      return (...args: unknown[]) => afterResolve(method.apply(target, args) as object, effect);
+    },
+  });
+  return { ...db, client };
+}
+
 describeEachAdapter("runs", (adapter) => {
   let app: TestApp;
   let alice: ApiClient;
@@ -127,6 +176,8 @@ describeEachAdapter("runs", (adapter) => {
   let spaceId: string;
   let bundleId: string;
   let env: RunEnv;
+  /** Everything the runs layer wrote operator-side, newest last. */
+  const logged: string[] = [];
 
   let target: Server;
   let targetPort: number;
@@ -191,7 +242,20 @@ describeEachAdapter("runs", (adapter) => {
     const registry = new DriverRegistry();
     registry.register(createHttpDriver(app.config));
     registry.register(testDriver);
-    env = { db: app.db, config: app.config, registry };
+    // The operator-side sink: a failed run's only readable detail. Captured
+    // rather than silenced, so the "failed" tests can assert what it says.
+    env = {
+      db: app.db,
+      config: app.config,
+      registry,
+      logger: createLogger({
+        debug() {},
+        info() {},
+        log() {},
+        warn: (...args: unknown[]) => void logged.push(args.map(String).join(" ")),
+        error: (...args: unknown[]) => void logged.push(args.map(String).join(" ")),
+      }),
+    };
 
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
@@ -388,6 +452,54 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.status).toBe("failed");
       expect(run.error).toBe("run failed");
       expect(JSON.stringify(run)).not.toContain("secret internal detail");
+    });
+
+    it("writes a failed run's detail to the operator log and nothing but the flat line to the row", async () => {
+      await plantService({ name: "loud-exploder", driver: "test", config: {} });
+      logged.length = 0;
+      const run = await runService(env, aliceId, bundleId, {
+        service: "loud-exploder",
+        action: "boom",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+
+      // One line, naming the run, the service, the action and the verdict…
+      const line = logged.find((l) => l.includes(run.id));
+      expect(line, logged.join("\n")).toBeDefined();
+      expect(line).toContain('service "loud-exploder"');
+      expect(line).toContain('action "boom"');
+      expect(line).toContain("[internal]");
+      expect(line).toContain("run failed");
+      // …and carrying the log ring, which is where the real cause lives: what
+      // the driver logged itself, and what the collapse threw away.
+      expect(line).toContain("about to explode");
+      expect(line).toContain("secret internal detail");
+
+      // The agent-visible record still says only the generic thing.
+      expect(run.error).toBe("run failed");
+      expect(JSON.stringify(await getRun(env, aliceId, run.id))).not.toContain("secret internal detail");
+    });
+
+    it("carries the network cause the row collapses into the operator log", async () => {
+      // A port nothing is listening on: the http driver collapses the
+      // transport error (it can name a hidden host), so ECONNREFUSED reaches
+      // the operator only through the ring.
+      const deadPort = await getFreePort();
+      await plantService({ name: "unreachable", config: { url: `http://127.0.0.1:${deadPort}/x`, method: "GET" } });
+      logged.length = 0;
+      const run = await runService(env, aliceId, bundleId, { service: "unreachable", waitMs: 8_000 });
+
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("service request failed to reach its destination");
+
+      const line = logged.find((l) => l.includes(run.id));
+      expect(line, logged.join("\n")).toBeDefined();
+      expect(line).toContain('service "unreachable"');
+      expect(line).toMatch(/fetch failed|ECONNREFUSED/);
+      // The row learns none of it — not the cause, not the port it tried.
+      expect(JSON.stringify(run)).not.toMatch(/fetch failed|ECONNREFUSED/);
+      expect(JSON.stringify(run)).not.toContain(String(deadPort));
     });
 
     it("keeps a driver's agent-safe YapError message", async () => {
@@ -647,6 +759,63 @@ describeEachAdapter("runs", (adapter) => {
           .sort()
           .join("|");
       expect(summarize(after)).toBe(summarize(before));
+    });
+
+    it("leaves a run that finished between the select and the update alone", async () => {
+      const { runs } = app.db.tables;
+      const now = new Date().toISOString();
+      await app.db.client.insert(runs).values([
+        {
+          id: "race-finisher",
+          bundleId,
+          serviceId: null,
+          serviceName: "ghost",
+          action: "fire",
+          status: "running",
+          params: "{}",
+          writes: "[]",
+          createdAt: now,
+          startedAt: now,
+        },
+        {
+          id: "race-stranded",
+          bundleId,
+          serviceId: null,
+          serviceName: "ghost",
+          action: "fire",
+          status: "running",
+          params: "{}",
+          writes: "[]",
+          createdAt: now,
+          startedAt: now,
+        },
+      ]);
+
+      // The window the UPDATE's status condition exists for: both ids are
+      // already named by the SELECT when one of the two runs succeeds on its
+      // own. Reusing the ids alone would overwrite that good result with
+      // "interrupted by server restart".
+      let raced = false;
+      const racingDb = dbFinishingAfterSelect(app.db, async () => {
+        if (raced) return;
+        raced = true;
+        await app.db.client
+          .update(runs)
+          .set({ status: "succeeded", result: '{"ok":true}', finishedAt: new Date().toISOString() })
+          .where(eq(runs.id, "race-finisher"));
+      });
+
+      await recoverInterruptedRuns(racingDb);
+      expect(raced).toBe(true);
+
+      const finisher = await getRun(env, aliceId, "race-finisher");
+      expect(finisher.status).toBe("succeeded");
+      expect(finisher.result).toEqual({ ok: true });
+      expect(finisher.error).toBeNull();
+
+      const stranded = await getRun(env, aliceId, "race-stranded");
+      expect(stranded.status).toBe("failed");
+      expect(stranded.error).toBe("interrupted by server restart");
     });
 
     it("prunes terminal runs older than the retention window only", async () => {
