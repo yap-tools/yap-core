@@ -93,6 +93,21 @@ describe("cmdDriverRemove", () => {
     const dir = tempDir();
     expect(() => cmdDriverRemove(dir, "bogus")).toThrow(/no driver named "bogus" installed.*none are installed/s);
   });
+
+  it("refuses a name that is not a driver name before touching the filesystem", () => {
+    const dir = tempDir();
+    // `../data` would resolve out of drivers/ and take the instance's data
+    // directory with it — the name rule is checked first, so nothing is removed.
+    const data = join(dir, "data");
+    mkdirSync(data, { recursive: true });
+    mkdirSync(join(dir, "drivers", "echo"), { recursive: true });
+
+    for (const name of ["../data", "../../etc", "/etc", "Echo", "e", ".", "echo/../../data"]) {
+      expect(() => cmdDriverRemove(dir, name), name).toThrow(/must match/);
+    }
+    expect(existsSync(data)).toBe(true);
+    expect(existsSync(join(dir, "drivers", "echo"))).toBe(true);
+  });
 });
 
 /** Builds a gzipped tarball at `outPath` from entries, hostile ones included. */

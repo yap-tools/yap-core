@@ -222,6 +222,14 @@ export async function cmdDriverAdd(dir: string, spec: string): Promise<void> {
 }
 
 export function cmdDriverRemove(dir: string, name: string): void {
+  // `name` comes straight off the command line and is about to be joined into
+  // the drivers directory and removed recursively — so it is checked against
+  // the same rule `add` derives names under *before* the filesystem is touched.
+  // Without this, `yap driver remove ../data` resolves outside drivers/ and
+  // deletes the instance's own data directory.
+  if (!DRIVER_NAME.test(name)) {
+    throw new CliError(`driver name ${JSON.stringify(name)} must match ${DRIVER_NAME.source}`);
+  }
   const target = join(driversDir(dir), name);
   if (!existsSync(target)) {
     const installed = installedFolders(dir);
