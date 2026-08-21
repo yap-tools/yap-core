@@ -114,13 +114,17 @@ export interface TestCtx extends RunContext {
 }
 
 /** A run context with a programmable signal and a captured log. */
-export function createCtx(egress: Egress, { signal }: { signal?: AbortSignal } = {}): TestCtx {
+export function createCtx(
+  egress: Egress,
+  { signal, pinned = [] }: { signal?: AbortSignal; pinned?: readonly string[] } = {},
+): TestCtx {
   const logs: string[] = [];
   return {
     egress,
     signal: signal ?? new AbortController().signal,
     log: (message) => logs.push(message),
     fail: fakeFail,
+    pinned,
     logs,
     config: {},
     action: "",

@@ -129,7 +129,7 @@ const testDriver: DriverDefinition = {
     if (ctx.action === "missing") throw ctx.fail("message 42 is not in INBOX", "not_found");
     // A plain-JS driver can pass any string; the runner must not mint it.
     if (ctx.action === "overreach") throw ctx.fail("nice try", "forbidden" as never);
-    return { echoed: ctx.params, config: ctx.config };
+    return { echoed: ctx.params, config: ctx.config, pinned: ctx.pinned };
   },
 };
 
@@ -578,6 +578,27 @@ describeEachAdapter("runs", (adapter) => {
       // hand out the very values pinning exists to keep private.
       expect(run.params).toEqual({ message: "hi" });
       expect(JSON.stringify(run)).not.toContain("ops");
+    });
+
+    it("tells the driver which of its parameters were pinned", async () => {
+      await plantService({ name: "pin-aware", driver: "test", pins: { tag: "fixed" }, config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "pin-aware",
+        action: "echo",
+        params: { message: "hi" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect((run.result as { pinned: string[] }).pinned).toEqual(["tag"]);
+      // An unpinned service sees an empty list, never undefined.
+      await plantService({ name: "pin-free", driver: "test", config: {} });
+      const plain = await runService(env, aliceId, bundleId, {
+        service: "pin-free",
+        action: "echo",
+        params: { message: "hi" },
+        waitMs: 5_000,
+      });
+      expect((plain.result as { pinned: string[] }).pinned).toEqual([]);
     });
 
     it("rejects unknown and missing parameters", async () => {
