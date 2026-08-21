@@ -265,6 +265,46 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     expect(noId.error.code).toBe("invalid_request");
   });
 
+  it("an http service with actions: [\"fire\"] is the same hook on every legacy surface", async () => {
+    // The allowlist names the http driver's only action, so it changes nothing
+    // the hook contract can see: same list, same fire, same load_bundle view.
+    const created = await alice.post(`/v1/bundles/${bundleId}/services`, {
+      name: "allowlisted",
+      params: [{ name: "message", required: true }],
+      actions: ["fire"],
+      config: { url: `http://127.0.0.1:${targetPort}/allowlisted`, method: "POST", body_json: { text: "{{message}}" } },
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.actions.map((a: any) => a.name)).toEqual(["fire"]);
+
+    const listed = (await alice.get(`/v1/bundles/${bundleId}/hooks`)).body.data.find(
+      (h: any) => h.name === "allowlisted",
+    );
+    expect(listed).toEqual({
+      id: created.body.id,
+      name: "allowlisted",
+      description: "",
+      params: [{ name: "message", required: true }],
+    });
+
+    received.length = 0;
+    const fired = await alice.post(`/v1/hooks/${created.body.id}/fire`, { params: { message: "via rest" } });
+    expect(fired.status).toBe(200);
+    expect(Object.keys(fired.body).sort()).toEqual(["body", "status"]);
+    expect(received).toHaveLength(1);
+    expect(JSON.parse(received[0]!.body)).toEqual({ text: "via rest" });
+
+    const viaMcp = await fireViaMcp({ id: "allowlisted", params: { message: "via mcp" } });
+    expect(viaMcp.ok).toBe(true);
+    expect(Object.keys(viaMcp.result).sort()).toEqual(["body", "status"]);
+    expect(received).toHaveLength(2);
+    expect(JSON.parse(received[1]!.body)).toEqual({ text: "via mcp" });
+
+    const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
+    const hook = loaded.bundles[0].hooks.find((h: any) => h.name === "allowlisted");
+    expect(hook).toEqual(listed);
+  });
+
   it("stays http-only: a service on another driver is not a hook", async () => {
     const echo = await alice.post(`/v1/bundles/${bundleId}/services`, {
       name: "echoer",

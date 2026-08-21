@@ -22,6 +22,7 @@
  * is checked structurally at load time by `validateDriverDefinition` in
  * registry.ts rather than trusted from the declaration here.
  */
+import type { ErrorCode } from "../errors.js";
 import type { Egress } from "./egress.js";
 
 /**
@@ -68,6 +69,10 @@ export interface BundleWriter {
   createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]>;
 }
 
+/** The verdicts a driver may attach to a `ctx.fail` — the subset of Yap's
+ * error codes that describe a caller's mistake rather than the server's. */
+export type DriverFailCode = Extract<ErrorCode, "invalid_request" | "not_found">;
+
 /** Everything one driver invocation gets. Nothing else is reachable. */
 export interface RunContext {
   /** Decrypted service config — in memory, for this call only. */
@@ -82,6 +87,16 @@ export interface RunContext {
   /** Fires when the action's timeoutMs elapses. */
   signal: AbortSignal;
   log: (message: string) => void;
+  /**
+   * Builds an error whose message the agent is allowed to see. Any other error
+   * a driver throws collapses to a flat "run failed" on the run row (the
+   * message could name a hidden host or echo a secret); `ctx.fail` is the
+   * driver saying "this one is safe" — a missing parameter, a message that is
+   * not there, a folder that does not exist. The driver is responsible for
+   * keeping config and pinned values out of the text. `code` defaults to
+   * `invalid_request`; `not_found` is the other verdict that makes sense here.
+   */
+  fail: (message: string, code?: DriverFailCode) => Error;
 }
 
 export interface DriverDefinition {

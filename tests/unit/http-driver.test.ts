@@ -55,6 +55,7 @@ function makeContext(
     writer: null,
     signal: new AbortController().signal,
     log: () => {},
+    fail: (message) => new Error(message),
   };
   return { ctx, calls };
 }
@@ -234,6 +235,7 @@ describe("createHttpDriver: run", () => {
       writer: null,
       signal: new AbortController().signal,
       log: () => {},
+      fail: (message) => new Error(message),
     };
     let caught: unknown;
     try {
@@ -343,6 +345,7 @@ describe("createHttpDriver: run (real egress)", () => {
             writer: null,
             signal: new AbortController().signal,
             log: () => {},
+            fail: (message) => new Error(message),
           };
           const result = await driver.run(ctx);
           expect(result).toEqual({ status: 201, body: JSON.stringify({ got: '{"message":"hello"}' }) });

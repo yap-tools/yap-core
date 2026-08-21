@@ -268,6 +268,33 @@ describeEachAdapter("services", (adapter) => {
       expect(selfRenamed.body.name).toBe("self-rename-service");
     });
 
+    it("accepts an action allowlist naming the driver's actions and rejects anything else", async () => {
+      const id = await authorService(bundleId, {
+        name: "allowlisted",
+        params: [{ name: "message" }],
+        actions: ["fire"],
+        config: { url: `http://127.0.0.1:${targetPort}/allowlisted`, method: "GET" },
+      });
+      const listed = (await alice.get(`/v1/bundles/${bundleId}/services`)).body.data.find((s: any) => s.id === id);
+      expect(listed.actions.map((a: any) => a.name)).toEqual(["fire"]);
+
+      for (const actions of [[], ["fire", "fire"], ["launch"], "fire", [1]]) {
+        const res = await alice.post(`/v1/bundles/${bundleId}/services`, {
+          name: "bad-allowlist",
+          actions,
+          config: { url: `http://127.0.0.1:${targetPort}/x`, method: "GET" },
+        });
+        expect(res.status, JSON.stringify(actions)).toBe(400);
+      }
+      expect((await alice.patch(`/v1/services/${id}`, { actions: ["launch"] })).status).toBe(400);
+      expect((await alice.patch(`/v1/services/${id}`, { actions: [] })).status).toBe(400);
+
+      const cleared = await alice.patch(`/v1/services/${id}`, { actions: null });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.actions.map((a: any) => a.name)).toEqual(["fire"]);
+      expect((await alice.delete(`/v1/services/${id}`)).status).toBe(200);
+    });
+
     it("updates and deletes a service", async () => {
       const id = await authorService(bundleId, {
         name: "temporary",

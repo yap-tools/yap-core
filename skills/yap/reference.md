@@ -89,16 +89,18 @@ Then: `GET /v1/bundles/:id/files` (list), `GET /v1/files/:id/link` (mint expirin
 ### Services & runs
 | Method & path | Notes |
 |---|---|
-| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (each with its callable — unpinned — params); config never returned |
-| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "config"}`; `driver` defaults to `http`; config is driver-shaped and encrypted at rest |
-| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "config"?}` (`pins: null` clears the pin set) |
+| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (only the service's *allowed* actions, each with its callable — unpinned — params); config never returned |
+| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "actions"?, "config"}`; `driver` defaults to `http` (built-ins: `http`, `mail`); `actions` is an allowlist of the driver's action names (omit = all; one allowed action becomes the implicit default); config is driver-shaped and encrypted at rest |
+| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "actions"?, "config"?}` (`pins: null` clears the pin set; `actions: null` clears the allowlist) |
 | `POST /v1/services/:id/run` | `{"action"?, "params"?, "wait_ms"?}` → a run record; `wait_ms` clamped to `YAP_RUN_WAIT_CAP_MS` (25000 default) |
 | `GET /v1/runs/:id` | one run: status (`queued\|running\|succeeded\|failed`), the caller's params, result/error, items it wrote |
 | `GET /v1/bundles/:id/runs` | `?service=` filter, `cursor`, `limit`; newest first |
 
 Service egress (the `http` driver, or any driver declaring `egress: true`) denies private/link-local destinations unless allowlisted via `YAP_HOOK_ALLOW_HOSTS` (still that name). The `http` driver's own timeout is `YAP_HOOK_TIMEOUT_MS` (30 s default, still that name); no automatic retries.
 
-**Drivers** are installed per instance, not authored over REST: `yap driver add <npm-spec>` / `remove <name>` / `list`, into `YAP_DRIVERS_DIR` (default `./drivers`). A driver is trusted code running in-process — the SSRF guard defends hostile *parameters* through an honest driver, not a driver written to misbehave.
+**Built-in drivers:** `http` (one action, `fire`: the configured request with `{{param}}` substitution) and `mail` (one IMAP/SMTP account; actions `folders`, `search`, `read`, `mark`, `send`, `draft` — a service allowlists which; `to` is the only recipient parameter, so a pinned `to` fixes where mail goes; `draft` writes into the account's Drafts folder for a human to send). Mail config: `user` + `pass` or `oauth2`, `from`, `imap`/`smtp: {host, port, security?}`; a wrong password is rejected at authoring. Full reference: `docs/mail-driver.md`.
+
+**Drivers** are also installed per instance, not authored over REST: `yap driver add <npm-spec>` / `remove <name>` / `list`, into `YAP_DRIVERS_DIR` (default `./drivers`). A driver is trusted code running in-process — the SSRF guard defends hostile *parameters* through an honest driver, not a driver written to misbehave.
 
 **Legacy hook surface (kept byte-compatible until 1.0):** a hook is exactly a service on the `http` driver, viewed through the old four-field shape (`id`, `name`, `description`, `params` — no `driver`/`action`).
 

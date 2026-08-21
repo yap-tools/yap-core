@@ -50,6 +50,13 @@
       "when": 1787171244415,
       "tag": "0006_broken_frank_castle",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787500000000,
+      "tag": "0007_quiet_allowlist",
+      "breakpoints": true
     }
   ]
 }

@@ -51,11 +51,12 @@ import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { createEgress, type Egress } from "./drivers/egress.js";
 import type { DriverRegistry } from "./drivers/registry.js";
-import type { DriverDefinition } from "./drivers/types.js";
+import type { DriverDefinition, RunContext } from "./drivers/types.js";
 import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
 import {
   createBundleWriter,
+  allowedActions,
   resolveActionParams,
   type ScopedBundleWriter,
   type ServiceParamSpec,
@@ -115,6 +116,7 @@ export interface ServiceRow {
   driver: string;
   params: string;
   pins: string;
+  actions: string | null;
   configEncrypted: string;
 }
 
@@ -211,9 +213,16 @@ function driverFor(registry: DriverRegistry, service: ServiceRow): DriverDefinit
   return registry.get(service.driver);
 }
 
-/** Picks the action to run: an explicit name, or the only one there is. */
-function resolveAction(def: DriverDefinition, serviceName: string, requested?: string): string {
-  const names = Object.keys(def.actions);
+/**
+ * Picks the action to run: an explicit name, or the only one there is. "There
+ * is" means the service's allowed set (`allowedActions` — the same computation
+ * the listing runs), not the driver's: a disabled action is unknown here, and
+ * the hint lists only what the agent was shown. A service whose whole
+ * allowlist has gone stale has nothing to run, and says so.
+ */
+function resolveAction(def: DriverDefinition, service: ServiceRow, requested?: string): string {
+  const serviceName = service.name;
+  const names = allowedActions(def, service.actions);
   if (names.length === 0) throw invalid(`service "${serviceName}" has no runnable actions`);
   const wanted = requested?.trim();
   if (wanted) {
@@ -312,6 +321,16 @@ type Outcome = Ending & { writes: unknown[]; logs: string[] };
 
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
+/**
+ * The one sanctioned way for an out-of-tree driver to put words on the row:
+ * `failureOf` below keeps a YapError verbatim, and this is how a driver that
+ * imports nothing from Yap makes one. Drivers are plain JS, so the code is
+ * checked at runtime too — anything but the two caller-fault verdicts is
+ * `invalid_request`, never a code the driver has no business claiming.
+ */
+const driverFail: RunContext["fail"] = (message, code) =>
+  new YapError(code === "not_found" ? "not_found" : "invalid_request", String(message));
+
 /** Turns whatever the driver threw into one agent-safe line plus its code. */
 function failureOf(
   err: unknown,
@@ -380,6 +399,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       writer,
       signal: controller.signal,
       log,
+      fail: driverFail,
     });
     // Losing the race orphans this promise while the driver is still working,
     // so neuter it up front: a late settlement is discarded (the row is already
@@ -543,7 +563,7 @@ export async function runService(
 
   const service = await resolveServiceRow(db, bundleId, input.service);
   const def = driverFor(env.registry, service);
-  const action = resolveAction(def, service.name, input.action);
+  const action = resolveAction(def, service, input.action);
   const { params, values } = buildParams(def, service, action, input.params ?? {});
 
   const runId = newId();

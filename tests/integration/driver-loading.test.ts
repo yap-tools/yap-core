@@ -78,6 +78,11 @@ describe("external driver loading", () => {
         description: "Echoes the supplied message.",
         params: [{ name: "message", description: "What to echo back", required: true }],
       },
+      {
+        name: "shout",
+        description: "Echoes the supplied message in upper case.",
+        params: [{ name: "message", description: "What to shout back", required: true }],
+      },
     ]);
 
     const res = await aliceMcp.call("call", {
@@ -86,7 +91,7 @@ describe("external driver loading", () => {
         {
           bundle_id: bundleId,
           tool: "run_service",
-          params: { id: "echo-back", params: { message: "hi" }, wait_ms: 5000 },
+          params: { id: "echo-back", action: "echo", params: { message: "hi" }, wait_ms: 5000 },
         },
       ],
     });
@@ -96,6 +101,55 @@ describe("external driver loading", () => {
     expect(result.result.result).toEqual({ echoed: "hi" });
   });
 
+  it("restricts a service to some of the driver's actions, over REST and MCP alike", async () => {
+    const created = await alice.post(`/v1/bundles/${bundleId}/services`, {
+      name: "shouter",
+      driver: "echo",
+      actions: ["shout"],
+      config: {},
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.actions.map((a: any) => a.name)).toEqual(["shout"]);
+
+    // REST listing and load_bundle both show only the allowed action; the
+    // disabled one is not discoverable from either.
+    const listed = (await alice.get(`/v1/bundles/${bundleId}/services`)).body.data.find((s: any) => s.name === "shouter");
+    expect(listed.actions.map((a: any) => a.name)).toEqual(["shout"]);
+    const loaded = await aliceMcp.call("load_bundle", { bundle_ids: [bundleId] });
+    const viaMcp = loaded.bundles[0].services.find((s: any) => s.name === "shouter");
+    expect(viaMcp.actions.map((a: any) => a.name)).toEqual(["shout"]);
+    expect(JSON.stringify(viaMcp.actions)).not.toContain("echo");
+
+    const call = (params: Record<string, unknown>) =>
+      aliceMcp
+        .call("call", {
+          space_id: spaceId,
+          calls: [{ bundle_id: bundleId, tool: "run_service", params: { id: "shouter", wait_ms: 5000, ...params } }],
+        })
+        .then((res) => res.results[0]);
+
+    // One allowed action: it is the default, no `action` needed.
+    const implicit = await call({ params: { message: "hi" } });
+    expect(implicit.ok).toBe(true);
+    expect(implicit.result.action).toBe("shout");
+    expect(implicit.result.result).toEqual({ shouted: "HI" });
+
+    // The disabled action is unknown, and the hint lists only what is allowed.
+    const disabled = await call({ action: "echo", params: { message: "hi" } });
+    expect(disabled.ok).toBe(false);
+    expect(disabled.error.message).toBe('unknown action "echo" for service "shouter" (available: shout)');
+    const viaRest = await alice.post(`/v1/services/${created.body.id}/run`, { action: "echo", params: { message: "hi" } });
+    expect(viaRest.status).toBe(400);
+    expect(viaRest.body.error.message).toBe('unknown action "echo" for service "shouter" (available: shout)');
+
+    // Widening the allowlist brings the default question back.
+    const widened = await alice.patch(`/v1/services/${created.body.id}`, { actions: ["echo", "shout"] });
+    expect(widened.body.actions.map((a: any) => a.name)).toEqual(["echo", "shout"]);
+    const ambiguous = await call({ params: { message: "hi" } });
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.error.message).toMatch(/needs an action — one of: echo, shout/);
+  });
+
   it("built-in drivers stay installed alongside it", async () => {
     const res = await alice.post(`/v1/bundles/${bundleId}/services`, {
       name: "unknown-driver",
@@ -103,7 +157,7 @@ describe("external driver loading", () => {
       config: {},
     });
     expect(res.status).toBe(400);
-    expect(res.body.error.message).toMatch(/installed: echo, http/);
+    expect(res.body.error.message).toMatch(/installed: echo, http, mail/);
   });
 });
 

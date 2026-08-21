@@ -191,6 +191,7 @@ export const services = sqliteTable(
     driver: text("driver").notNull().default("http"),
     params: text("params").notNull().default("[]"), // JSON: declared parameter specs
     pins: text("pins").notNull().default("{}"), // JSON: driver-specific pinned targets
+    actions: text("actions"), // JSON array of allowed action names; null = every action the driver declares
     configEncrypted: text("config_encrypted").notNull(), // AES-GCM blob, never returned
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),

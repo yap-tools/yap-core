@@ -17,6 +17,7 @@ import type { YapConfig } from "./config.js";
 import type { TokenAuth } from "./core/authScope.js";
 import { bearerToken, resolveCredential } from "./core/credential.js";
 import { createHttpDriver } from "./core/drivers/http.js";
+import { createMailDriver } from "./core/drivers/mail/index.js";
 import { DriverRegistry } from "./core/drivers/registry.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
@@ -110,6 +111,8 @@ export function createDriverRegistry(config: YapConfig): DriverRegistry {
   const registry = new DriverRegistry();
   // The built-in http driver is what every legacy hook was.
   registry.register(createHttpDriver(config));
+  // The built-in mail driver: one IMAP/SMTP account, six actions the service allowlists.
+  registry.register(createMailDriver());
   return registry;
 }
 

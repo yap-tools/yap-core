@@ -86,6 +86,16 @@ const testDriver: DriverDefinition = {
       params: [],
       timeoutMs: 5_000,
     },
+    missing: {
+      description: "Fails through ctx.fail — the agent-safe way.",
+      params: [],
+      timeoutMs: 5_000,
+    },
+    overreach: {
+      description: "Fails through ctx.fail with a code a driver may not claim.",
+      params: [],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     // Deliberately signal-deaf: the runner's deadline, not the driver, has to
@@ -116,6 +126,9 @@ const testDriver: DriverDefinition = {
       ctx.log("about to explode");
       throw new Error("secret internal detail");
     }
+    if (ctx.action === "missing") throw ctx.fail("message 42 is not in INBOX", "not_found");
+    // A plain-JS driver can pass any string; the runner must not mint it.
+    if (ctx.action === "overreach") throw ctx.fail("nice try", "forbidden" as never);
     return { echoed: ctx.params, config: ctx.config };
   },
 };
@@ -188,6 +201,8 @@ describeEachAdapter("runs", (adapter) => {
     driver?: string;
     params?: Array<{ name: string; required?: boolean }>;
     pins?: Record<string, string>;
+    /** Stored verbatim: a test can plant a stale or malformed allowlist. */
+    actions?: string | null;
     config: unknown;
     bundle?: string;
   }): Promise<string> => {
@@ -202,6 +217,7 @@ describeEachAdapter("runs", (adapter) => {
       driver: input.driver ?? "http",
       params: JSON.stringify(input.params ?? []),
       pins: JSON.stringify(input.pins ?? {}),
+      actions: input.actions ?? null,
       configEncrypted: encryptSecret(JSON.stringify(input.config), app.config.masterKey),
       createdAt: now,
       updatedAt: now,
@@ -454,6 +470,26 @@ describeEachAdapter("runs", (adapter) => {
       expect(JSON.stringify(run)).not.toContain("secret internal detail");
     });
 
+    it("keeps a ctx.fail message and code verbatim on the row", async () => {
+      await plantService({ name: "honest-failer", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "honest-failer",
+        action: "missing",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("message 42 is not in INBOX");
+      expect(run.errorCode).toBe("not_found");
+
+      const overreach = await runService(env, aliceId, bundleId, {
+        service: "honest-failer",
+        action: "overreach",
+        waitMs: 5_000,
+      });
+      expect(overreach.error).toBe("nice try");
+      expect(overreach.errorCode).toBe("invalid_request");
+    });
+
     it("writes a failed run's detail to the operator log and nothing but the flat line to the row", async () => {
       await plantService({ name: "loud-exploder", driver: "test", config: {} });
       logged.length = 0;
@@ -587,6 +623,35 @@ describeEachAdapter("runs", (adapter) => {
     it("rejects an unknown action", async () => {
       await expect(runService(env, aliceId, bundleId, { service: "echoer", action: "nope" })).rejects.toThrow(
         /unknown action "nope"/,
+      );
+    });
+
+    it("resolves over the service's allowlist, not the driver's full action set", async () => {
+      await plantService({ name: "echo-only", driver: "test", actions: JSON.stringify(["echo"]), config: {} });
+      // The driver has seven actions; this service has one, so it is implicit.
+      const run = await runService(env, aliceId, bundleId, {
+        service: "echo-only",
+        params: { message: "hi" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.action).toBe("echo");
+      // A disabled action is unknown, and the hint never names it.
+      await expect(runService(env, aliceId, bundleId, { service: "echo-only", action: "sleep" })).rejects.toThrow(
+        /^unknown action "sleep" for service "echo-only" \(available: echo\)$/,
+      );
+
+      await plantService({ name: "two-of-seven", driver: "test", actions: JSON.stringify(["echo", "boom"]), config: {} });
+      await expect(runService(env, aliceId, bundleId, { service: "two-of-seven" })).rejects.toThrow(
+        /^service "two-of-seven" needs an action — one of: echo, boom$/,
+      );
+
+      // The stale / malformed allowlist matrix lives in services-core.test.ts
+      // (allowedActions is the one computation); here it is enough that the
+      // runner's "nothing to run" verdict comes out of it.
+      await plantService({ name: "all-stale", driver: "test", actions: JSON.stringify(["gone"]), config: {} });
+      await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "echo" })).rejects.toThrow(
+        /^service "all-stale" has no runnable actions$/,
       );
     });
 
