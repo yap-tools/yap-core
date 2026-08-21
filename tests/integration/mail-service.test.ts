@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { simpleMessage, startImapMock, type ImapMock } from "../helpers/mail/imap-mock.js";
+import { startMockSmtp, type MockSmtp } from "../helpers/smtp.js";
 
 const PASS = "reader-pw-4711";
 
@@ -21,6 +22,7 @@ describe("mail service (built-in driver)", () => {
   let imap: ImapMock;
   /** A server that refuses every login — the mock does not check passwords. */
   let refusing: ImapMock;
+  let smtp: MockSmtp;
   let serviceId: string;
 
   function config(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -53,6 +55,7 @@ describe("mail service (built-in driver)", () => {
       ],
     });
     refusing = await startImapMock({ authFail: true });
+    smtp = await startMockSmtp();
     app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" });
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
@@ -74,6 +77,39 @@ describe("mail service (built-in driver)", () => {
     await app?.stop();
     await imap?.close();
     await refusing?.close();
+    await smtp?.close();
+  });
+
+  it("keeps a notifier aimed: a pinned `to` locks cc and bcc through the whole stack", async () => {
+    const created = await alice.post(`/v1/bundles/${bundleId}/services`, {
+      name: "notifier",
+      driver: "mail",
+      actions: ["send"],
+      pins: { to: "ops@example.com" },
+      config: config({ smtp: { host: "127.0.0.1", port: smtp.port, security: "none" } }),
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    // The listing shows cc/bcc as callable — pins are per name — which is
+    // exactly why the driver has to refuse them at run time.
+    const send = created.body.actions.find((a: { name: string }) => a.name === "send");
+    const names = send.params.map((p: { name: string }) => p.name);
+    expect(names).not.toContain("to");
+    expect(names).toEqual(expect.arrayContaining(["cc", "bcc"]));
+
+    const post = (params: Record<string, string>) =>
+      alice.post(`/v1/services/${created.body.id}/run`, { params, wait_ms: 10_000 });
+    const aimed = await post({ subject: "hi", body: "b", cc: "attacker@example.com" });
+    expect(aimed.body.status).toBe("failed");
+    expect(aimed.body.errorCode).toBe("invalid_request");
+    expect(aimed.body.error).toMatch(/recipients are fixed on this service; cc cannot be supplied/);
+    const blind = await post({ subject: "hi", body: "b", bcc: "attacker@example.com" });
+    expect(blind.body.error).toMatch(/bcc cannot be supplied/);
+    expect(smtp.messages).toHaveLength(0);
+
+    const ok = await post({ subject: "hi", body: "b" });
+    expect(ok.body.status, JSON.stringify(ok.body)).toBe("succeeded");
+    expect(smtp.messages[0]!.to).toEqual(["ops@example.com"]);
+    expect(JSON.stringify(ok.body)).not.toContain("ops@example.com");
   });
 
   it("is a built-in: authored without installing anything, listing only the allowed actions", async () => {

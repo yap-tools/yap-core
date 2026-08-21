@@ -13,10 +13,13 @@
  * - a **notifier** (`["send"]` with `pins: {to: "ops@…"}`) can send but cannot
  *   aim.
  *
- * The last shape is why `to` is the *only* recipient-bearing parameter. A
- * `cc` or `bcc` would let an agent route mail past a pinned `to`; with one
- * recipient parameter, pinning it really does fix where mail can go, and a
- * supplied `cc` is an unknown parameter to the host long before it gets here.
+ * The last shape is why the three recipient parameters — `to`, `cc`, `bcc` —
+ * are treated as one. Pins are per parameter *name*, so a pinned `to` alone
+ * would leave `cc` open and let an agent route mail past it. The rule here is
+ * that **any pinned recipient field locks the others**: on a service that pins
+ * one of them, supplying another is refused, and a reply may not derive `to`
+ * from the original either. `ctx.pinned` is how the driver knows; pinning `to`
+ * therefore really does fix where mail can go.
  *
  * This file is the seam between that contract and the protocol layer in the
  * sibling modules: it parses the string parameters an agent supplies, opens
@@ -55,7 +58,7 @@ import { resolveAuth } from "./auth.js";
 import { configDoc, normalizeMailConfig, type MailConfig } from "./config.js";
 import { imapConnect, type ImapClient, type MailboxInfo, type MailCtx, type SearchCriterion } from "./imap.js";
 import { attachmentParts, partFilename, textParts, type BodyPart } from "./imap-parse.js";
-import { assertHeaderSafe, buildMessage, isAddress, makeMessageId, parseAddresses } from "./message.js";
+import { assertHeaderSafe, buildMessage, isAddress, makeMessageId, MAX_RECIPIENTS, parseAddresses } from "./message.js";
 import { ProtocolError } from "./net.js";
 import { smtpProbe, smtpSend, type SmtpRejection, type SmtpSessionConfig } from "./smtp.js";
 
@@ -106,6 +109,8 @@ const folderParam: DriverParamSpec = { name: "folder", description: "Mailbox nam
 const uidParam: DriverParamSpec = { name: "uid", description: "The message's UID in that folder, as returned by search", required: true };
 const composeParams: DriverParamSpec[] = [
   { name: "to", description: "Recipient address, or several separated by commas (a reply defaults to the original sender)", required: false },
+  { name: "cc", description: "Cc addresses, comma-separated", required: false },
+  { name: "bcc", description: "Bcc addresses, comma-separated — envelope only when sending, a Bcc header on a draft", required: false },
   { name: "subject", description: "Subject line (required unless replying; a reply defaults to Re: the original)", required: false },
   { name: "body", description: "Plain-text body", required: true },
   { name: "reply_to_uid", description: "UID of the message being replied to: sets In-Reply-To/References and the Re: subject", required: false },
@@ -312,7 +317,7 @@ const handlers: Record<string, Handler> = {
 
   async send(ctx, config, params) {
     requireBlock(config, "smtp", "send");
-    const draft = composeParams_(params);
+    const draft = composeParams_(params, ctx.pinned);
     if (draft.replyToUid !== undefined) requireBlock(config, "imap", "send with reply_to_uid", "reply_to_uid");
     if (config.save_sent) requireBlock(config, "imap", "send with save_sent", "save_sent");
 
@@ -322,8 +327,8 @@ const handlers: Record<string, Handler> = {
       // Everything that can fail is settled before a byte of mail leaves:
       // the thread lookup, the Sent-folder discovery, and the message build.
       const sentFolder = config.save_sent && imap ? await discoverFolder(imap, config.sent_folder, "\\SENT", "sent", "sent_folder") : null;
-      const { message, messageId, to } = await composeMessage(config, draft, imap);
-      await smtpSend(ctx, await smtpConfig(ctx, config), { from: config.from, to, message }).catch((e: unknown) => {
+      const { message, messageId, recipients } = await composeMessage(config, draft, imap, { bccHeader: false });
+      await smtpSend(ctx, await smtpConfig(ctx, config), { from: config.from, to: recipients, message }).catch((e: unknown) => {
         // The address and the reply line may name a pinned recipient: log them, tell the agent only the verdict.
         const rejections = e instanceof ProtocolError && e.step === "RCPT TO" ? e["rejections"] : undefined;
         if (!Array.isArray(rejections)) throw e;
@@ -346,10 +351,10 @@ const handlers: Record<string, Handler> = {
 
   async draft(ctx, config, params) {
     requireBlock(config, "imap", "draft");
-    const draft = composeParams_(params);
+    const draft = composeParams_(params, ctx.pinned);
     return await withImap(ctx, config, async (client) => {
       const folder = await discoverFolder(client, config.drafts_folder, "\\DRAFTS", "drafts", "drafts_folder");
-      const { message } = await composeMessage(config, draft, client);
+      const { message } = await composeMessage(config, draft, client, { bccHeader: true });
       const { uid } = await client.append(folder, message, ["\\Draft"]);
       return { folder, uid };
     });
@@ -577,8 +582,18 @@ function decodeQuotedPrintable(buffer: Buffer): Buffer {
 // ---------------------------------------------------------------------------
 // Composing
 
+/** The three parameters that decide where mail goes; a pin on any one of them
+ * speaks for all three (see the header). */
+const RECIPIENT_FIELDS = ["to", "cc", "bcc"] as const;
+type RecipientField = (typeof RECIPIENT_FIELDS)[number];
+
 interface Draft {
   to: string[] | undefined;
+  cc: string[];
+  bcc: string[];
+  /** True when the service pinned at least one recipient field: the message
+   *  may then go nowhere the pin did not name. */
+  recipientsLocked: boolean;
   body: string;
   subject: string | undefined;
   replyToUid: number | undefined;
@@ -589,10 +604,29 @@ interface Draft {
  * any connection is opened so an injection attempt costs nothing. Everything
  * thrown in here is about the agent's own input, so it is all agent-visible
  * — including message.ts's address and header checks. */
-function composeParams_(params: Params): Draft {
+function composeParams_(params: Params, pinned: readonly string[]): Draft {
   try {
-    const rawTo = params["to"];
-    const to = rawTo === undefined || rawTo === "" ? undefined : parseAddresses(rawTo, "to");
+    const pinnedRecipients = RECIPIENT_FIELDS.filter((field) => pinned.includes(field));
+    const recipientsLocked = pinnedRecipients.length > 0;
+    const list = (field: RecipientField): string[] | undefined => {
+      const raw = params[field];
+      if (raw === undefined || raw === "") return undefined;
+      // The host already refuses a *pinned* name; this refuses the unpinned
+      // siblings, which is what makes the pin mean "recipients are fixed".
+      if (recipientsLocked && !pinnedRecipients.includes(field)) {
+        throw new AgentError(`recipients are fixed on this service; ${field} cannot be supplied`);
+      }
+      return parseAddresses(raw, field);
+    };
+    const to = list("to");
+    const cc = list("cc") ?? [];
+    const bcc = list("bcc") ?? [];
+    // message.ts re-checks this on the headers it writes; the envelope-only
+    // bcc of a *sent* message never reaches those headers, so the one count
+    // that covers every recipient lives here.
+    if ((to?.length ?? 0) + cc.length + bcc.length > MAX_RECIPIENTS) {
+      throw new AgentError(`a message may have at most ${MAX_RECIPIENTS} recipients across to, cc, and bcc`);
+    }
     const body = requireParam(params, "body");
     if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) throw new AgentError(`body may be at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
     const rawSubject = params["subject"];
@@ -603,7 +637,7 @@ function composeParams_(params: Params): Draft {
       if (to === undefined) throw new AgentError("to is required unless reply_to_uid is given");
       if (subject === undefined) throw new AgentError("subject is required unless reply_to_uid is given");
     }
-    return { to, body, subject, replyToUid, folder: folderOf(params) };
+    return { to, cc, bcc, recipientsLocked, body, subject, replyToUid, folder: folderOf(params) };
   } catch (e) {
     throw e instanceof AgentError ? e : new AgentError(e instanceof Error ? e.message : String(e));
   }
@@ -632,7 +666,8 @@ async function composeMessage(
   config: MailConfig,
   draft: Draft,
   imap: ImapClient | null,
-): Promise<{ message: Buffer; messageId: string; to: string[] }> {
+  { bccHeader }: { bccHeader: boolean },
+): Promise<{ message: Buffer; messageId: string; recipients: string[] }> {
   let { subject, to } = draft;
   let inReplyTo: string | undefined;
   let references: string[] | undefined;
@@ -642,7 +677,12 @@ async function composeMessage(
     const original = await imap.fetchHeaders(draft.replyToUid, ["message-id", "references", "subject", "reply-to", "from"]);
     if (to === undefined) {
       // A reply goes back to whoever asked for replies — Reply-To first, else
-      // the sender. Not a guess worth making silently when neither parses.
+      // the sender. Not a guess worth making silently when neither parses,
+      // and not one to make at all on a service whose recipients are fixed:
+      // deriving `to` from an arbitrary message would be aiming by proxy.
+      if (draft.recipientsLocked) {
+        throw new AgentError("recipients are fixed on this service; a reply cannot derive `to` from the original message");
+      }
       const address = firstAddress(original["reply-to"]) ?? firstAddress(original["from"]);
       if (!address) throw new AgentError("the original message has no usable Reply-To or From address; supply `to`");
       to = [address];
@@ -667,11 +707,15 @@ async function composeMessage(
     from: config.from,
     fromName: config.name,
     to,
+    cc: draft.cc,
+    // A draft keeps Bcc as a header for the mail client to honour at send
+    // time; a message going out now carries its bcc on the envelope only.
+    ...(bccHeader ? { bcc: draft.bcc } : {}),
     subject,
     body: draft.body,
     inReplyTo,
     references,
     messageId,
   });
-  return { message, messageId, to };
+  return { message, messageId, recipients: [...to, ...draft.cc, ...draft.bcc] };
 }

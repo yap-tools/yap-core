@@ -25,7 +25,7 @@
  */
 import crypto from "node:crypto";
 
-const MAX_RECIPIENTS = 50;
+export const MAX_RECIPIENTS = 50;
 
 /** A single address, strictly enough to keep CR/LF, grouping syntax, and
  * display names out — the envelope and the header use the same bare form. */
@@ -125,6 +125,10 @@ export interface BuildMessageOptions {
   fromName?: string;
   to: string[];
   cc?: string[];
+  /** Written as a `Bcc:` header — for a *draft*, where the mail client reads
+   *  it back and strips it at send time. A sent message never carries one:
+   *  smtp.ts puts bcc recipients on the envelope only. */
+  bcc?: string[];
   subject: string;
   body: string;
   inReplyTo?: string;
@@ -138,12 +142,15 @@ export interface BuildMessageOptions {
  * dot-stuffing (smtp.ts), no trailing CRLF added.
  */
 export function buildMessage(options: BuildMessageOptions): Buffer {
-  const { from, fromName, to, cc = [], subject, body, inReplyTo, references, messageId, date } = options;
+  const { from, fromName, to, cc = [], bcc = [], subject, body, inReplyTo, references, messageId, date } = options;
   assertAddress(from, "from");
   if (!Array.isArray(to) || to.length === 0) throw new Error("the message needs at least one recipient");
   for (const address of to) assertAddress(address, "to");
   for (const address of cc) assertAddress(address, "cc");
-  if (to.length + cc.length > MAX_RECIPIENTS) throw new Error(`a message may have at most ${MAX_RECIPIENTS} recipients`);
+  for (const address of bcc) assertAddress(address, "bcc");
+  if (to.length + cc.length + bcc.length > MAX_RECIPIENTS) {
+    throw new Error(`a message may have at most ${MAX_RECIPIENTS} recipients`);
+  }
   assertHeaderSafe(subject, "subject");
   if (typeof body !== "string") throw new Error("body must be a string");
   if (fromName !== undefined) assertHeaderSafe(fromName, "name");
@@ -156,6 +163,7 @@ export function buildMessage(options: BuildMessageOptions): Buffer {
     `From: ${formatMailbox(fromName, from)}`,
     `To: ${to.join(", ")}`,
     ...(cc.length > 0 ? [`Cc: ${cc.join(", ")}`] : []),
+    ...(bcc.length > 0 ? [`Bcc: ${bcc.join(", ")}`] : []),
     `Subject: ${encodeHeaderWord(subject)}`,
     `Date: ${rfc5322Date(date ?? new Date())}`,
     `Message-ID: ${messageId ?? makeMessageId(from.slice(from.lastIndexOf("@") + 1))}`,
