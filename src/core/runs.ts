@@ -257,7 +257,7 @@ function buildParams(
   service: ServiceRow,
   action: string,
   supplied: Record<string, unknown>,
-): { params: Record<string, string>; values: Record<string, string> } {
+): { params: Record<string, string>; values: Record<string, string>; pinnedNames: string[] } {
   const { callable, pinned } = resolveActionParams(
     def,
     action,
@@ -283,7 +283,7 @@ function buildParams(
   }
   const merged = { ...values };
   for (const [name, value] of Object.entries(pinned)) merged[name] = String(value);
-  return { params: values, values: merged };
+  return { params: values, values: merged, pinnedNames: Object.keys(pinned) };
 }
 
 interface Job {
@@ -294,6 +294,7 @@ interface Job {
   def: DriverDefinition;
   action: string;
   values: Record<string, string>;
+  pinnedNames: string[];
   configEncrypted: string;
 }
 
@@ -395,6 +396,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       config: serviceConfig,
       action: job.action,
       params: job.values,
+      pinned: job.pinnedNames,
       egress,
       writer,
       signal: controller.signal,
@@ -564,7 +566,7 @@ export async function runService(
   const service = await resolveServiceRow(db, bundleId, input.service);
   const def = driverFor(env.registry, service);
   const action = resolveAction(def, service, input.action);
-  const { params, values } = buildParams(def, service, action, input.params ?? {});
+  const { params, values, pinnedNames } = buildParams(def, service, action, input.params ?? {});
 
   const runId = newId();
   const { runs } = db.tables;
@@ -593,6 +595,7 @@ export async function runService(
     def,
     action,
     values,
+    pinnedNames,
     configEncrypted: service.configEncrypted,
   }).catch(
     () => {

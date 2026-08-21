@@ -84,6 +84,14 @@ export interface RunContext {
   egress: Egress | null;
   /** Bundle-scoped writes; null when the driver declared no writes. */
   writer: BundleWriter | null;
+  /**
+   * The names of this action's parameters that the service pinned — present
+   * in `params` with their fixed values, absent from what the agent saw. A
+   * driver whose parameters overlap in meaning (several recipient fields, say)
+   * uses this to honour the pin's intent across all of them rather than only
+   * the one name the operator fixed.
+   */
+  pinned: readonly string[];
   /** Fires when the action's timeoutMs elapses. */
   signal: AbortSignal;
   log: (message: string) => void;

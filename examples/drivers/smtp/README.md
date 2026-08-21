@@ -4,7 +4,12 @@ An example [Yap](https://github.com/yap-tools/yap-core) service driver: send a p
 
 It is deliberately small and dependency-free — one `index.js`, no imports at all — because it doubles as the
 reference for what an *external* driver looks like. Everything it needs arrives by injection on the run context:
-the decrypted config, the caller's parameters, a guarded network door, an abort signal, and a log sink.
+the decrypted config, the caller's parameters, the names of the pinned ones, a guarded network door, an abort
+signal, a log sink, and `ctx.fail` for errors the agent may read.
+
+It is a reference, not the way to get email into Yap: every instance already ships the built-in `mail` driver
+(IMAP + SMTP, six actions, documented in [docs/mail-driver.md](../../../docs/mail-driver.md)), which needs no
+install. Use this folder when you are writing a driver of your own.
 
 ## Install
 
@@ -82,7 +87,10 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   and refused when the run dials it.
 - **The socket is the driver's.** `egress.dispose()` releases only the fetch pool; this driver closes its own
   socket in a `finally`, on every path.
-- **Writes.** It declares none, so `ctx.writer` is `null` and no write surface is reachable from it.
+- **Writes.** It declares none, so `ctx.writer` is `null` and no write surface is reachable from it. A driver
+  that wants to create items declares `writes: { items: true }` and gets a bundle-scoped
+  `ctx.writer.createItems(itemTypeName, values)`; `writes.files` is reserved — declaring it is refused at load
+  time, since no file surface exists on the writer yet.
 - **Abort.** Every read races `ctx.signal`, so a run that hits its budget tears the session down rather than
   holding a socket open.
 - **Injection.** `to` and `from` must be single addresses that require a dotted domain (`name@host.tld`) — a
@@ -101,6 +109,9 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   read a failure — a missing parameter, a message that is not there — it throws `ctx.fail(message, code?)`
   instead: that message (and its `invalid_request` / `not_found` code) is kept verbatim on the run row, so the
   driver is vouching that it contains no config or pinned value.
+- **Pins.** `ctx.pinned` lists the names of the parameters the service pinned for this action (their values are
+  already merged into `ctx.params`). This single-recipient driver has no use for it; the built-in `mail` driver
+  does — its `to`, `cc`, and `bcc` overlap in meaning, so a pin on any one of them makes it refuse the others.
 
 ## License
 

@@ -50,8 +50,13 @@ function config({ imap, smtp, ...extra }: { imap?: ImapMock; smtp?: MockSmtp } &
 /** Run results are driver-shaped JSON; the assertions spell out the shape. */
 type Result = any;
 
-async function run(cfg: Config, action: string, params: Record<string, string> = {}): Promise<{ result: Result; ctx: ReturnType<typeof createCtx> }> {
-  const ctx = createCtx(createFakeEgress());
+async function run(
+  cfg: Config,
+  action: string,
+  params: Record<string, string> = {},
+  { pinned = [] }: { pinned?: readonly string[] } = {},
+): Promise<{ result: Result; ctx: ReturnType<typeof createCtx> }> {
+  const ctx = createCtx(createFakeEgress(), { pinned });
   ctx.config = cfg;
   ctx.action = action;
   ctx.params = params;
@@ -407,18 +412,49 @@ describe("send", () => {
     await run(config({ smtp }), "send", { to: "a@example.com, b@example.com", subject: "Hi", body: "x" });
     expect(smtp.messages[0]!.to).toEqual(["a@example.com", "b@example.com"]);
   });
-  it("has no recipient parameter other than `to` — what a pin on `to` relies on", async () => {
-    // A second recipient-bearing parameter (cc, bcc) would let an agent aim
-    // mail past a pinned `to`, so a supplied one is an unknown parameter to
-    // the host and, if it ever reached the driver, is ignored on the wire.
-    for (const action of ["send", "draft"]) {
-      expect(driver.actions[action]!.params!.map((p) => p.name)).not.toContain("cc");
-      expect(driver.actions[action]!.params!.map((p) => p.name)).not.toContain("bcc");
-    }
+  it("sends to cc and bcc, with bcc on the envelope only", async () => {
     const smtp = await smtpMock();
-    await run(config({ smtp }), "send", { to: "ops@example.com", cc: "attacker@example.com", subject: "Hi", body: "x" });
+    await run(config({ smtp }), "send", { to: "a@example.com", cc: "c@example.com", bcc: "hidden@example.com", subject: "Hi", body: "x" });
+    const [m] = smtp.messages;
+    expect(m!.to).toEqual(["a@example.com", "c@example.com", "hidden@example.com"]);
+    expect(m!.data).toContain("Cc: c@example.com");
+    expect(m!.data).not.toContain("hidden@example.com");
+  });
+  it("caps recipients across to, cc, and bcc together", async () => {
+    const smtp = await smtpMock();
+    const many = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `${tag}${i}@example.com`).join(",");
+    await expect(
+      run(config({ smtp }), "send", { to: many(20, "a"), cc: many(20, "c"), bcc: many(11, "b"), subject: "Hi", body: "x" }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(smtp.messages).toHaveLength(0);
+    // A reply derives its `to` after the parameter count — it must still count.
+    const imap = await imapMock({ mailboxes: mailboxes() });
+    await expect(
+      run(config({ smtp, imap }), "send", { bcc: many(50, "b"), body: "x", reply_to_uid: "3" }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(smtp.messages).toHaveLength(0);
+  });
+  it("locks every recipient field once any of them is pinned", async () => {
+    // The host injects the pinned `to` and refuses a supplied `to`; the
+    // driver's part is to refuse the unpinned siblings, or a pin on `to`
+    // would fix nothing.
+    const smtp = await smtpMock();
+    for (const extra of [{ cc: "attacker@example.com" }, { bcc: "attacker@example.com" }] as Record<string, string>[]) {
+      const err = await run(config({ smtp }), "send", { to: "ops@example.com", subject: "Hi", body: "x", ...extra }, { pinned: ["to"] }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "invalid_request" });
+      expect((err as Error).message).toMatch(/recipients are fixed on this service/);
+    }
+    expect(smtp.messages).toHaveLength(0);
+    // Pinned cc, unpinned to: `to` is locked too — and a reply may not
+    // derive it from the original, which would be aiming by proxy.
+    const err = await run(config({ smtp }), "send", { to: "x@example.com", cc: "ops@example.com", subject: "Hi", body: "x" }, { pinned: ["cc"] }).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/to cannot be supplied/);
+    const imap = await imapMock({ mailboxes: mailboxes() });
+    const reply = await run(config({ smtp, imap }), "send", { cc: "ops@example.com", body: "x", reply_to_uid: "3" }, { pinned: ["cc"] }).catch((e: unknown) => e);
+    expect((reply as Error).message).toMatch(/cannot derive `to`/);
+    // The pinned shape itself still works: pinned `to`, agent supplies the rest.
+    await run(config({ smtp }), "send", { to: "ops@example.com", subject: "Hi", body: "x" }, { pinned: ["to"] });
     expect(smtp.messages[0]!.to).toEqual(["ops@example.com"]);
-    expect(smtp.messages[0]!.data).not.toContain("attacker@example.com");
   });
   it("works with a pinned-style fixed recipient and does not echo it", async () => {
     const smtp = await smtpMock();
@@ -533,6 +569,19 @@ describe("draft", () => {
   it("asks for drafts_folder when nothing matches", async () => {
     const imap = await imapMock({ mailboxes: mailboxes() });
     await expect(run(config({ imap }), "draft", params)).rejects.toThrow(/set drafts_folder/);
+  });
+  it("keeps cc and bcc on a draft as headers for the client to honour", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [] }]) });
+    await run(config({ imap }), "draft", { to: "bob@example.com", cc: "c@example.com", bcc: "hidden@example.com", subject: "P", body: "x" });
+    const raw = imap.mailbox("Drafts")!.messages[0]!.raw;
+    expect(raw).toMatch(/^Cc: c@example.com\r?$/m);
+    expect(raw).toMatch(/^Bcc: hidden@example.com\r?$/m);
+  });
+  it("does not reply-all: a reply carries no cc unless supplied", async () => {
+    const inbox = { name: "INBOX", messages: [{ uid: 9, flags: [], internalDate: new Date("2025-03-03T10:00:00Z"), raw: simpleMessage({ subject: "Ask", messageId: "<nine@example.com>", extraHeaders: "Cc: other@example.com\r\n" }) }] };
+    const imap = await imapMock({ mailboxes: [inbox, { name: "Drafts", attributes: ["\\Drafts"], messages: [] }] });
+    await run(config({ imap }), "draft", { body: "x", reply_to_uid: "9" });
+    expect(imap.mailbox("Drafts")!.messages[0]!.raw).not.toMatch(/^Cc:/m);
   });
   it("threads a drafted reply", async () => {
     const imap = await imapMock({ mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [] }]) });
