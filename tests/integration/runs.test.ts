@@ -626,10 +626,11 @@ describeEachAdapter("runs", (adapter) => {
       await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "echo" })).rejects.toThrow(
         /^service "all-stale" has no runnable actions$/,
       );
-      // A stored value that is not a JSON array is no allowlist at all.
+      // A stored value that is not a JSON array is an allowlist that cannot be
+      // read, and it fails closed rather than widening to the whole driver.
       await plantService({ name: "odd-allowlist", driver: "test", actions: "{\"echo\":1}", config: {} });
       await expect(runService(env, aliceId, bundleId, { service: "odd-allowlist" })).rejects.toThrow(
-        /echo.*sleep|sleep.*echo/s,
+        /^service "odd-allowlist" has no runnable actions$/,
       );
     });
 

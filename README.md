@@ -372,7 +372,7 @@ be the instance's externally reachable origin (https except on loopback).
   to) and is merged in by the runner only after the caller's own parameters
   have been validated, so it can never be overridden. Likewise a service can
   expose only *some* of its driver's **actions** (`actions: [...]` at
-  authoring time; omitted or `null` means all of them): a disabled action is
+  authoring time; omitted or `null` means all of them — and a stored allowlist that cannot be read fails closed): a disabled action is
   absent from every listing and unknown to the runner, so an agent cannot
   learn it exists, and when exactly one action is allowed it is the implicit
   default. Together, pins and allowlists let one driver back services of very

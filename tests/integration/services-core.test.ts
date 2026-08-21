@@ -617,11 +617,15 @@ describeEachAdapter("services core", (adapter) => {
         /^service "all-stale" has no runnable actions$/,
       );
 
-      // Not an array (or not JSON at all): treated as no allowlist.
+      // Not an array (or not JSON at all): a policy that cannot be read fails
+      // closed — nothing is allowed, never everything.
       await plant("object-allowlist", JSON.stringify({ inspect: true }));
-      expect(await names("object-allowlist")).toEqual(["inspect", "other"]);
+      expect(await names("object-allowlist")).toEqual([]);
       await plant("garbage-allowlist", "not json");
-      expect(await names("garbage-allowlist")).toEqual(["inspect", "other"]);
+      expect(await names("garbage-allowlist")).toEqual([]);
+      await expect(runService(env, aliceId, bundleId, { service: "garbage-allowlist" })).rejects.toThrow(
+        /^service "garbage-allowlist" has no runnable actions$/,
+      );
     });
   });
 

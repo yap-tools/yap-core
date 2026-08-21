@@ -856,7 +856,8 @@ export function registerRestRoutes(server: YapServer): void {
           driver: z.string().optional(),
           params: serviceParamSpecs.optional(),
           pins: servicePins.optional(),
-          actions: serviceActions.optional(),
+          // null is the same as absent: no allowlist.
+          actions: serviceActions.nullable().optional(),
           // Shaped by the driver, not by this boundary: required here, checked
           // by the driver's own validateConfig (and validateConfigOnline).
           config: z.unknown(),

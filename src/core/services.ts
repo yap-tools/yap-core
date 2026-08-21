@@ -290,8 +290,10 @@ export function resolveActionParams(
  * - A name the driver no longer declares (renamed in an upgrade) drops out;
  *   the rest of the allowlist stands. Every name stale → no actions, which the
  *   runner reports as "no runnable actions".
- * - A value that is not a JSON array (or not JSON at all) is treated as no
- *   allowlist: every action the driver declares.
+ * - A value that is not a JSON array (or not JSON at all) fails *closed*: no
+ *   actions. An allowlist is a restriction, and a restriction that cannot be
+ *   read must not widen into "everything" — only null, the explicit absence
+ *   of one, means that.
  *
  * Exported for the runner, so what an agent is shown and what it may run are
  * the same computation.
@@ -303,9 +305,9 @@ export function allowedActions(def: DriverDefinition, stored: string | null): st
   try {
     parsed = JSON.parse(stored);
   } catch {
-    return declared;
+    return [];
   }
-  if (!Array.isArray(parsed)) return declared;
+  if (!Array.isArray(parsed)) return [];
   return declared.filter((name) => parsed.includes(name));
 }
 
@@ -416,8 +418,8 @@ export async function createService(
     driver?: string;
     params?: ServiceParamSpec[];
     pins?: ServicePins;
-    /** Which of the driver's actions this service exposes; absent = all. */
-    actions?: string[];
+    /** Which of the driver's actions this service exposes; absent or null = all. */
+    actions?: string[] | null;
     config: unknown;
   },
 ): Promise<ServiceInfo> {
@@ -433,8 +435,8 @@ export async function createService(
   validateParamSpecs(params);
   const pins = (input.pins ?? {}) as Record<string, unknown>;
   validatePins(pins, declaredNames(def, params));
-  if (input.actions !== undefined) validateActions(def, input.actions);
-  const actions = input.actions === undefined ? null : JSON.stringify(input.actions);
+  if (input.actions != null) validateActions(def, input.actions);
+  const actions = input.actions == null ? null : JSON.stringify(input.actions);
   await validateDriverConfig(env, def, input.config);
   await assertNameFree(db, bundleId, name);
 
