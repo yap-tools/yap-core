@@ -591,9 +591,6 @@ interface Draft {
   to: string[] | undefined;
   cc: string[];
   bcc: string[];
-  /** True when the service pinned at least one recipient field: the message
-   *  may then go nowhere the pin did not name. */
-  recipientsLocked: boolean;
   body: string;
   subject: string | undefined;
   replyToUid: number | undefined;
@@ -623,8 +620,9 @@ function composeParams_(params: Params, pinned: readonly string[]): Draft {
     const bcc = list("bcc") ?? [];
     // message.ts re-checks this on the headers it writes; the envelope-only
     // bcc of a *sent* message never reaches those headers, so the one count
-    // that covers every recipient lives here.
-    if ((to?.length ?? 0) + cc.length + bcc.length > MAX_RECIPIENTS) {
+    // that covers every recipient lives here. A reply derives exactly one
+    // address when `to` is absent, and it counts.
+    if ((to?.length ?? 1) + cc.length + bcc.length > MAX_RECIPIENTS) {
       throw new AgentError(`a message may have at most ${MAX_RECIPIENTS} recipients across to, cc, and bcc`);
     }
     const body = requireParam(params, "body");
@@ -636,8 +634,11 @@ function composeParams_(params: Params, pinned: readonly string[]): Draft {
     if (replyToUid === undefined) {
       if (to === undefined) throw new AgentError("to is required unless reply_to_uid is given");
       if (subject === undefined) throw new AgentError("subject is required unless reply_to_uid is given");
+    } else if (to === undefined && recipientsLocked) {
+      // Deriving `to` from an arbitrary message would be aiming by proxy.
+      throw new AgentError("recipients are fixed on this service; a reply cannot derive `to` from the original message");
     }
-    return { to, cc, bcc, recipientsLocked, body, subject, replyToUid, folder: folderOf(params) };
+    return { to, cc, bcc, body, subject, replyToUid, folder: folderOf(params) };
   } catch (e) {
     throw e instanceof AgentError ? e : new AgentError(e instanceof Error ? e.message : String(e));
   }
@@ -677,12 +678,9 @@ async function composeMessage(
     const original = await imap.fetchHeaders(draft.replyToUid, ["message-id", "references", "subject", "reply-to", "from"]);
     if (to === undefined) {
       // A reply goes back to whoever asked for replies — Reply-To first, else
-      // the sender. Not a guess worth making silently when neither parses,
-      // and not one to make at all on a service whose recipients are fixed:
-      // deriving `to` from an arbitrary message would be aiming by proxy.
-      if (draft.recipientsLocked) {
-        throw new AgentError("recipients are fixed on this service; a reply cannot derive `to` from the original message");
-      }
+      // the sender. Not a guess worth making silently when neither parses.
+      // (composeParams_ already refused this on a service whose recipients
+      // are fixed.)
       const address = firstAddress(original["reply-to"]) ?? firstAddress(original["from"]);
       if (!address) throw new AgentError("the original message has no usable Reply-To or From address; supply `to`");
       to = [address];
@@ -717,12 +715,5 @@ async function composeMessage(
     references,
     messageId,
   });
-  const recipients = [...to, ...draft.cc, ...draft.bcc];
-  // Counted once more here: a reply may have just *derived* its `to`, which
-  // composeParams_ could not count, and a sent message's bcc never reaches
-  // buildMessage's own check.
-  if (recipients.length > MAX_RECIPIENTS) {
-    throw new AgentError(`a message may have at most ${MAX_RECIPIENTS} recipients across to, cc, and bcc`);
-  }
-  return { message, messageId, recipients };
+  return { message, messageId, recipients: [...to, ...draft.cc, ...draft.bcc] };
 }
