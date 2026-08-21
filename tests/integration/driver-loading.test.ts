@@ -157,7 +157,7 @@ describe("external driver loading", () => {
       config: {},
     });
     expect(res.status).toBe(400);
-    expect(res.body.error.message).toMatch(/installed: echo, http/);
+    expect(res.body.error.message).toMatch(/installed: echo, http, mail/);
   });
 });
 

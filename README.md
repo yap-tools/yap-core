@@ -359,8 +359,8 @@ be the instance's externally reachable origin (https except on loopback).
   Yap serves them behind its own signed-token endpoints. Deleting a file
   deletes the blob immediately.
 - **Services** are the bundle-owned, named capabilities agents can run — what
-  hooks used to be, generalized. A service is a **driver** (an installed,
-  in-process module — the built-in `http` driver, or one an operator adds)
+  hooks used to be, generalized. A service is a **driver** (an in-process
+  module — the built-in `http` and `mail` drivers, or one an operator adds)
   plus the **configuration** that driver needs. The two halves have very
   different visibility: an agent sees the service's id, name, description,
   driver, and the *callable* parameters of each action; the config — URL,
@@ -376,7 +376,7 @@ be the instance's externally reachable origin (https except on loopback).
   absent from every listing and unknown to the runner, so an agent cannot
   learn it exists, and when exactly one action is allowed it is the implicit
   default. Together, pins and allowlists let one driver back services of very
-  different reach — with a mail driver, say, a **reader** (`actions:
+  different reach — with the mail driver, a **reader** (`actions:
   ["folders","search","read"]`), a **triage** service
   (`["search","read","mark","draft"]` — proposes replies, a human sends
   them), and a **notifier** (`["send"]` plus `pins: {to: "ops@…"}` — can
@@ -393,6 +393,28 @@ be the instance's externally reachable origin (https except on loopback).
   inject JSON; `body_template` carries raw (unescaped) bodies for non-JSON
   formats.
 
+  The built-in **`mail` driver** gives an agent one operator-configured
+  IMAP/SMTP account through six actions — `folders`, `search`, `read`,
+  `mark`, `send`, `draft` — and the service's `actions` allowlist decides
+  which of them a given agent gets. Its config is the account: `user` plus
+  either `pass` (an app password) or an `oauth2` block (XOAUTH2 for Google
+  Workspace / Microsoft 365), `from` (and an optional display `name`), and
+  one or both of `imap: {host, port, security?}` / `smtp: {host, port,
+  security?}`; `security` defaults by port (993/465 → `tls`, 143/587 →
+  `starttls`) and is never `none` unless written. The three shapes above are
+  the intended use: a *reader* that only looks, a *triage* service whose
+  `draft` action writes a threaded reply into the account's Drafts folder
+  for a human to open, edit, and send from their own mail client (the
+  approval surface is one the user already has), and a *notifier* whose
+  pinned `to` is the **only** recipient-bearing parameter — there is no
+  `cc`/`bcc`, so the pin really does fix where mail can go. Reading never
+  marks a message seen; authoring connects and authenticates first, so a
+  wrong password fails at `POST /v1/bundles/:id/services`, not on the first
+  run; and what the agent sees of a failure is only what it can act on (a
+  bad parameter, a missing message, a refused recipient — without the
+  address). The full reference — provider matrix, limits, the failure
+  contract — is in [docs/mail-driver.md](docs/mail-driver.md).
+
   Drivers are installed **per instance**, not per bundle: `yap driver add
   <npm-spec>` packs and installs a package (a registry name, git spec,
   tarball URL, or local path — anything `npm pack` resolves) into
@@ -401,6 +423,9 @@ be the instance's externally reachable origin (https except on loopback).
   than in front of an agent. `yap driver remove <name>` uninstalls it; `yap
   driver list` shows what's installed, with its actions. Services then
   reference an installed driver by name when they're authored.
+  [`examples/drivers/smtp`](examples/drivers/smtp) is the minimal reference
+  for writing one — a send-only driver in plain JavaScript that imports
+  nothing from Yap (the built-in `mail` driver is the full-featured one).
 
   Calling a service is **always asynchronous**: `run_service` (or `POST
   /v1/services/:id/run`) inserts a `queued` run and returns as soon as either
@@ -414,9 +439,9 @@ be the instance's externally reachable origin (https except on loopback).
   land on a run record), result or error, and any items it wrote — pruned
   after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
   carries its own time budget, and only the built-in `http` driver's is
-  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); an external driver declares its
-  budget itself, which an operator can bound downward — never upward — with
-  `YAP_RUN_TIMEOUT_CAP_MS`.
+  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); the `mail` driver and any
+  external driver declare their own budgets, which an operator can bound
+  downward — never upward — with `YAP_RUN_TIMEOUT_CAP_MS`.
 
   **Trust model:** a driver is trusted code running in the server process.
   Installing one is the same class of decision as installing a plugin — it
