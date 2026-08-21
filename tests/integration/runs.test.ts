@@ -631,24 +631,12 @@ describeEachAdapter("runs", (adapter) => {
         /^service "two-of-seven" needs an action — one of: echo, boom$/,
       );
 
-      // Stale names (the driver no longer declares them) drop out; all stale
-      // is a service with nothing to run.
-      await plantService({ name: "half-stale", driver: "test", actions: JSON.stringify(["gone", "echo"]), config: {} });
-      const stale = await runService(env, aliceId, bundleId, {
-        service: "half-stale",
-        params: { message: "hi" },
-        waitMs: 5_000,
-      });
-      expect(stale.action).toBe("echo");
+      // The stale / malformed allowlist matrix lives in services-core.test.ts
+      // (allowedActions is the one computation); here it is enough that the
+      // runner's "nothing to run" verdict comes out of it.
       await plantService({ name: "all-stale", driver: "test", actions: JSON.stringify(["gone"]), config: {} });
       await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "echo" })).rejects.toThrow(
         /^service "all-stale" has no runnable actions$/,
-      );
-      // A stored value that is not a JSON array is an allowlist that cannot be
-      // read, and it fails closed rather than widening to the whole driver.
-      await plantService({ name: "odd-allowlist", driver: "test", actions: "{\"echo\":1}", config: {} });
-      await expect(runService(env, aliceId, bundleId, { service: "odd-allowlist" })).rejects.toThrow(
-        /^service "odd-allowlist" has no runnable actions$/,
       );
     });
 

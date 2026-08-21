@@ -174,18 +174,16 @@ function validatePins(pins: Record<string, unknown>, declared: string[]): void {
  * driver does not know would silently vanish from the service (see
  * `allowedActions`), and an author deserves to hear about the typo now.
  */
-function validateActions(def: DriverDefinition, actions: unknown): asserts actions is string[] {
+function validateActions(def: DriverDefinition, actions: string[]): void {
   if (!Array.isArray(actions) || actions.length === 0 || actions.some((a) => typeof a !== "string")) {
     throw invalid("service actions must be a non-empty array of action names");
   }
   const declared = Object.keys(def.actions);
-  const seen = new Set<string>();
-  for (const name of actions as string[]) {
-    if (seen.has(name)) throw invalid(`duplicate action "${name}"`);
-    seen.add(name);
-    if (!declared.includes(name)) {
-      throw invalid(`unknown action "${name}" for driver "${def.name}" (declared: ${declared.join(", ") || "none"})`);
-    }
+  const duplicate = actions.find((name, i) => actions.indexOf(name) !== i);
+  if (duplicate !== undefined) throw invalid(`duplicate action "${duplicate}"`);
+  const unknown = actions.find((name) => !declared.includes(name));
+  if (unknown !== undefined) {
+    throw invalid(`unknown action "${unknown}" for driver "${def.name}" (declared: ${declared.join(", ") || "none"})`);
   }
 }
 
@@ -503,9 +501,9 @@ export async function updateService(
   // Re-checked whenever either side moves: narrowing params can orphan a pin
   // that was legal when it was set.
   if (patch.params !== undefined || patch.pins !== undefined) validatePins(pins, declaredNames(def!, params));
-  if (patch.actions !== undefined && patch.actions !== null) validateActions(def!, patch.actions);
-  const actions: string | null =
-    patch.actions === undefined ? row.actions : patch.actions === null ? null : JSON.stringify(patch.actions);
+  // Mirrors pins: an array replaces, null clears, absent keeps the row's.
+  if (Array.isArray(patch.actions)) validateActions(def!, patch.actions);
+  const actions = patch.actions === undefined ? row.actions : patch.actions && JSON.stringify(patch.actions);
   if (patch.config !== undefined) await validateDriverConfig(env, def!, patch.config);
   if (name !== undefined) await assertNameFree(db, row.bundleId, name, serviceId);
 

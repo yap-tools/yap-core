@@ -51,7 +51,7 @@ import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { createEgress, type Egress } from "./drivers/egress.js";
 import type { DriverRegistry } from "./drivers/registry.js";
-import type { DriverDefinition } from "./drivers/types.js";
+import type { DriverDefinition, RunContext } from "./drivers/types.js";
 import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
 import {
@@ -322,6 +322,13 @@ type Outcome = Ending & { writes: unknown[]; logs: string[] };
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
 /** Turns whatever the driver threw into one agent-safe line plus its code. */
+/**
+ * The one sanctioned way for an out-of-tree driver to put words on the row:
+ * `failureOf` below keeps a YapError verbatim, and this is how a driver that
+ * imports nothing from Yap makes one.
+ */
+const driverFail: RunContext["fail"] = (message, code = "invalid_request") => new YapError(code, message);
+
 function failureOf(
   err: unknown,
   timedOut: boolean,
@@ -389,10 +396,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       writer,
       signal: controller.signal,
       log,
-      // The one sanctioned way for an out-of-tree driver to put words on the
-      // row: `failureOf` keeps a YapError verbatim, and this is how a driver
-      // that imports nothing from Yap makes one.
-      fail: (message, code = "invalid_request") => new YapError(code, message),
+      fail: driverFail,
     });
     // Losing the race orphans this promise while the driver is still working,
     // so neuter it up front: a late settlement is discarded (the row is already
