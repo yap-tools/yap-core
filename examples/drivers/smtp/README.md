@@ -97,7 +97,10 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   read as the end of `DATA`.
 - **Errors.** A rejected SMTP reply becomes a plain `Error` carrying the server's reply line. Yap collapses a
   non-sanitized driver error into a flat `run failed` for the agent (a reply line can echo an address), so the
-  transcript is written to `ctx.log` instead, where it stays inside the run.
+  transcript is written to `ctx.log` instead, where it stays inside the run. When a driver *wants* the agent to
+  read a failure — a missing parameter, a message that is not there — it throws `ctx.fail(message, code?)`
+  instead: that message (and its `invalid_request` / `not_found` code) is kept verbatim on the run row, so the
+  driver is vouching that it contains no config or pinned value.
 
 ## License
 

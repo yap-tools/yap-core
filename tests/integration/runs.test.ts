@@ -86,6 +86,11 @@ const testDriver: DriverDefinition = {
       params: [],
       timeoutMs: 5_000,
     },
+    missing: {
+      description: "Fails through ctx.fail — the agent-safe way.",
+      params: [],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     // Deliberately signal-deaf: the runner's deadline, not the driver, has to
@@ -116,6 +121,7 @@ const testDriver: DriverDefinition = {
       ctx.log("about to explode");
       throw new Error("secret internal detail");
     }
+    if (ctx.action === "missing") throw ctx.fail("message 42 is not in INBOX", "not_found");
     return { echoed: ctx.params, config: ctx.config };
   },
 };
@@ -455,6 +461,18 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.status).toBe("failed");
       expect(run.error).toBe("run failed");
       expect(JSON.stringify(run)).not.toContain("secret internal detail");
+    });
+
+    it("keeps a ctx.fail message and code verbatim on the row", async () => {
+      await plantService({ name: "honest-failer", driver: "test", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "honest-failer",
+        action: "missing",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("message 42 is not in INBOX");
+      expect(run.errorCode).toBe("not_found");
     });
 
     it("writes a failed run's detail to the operator log and nothing but the flat line to the row", async () => {

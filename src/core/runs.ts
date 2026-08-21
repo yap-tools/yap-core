@@ -389,6 +389,10 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       writer,
       signal: controller.signal,
       log,
+      // The one sanctioned way for an out-of-tree driver to put words on the
+      // row: `failureOf` keeps a YapError verbatim, and this is how a driver
+      // that imports nothing from Yap makes one.
+      fail: (message, code = "invalid_request") => new YapError(code, message),
     });
     // Losing the race orphans this promise while the driver is still working,
     // so neuter it up front: a late settlement is discarded (the row is already
