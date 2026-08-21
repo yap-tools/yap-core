@@ -427,6 +427,12 @@ describe("send", () => {
       run(config({ smtp }), "send", { to: many(20, "a"), cc: many(20, "c"), bcc: many(11, "b"), subject: "Hi", body: "x" }),
     ).rejects.toMatchObject({ code: "invalid_request" });
     expect(smtp.messages).toHaveLength(0);
+    // A reply derives its `to` after the parameter count — it must still count.
+    const imap = await imapMock({ mailboxes: mailboxes() });
+    await expect(
+      run(config({ smtp, imap }), "send", { bcc: many(50, "b"), body: "x", reply_to_uid: "3" }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(smtp.messages).toHaveLength(0);
   });
   it("locks every recipient field once any of them is pinned", async () => {
     // The host injects the pinned `to` and refuses a supplied `to`; the

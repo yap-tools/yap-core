@@ -717,5 +717,12 @@ async function composeMessage(
     references,
     messageId,
   });
-  return { message, messageId, recipients: [...to, ...draft.cc, ...draft.bcc] };
+  const recipients = [...to, ...draft.cc, ...draft.bcc];
+  // Counted once more here: a reply may have just *derived* its `to`, which
+  // composeParams_ could not count, and a sent message's bcc never reaches
+  // buildMessage's own check.
+  if (recipients.length > MAX_RECIPIENTS) {
+    throw new AgentError(`a message may have at most ${MAX_RECIPIENTS} recipients across to, cc, and bcc`);
+  }
+  return { message, messageId, recipients };
 }
