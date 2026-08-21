@@ -179,6 +179,7 @@ local dev.
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | Upload size cap |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` | 600 / 14400 / 600 | Link/token lifetimes |
+| `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
 | `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
 | `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal service targets; keeps its pre-services name — it IS the knob |
 | `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
@@ -406,8 +407,9 @@ be the instance's externally reachable origin (https except on loopback).
   `draft` action writes a threaded reply into the account's Drafts folder
   for a human to open, edit, and send from their own mail client (the
   approval surface is one the user already has), and a *notifier* whose
-  pinned `to` is the **only** recipient-bearing parameter — there is no
-  `cc`/`bcc`, so the pin really does fix where mail can go. Reading never
+  pinned `to` fixes where mail can go: `to`, `cc`, and `bcc` are treated as
+  one, so pinning any of them locks the others (the driver learns which were
+  pinned through `ctx.pinned`). Reading never
   marks a message seen; authoring connects and authenticates first, so a
   wrong password fails at `POST /v1/bundles/:id/services`, not on the first
   run; and what the agent sees of a failure is only what it can act on (a
