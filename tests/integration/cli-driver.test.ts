@@ -74,7 +74,7 @@ describe("yap driver", () => {
       const list = await yap(["driver", "list"], dir);
       expect(list.code).toBe(0);
       expect(list.stdout).toContain("echo");
-      expect(list.stdout).toMatch(/echo\s+1\s+echo\s+/);
+      expect(list.stdout).toMatch(/echo\s+1\s+echo, shout\s+/);
 
       const remove = await yap(["driver", "remove", "echo"], dir);
       expect(remove.code).toBe(0);

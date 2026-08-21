@@ -188,6 +188,8 @@ describeEachAdapter("runs", (adapter) => {
     driver?: string;
     params?: Array<{ name: string; required?: boolean }>;
     pins?: Record<string, string>;
+    /** Stored verbatim: a test can plant a stale or malformed allowlist. */
+    actions?: string | null;
     config: unknown;
     bundle?: string;
   }): Promise<string> => {
@@ -202,6 +204,7 @@ describeEachAdapter("runs", (adapter) => {
       driver: input.driver ?? "http",
       params: JSON.stringify(input.params ?? []),
       pins: JSON.stringify(input.pins ?? {}),
+      actions: input.actions ?? null,
       configEncrypted: encryptSecret(JSON.stringify(input.config), app.config.masterKey),
       createdAt: now,
       updatedAt: now,
@@ -587,6 +590,46 @@ describeEachAdapter("runs", (adapter) => {
     it("rejects an unknown action", async () => {
       await expect(runService(env, aliceId, bundleId, { service: "echoer", action: "nope" })).rejects.toThrow(
         /unknown action "nope"/,
+      );
+    });
+
+    it("resolves over the service's allowlist, not the driver's full action set", async () => {
+      await plantService({ name: "echo-only", driver: "test", actions: JSON.stringify(["echo"]), config: {} });
+      // The driver has seven actions; this service has one, so it is implicit.
+      const run = await runService(env, aliceId, bundleId, {
+        service: "echo-only",
+        params: { message: "hi" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.action).toBe("echo");
+      // A disabled action is unknown, and the hint never names it.
+      await expect(runService(env, aliceId, bundleId, { service: "echo-only", action: "sleep" })).rejects.toThrow(
+        /^unknown action "sleep" for service "echo-only" \(available: echo\)$/,
+      );
+
+      await plantService({ name: "two-of-seven", driver: "test", actions: JSON.stringify(["echo", "boom"]), config: {} });
+      await expect(runService(env, aliceId, bundleId, { service: "two-of-seven" })).rejects.toThrow(
+        /^service "two-of-seven" needs an action — one of: echo, boom$/,
+      );
+
+      // Stale names (the driver no longer declares them) drop out; all stale
+      // is a service with nothing to run.
+      await plantService({ name: "half-stale", driver: "test", actions: JSON.stringify(["gone", "echo"]), config: {} });
+      const stale = await runService(env, aliceId, bundleId, {
+        service: "half-stale",
+        params: { message: "hi" },
+        waitMs: 5_000,
+      });
+      expect(stale.action).toBe("echo");
+      await plantService({ name: "all-stale", driver: "test", actions: JSON.stringify(["gone"]), config: {} });
+      await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "echo" })).rejects.toThrow(
+        /^service "all-stale" has no runnable actions$/,
+      );
+      // A stored value that is not a JSON array is no allowlist at all.
+      await plantService({ name: "odd-allowlist", driver: "test", actions: "{\"echo\":1}", config: {} });
+      await expect(runService(env, aliceId, bundleId, { service: "odd-allowlist" })).rejects.toThrow(
+        /echo.*sleep|sleep.*echo/s,
       );
     });
 

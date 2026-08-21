@@ -32,8 +32,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   configuration that driver needs. You see the service's id, name, description,
   driver, and the declared parameters of each of its actions — never its
   destination, headers, or secrets, and never a parameter its operator pinned
-  to a fixed value. Services are authored over REST only (edit_services);
-  agents run them.
+  to a fixed value. The actions listed are the only ones the service has: an
+  operator may expose just some of a driver's actions, and a service with one
+  action needs no "action" argument. Services are authored over REST only
+  (edit_services); agents run them.
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the

@@ -56,6 +56,7 @@ import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
 import {
   createBundleWriter,
+  allowedActions,
   resolveActionParams,
   type ScopedBundleWriter,
   type ServiceParamSpec,
@@ -115,6 +116,7 @@ export interface ServiceRow {
   driver: string;
   params: string;
   pins: string;
+  actions: string | null;
   configEncrypted: string;
 }
 
@@ -211,9 +213,16 @@ function driverFor(registry: DriverRegistry, service: ServiceRow): DriverDefinit
   return registry.get(service.driver);
 }
 
-/** Picks the action to run: an explicit name, or the only one there is. */
-function resolveAction(def: DriverDefinition, serviceName: string, requested?: string): string {
-  const names = Object.keys(def.actions);
+/**
+ * Picks the action to run: an explicit name, or the only one there is. "There
+ * is" means the service's allowed set (`allowedActions` — the same computation
+ * the listing runs), not the driver's: a disabled action is unknown here, and
+ * the hint lists only what the agent was shown. A service whose whole
+ * allowlist has gone stale has nothing to run, and says so.
+ */
+function resolveAction(def: DriverDefinition, service: ServiceRow, requested?: string): string {
+  const serviceName = service.name;
+  const names = allowedActions(def, service.actions);
   if (names.length === 0) throw invalid(`service "${serviceName}" has no runnable actions`);
   const wanted = requested?.trim();
   if (wanted) {
@@ -543,7 +552,7 @@ export async function runService(
 
   const service = await resolveServiceRow(db, bundleId, input.service);
   const def = driverFor(env.registry, service);
-  const action = resolveAction(def, service.name, input.action);
+  const action = resolveAction(def, service, input.action);
   const { params, values } = buildParams(def, service, action, input.params ?? {});
 
   const runId = newId();

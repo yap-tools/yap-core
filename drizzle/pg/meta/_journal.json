@@ -50,6 +50,13 @@
       "when": 1787171265477,
       "tag": "0006_volatile_thanos",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787500020000,
+      "tag": "0007_quiet_allowlist",
+      "breakpoints": true
     }
   ]
 }

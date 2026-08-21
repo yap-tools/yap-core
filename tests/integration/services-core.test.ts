@@ -34,7 +34,7 @@ import {
   updateService,
   type ServiceEnv,
 } from "../../src/core/services.js";
-import { decryptSecret } from "../../src/crypto.js";
+import { decryptSecret, encryptSecret } from "../../src/crypto.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
@@ -451,6 +451,177 @@ describeEachAdapter("services core", (adapter) => {
       await expect(
         runService(env, aliceId, bundleId, { service: svc.id, action: "other", params: { note: "mine" } }),
       ).rejects.toThrow(/unknown parameter "note"/);
+    });
+  });
+
+  describe("action allowlists", () => {
+    it("creates a service exposing only the allowed actions, in the driver's order", async () => {
+      const svc = await createService(env, aliceId, bundleId, {
+        name: "read-only",
+        driver: "plain",
+        params: [{ name: "shared" }],
+        actions: ["other"],
+        config: {},
+      });
+      expect(svc.actions.map((a) => a.name)).toEqual(["other"]);
+      // The listing agrees with the create response, and the driver's full
+      // action set is nowhere in it.
+      const listed = (await listServices(env, aliceId, bundleId)).find((s) => s.id === svc.id)!;
+      expect(listed.actions.map((a) => a.name)).toEqual(["other"]);
+      expect(JSON.stringify(listed)).not.toContain("inspect");
+    });
+
+    it("rejects an allowlist that is empty, repeats itself, or names an unknown action", async () => {
+      const base = { name: "bad-allowlist", driver: "plain", config: {} };
+      await expect(createService(env, aliceId, bundleId, { ...base, actions: [] })).rejects.toThrow(
+        /service actions must be a non-empty array of action names/,
+      );
+      await expect(
+        createService(env, aliceId, bundleId, { ...base, actions: ["inspect", "inspect"] }),
+      ).rejects.toThrow(/duplicate action "inspect"/);
+      await expect(createService(env, aliceId, bundleId, { ...base, actions: ["inspect", "nope"] })).rejects.toThrow(
+        /unknown action "nope" for driver "plain" \(declared: inspect, other\)/,
+      );
+      await expect(
+        createService(env, aliceId, bundleId, { ...base, actions: [7] as unknown as string[] }),
+      ).rejects.toThrow(/service actions must be a non-empty array of action names/);
+      await expect(
+        createService(env, aliceId, bundleId, { ...base, actions: "inspect" as unknown as string[] }),
+      ).rejects.toThrow(/service actions must be a non-empty array of action names/);
+    });
+
+    it("updates set, replace, and clear the allowlist", async () => {
+      const svc = await createService(env, aliceId, bundleId, { name: "narrowing", driver: "plain", config: {} });
+      expect(svc.actions.map((a) => a.name)).toEqual(["inspect", "other"]);
+
+      const narrowed = await updateService(env, aliceId, svc.id, { actions: ["inspect"] });
+      expect(narrowed.actions.map((a) => a.name)).toEqual(["inspect"]);
+      expect((await listServicesUnchecked(env, bundleId)).find((s) => s.id === svc.id)!.actions.map((a) => a.name)).toEqual(
+        ["inspect"],
+      );
+
+      await expect(updateService(env, aliceId, svc.id, { actions: ["nope"] })).rejects.toThrow(/unknown action "nope"/);
+      await expect(updateService(env, aliceId, svc.id, { actions: [] })).rejects.toThrow(/non-empty array/);
+      // A rejected patch leaves the stored allowlist alone.
+      expect((await listServicesUnchecked(env, bundleId)).find((s) => s.id === svc.id)!.actions.map((a) => a.name)).toEqual(
+        ["inspect"],
+      );
+
+      const cleared = await updateService(env, aliceId, svc.id, { actions: null });
+      expect(cleared.actions.map((a) => a.name)).toEqual(["inspect", "other"]);
+      expect((await listServicesUnchecked(env, bundleId)).find((s) => s.id === svc.id)!.actions.map((a) => a.name)).toEqual(
+        ["inspect", "other"],
+      );
+    });
+
+    it("pins are validated against the driver's full action set, not the allowlist", async () => {
+      // `note` is declared only by `inspect`, which this service disables. The
+      // pin is legal (inert, like any pin on a parameter another action owns)
+      // and does not resurface the disabled action.
+      const svc = await createService(env, aliceId, bundleId, {
+        name: "pin-past-allowlist",
+        driver: "plain",
+        params: [{ name: "shared" }],
+        pins: { note: "fixed" },
+        actions: ["other"],
+        config: {},
+      });
+      expect(svc.actions).toEqual([
+        { name: "other", description: plainDriver.actions.other!.description, params: [{ name: "shared" }] },
+      ]);
+    });
+
+    it("runs: a disabled action is unknown, and a lone allowed action is the default", async () => {
+      const svc = await createService(env, aliceId, bundleId, {
+        name: "only-other",
+        driver: "plain",
+        params: [{ name: "shared" }],
+        actions: ["other"],
+        config: {},
+      });
+      // The driver has two actions, but this service has one — so it is the
+      // implicit default, exactly as if the driver declared only it.
+      const run = await runService(env, aliceId, bundleId, {
+        service: svc.id,
+        params: { shared: "v" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.action).toBe("other");
+
+      // The disabled action reads as unknown, and the "available" list never
+      // mentions it.
+      await expect(runService(env, aliceId, bundleId, { service: svc.id, action: "inspect" })).rejects.toThrow(
+        /^unknown action "inspect" for service "only-other" \(available: other\)$/,
+      );
+    });
+
+    it("needs the driver installed to set an allowlist", async () => {
+      const { services } = app.db.tables;
+      await app.db.client.insert(services).values({
+        id: "svc-no-driver",
+        bundleId,
+        name: "driverless",
+        description: "",
+        driver: "gone",
+        params: "[]",
+        pins: "{}",
+        configEncrypted: "v1.x.y.z",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      await expect(updateService(env, aliceId, "svc-no-driver", { actions: ["anything"] })).rejects.toThrow(
+        /"gone" driver, which is not installed/,
+      );
+      // Clearing needs it too: null is a change to the driver-vouched half.
+      await expect(updateService(env, aliceId, "svc-no-driver", { actions: null })).rejects.toThrow(
+        /"gone" driver, which is not installed/,
+      );
+      await deleteService(env, aliceId, "svc-no-driver");
+    });
+
+    it("tolerates a stale or malformed stored allowlist", async () => {
+      const { services } = app.db.tables;
+      const plant = async (id: string, actions: string | null) => {
+        await app.db.client.insert(services).values({
+          id,
+          bundleId,
+          name: id,
+          description: "",
+          driver: "plain",
+          params: JSON.stringify([{ name: "shared" }]),
+          pins: "{}",
+          actions,
+          configEncrypted: encryptSecret(JSON.stringify({}), app.config.masterKey),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      };
+      const names = async (id: string) =>
+        (await listServicesUnchecked(env, bundleId)).find((s) => s.id === id)!.actions.map((a) => a.name);
+
+      // A name the driver no longer declares (it was renamed in an upgrade,
+      // say) simply drops out; the rest of the allowlist stands.
+      await plant("partly-stale", JSON.stringify(["renamed-away", "other"]));
+      expect(await names("partly-stale")).toEqual(["other"]);
+      const run = await runService(env, aliceId, bundleId, { service: "partly-stale", params: {}, waitMs: 5_000 });
+      expect(run.action).toBe("other");
+
+      // Every name stale: nothing to list, nothing to run — with a reason.
+      await plant("all-stale", JSON.stringify(["renamed-away"]));
+      expect(await names("all-stale")).toEqual([]);
+      await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "inspect" })).rejects.toThrow(
+        /^service "all-stale" has no runnable actions$/,
+      );
+      await expect(runService(env, aliceId, bundleId, { service: "all-stale" })).rejects.toThrow(
+        /^service "all-stale" has no runnable actions$/,
+      );
+
+      // Not an array (or not JSON at all): treated as no allowlist.
+      await plant("object-allowlist", JSON.stringify({ inspect: true }));
+      expect(await names("object-allowlist")).toEqual(["inspect", "other"]);
+      await plant("garbage-allowlist", "not json");
+      expect(await names("garbage-allowlist")).toEqual(["inspect", "other"]);
     });
   });
 

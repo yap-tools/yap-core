@@ -370,7 +370,17 @@ be the instance's externally reachable origin (https except on loopback).
   fixed value at authoring time: a pinned name disappears from the listing
   entirely (an agent cannot even learn it exists, let alone what it's fixed
   to) and is merged in by the runner only after the caller's own parameters
-  have been validated, so it can never be overridden.
+  have been validated, so it can never be overridden. Likewise a service can
+  expose only *some* of its driver's **actions** (`actions: [...]` at
+  authoring time; omitted or `null` means all of them): a disabled action is
+  absent from every listing and unknown to the runner, so an agent cannot
+  learn it exists, and when exactly one action is allowed it is the implicit
+  default. Together, pins and allowlists let one driver back services of very
+  different reach — with a mail driver, say, a **reader** (`actions:
+  ["folders","search","read"]`), a **triage** service
+  (`["search","read","mark","draft"]` — proposes replies, a human sends
+  them), and a **notifier** (`["send"]` plus `pins: {to: "ops@…"}` — can
+  send, cannot aim).
 
   The built-in **`http` driver** — what every hook was, and still the default
   when a service names no driver — fires an outbound HTTP request with the

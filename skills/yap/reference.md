@@ -89,9 +89,9 @@ Then: `GET /v1/bundles/:id/files` (list), `GET /v1/files/:id/link` (mint expirin
 ### Services & runs
 | Method & path | Notes |
 |---|---|
-| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (each with its callable — unpinned — params); config never returned |
-| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "config"}`; `driver` defaults to `http`; config is driver-shaped and encrypted at rest |
-| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "config"?}` (`pins: null` clears the pin set) |
+| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (only the service's *allowed* actions, each with its callable — unpinned — params); config never returned |
+| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "actions"?, "config"}`; `driver` defaults to `http`; `actions` is an allowlist of the driver's action names (omit = all; one allowed action becomes the implicit default); config is driver-shaped and encrypted at rest |
+| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "actions"?, "config"?}` (`pins: null` clears the pin set; `actions: null` clears the allowlist) |
 | `POST /v1/services/:id/run` | `{"action"?, "params"?, "wait_ms"?}` → a run record; `wait_ms` clamped to `YAP_RUN_WAIT_CAP_MS` (25000 default) |
 | `GET /v1/runs/:id` | one run: status (`queued\|running\|succeeded\|failed`), the caller's params, result/error, items it wrote |
 | `GET /v1/bundles/:id/runs` | `?service=` filter, `cursor`, `limit`; newest first |

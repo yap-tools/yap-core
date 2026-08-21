@@ -13,6 +13,12 @@
  *   every listing (an agent cannot even learn a pin's name is fixed by probing
  *   the listing) and merged in by the runner after the caller's half has been
  *   validated.
+ * - An action allowlist narrows the driver: a service may expose some of its
+ *   driver's actions rather than all of them (a read-only mail service, say).
+ *   A disabled action is absent from every listing and unknown to the runner
+ *   — an agent cannot learn it exists. Null means no allowlist: every action
+ *   the driver declares, which is what every service authored before the
+ *   column existed means.
  *
  * Authoring is privileged (`edit_services`) and, in practice, REST-only —
  * agents run services but never define them. That asymmetry is what lets the
@@ -29,6 +35,11 @@
  * - A pin must name a declared parameter and hold a scalar — the runner
  *   `String()`s pinned values blindly, so an object pin would reach a driver
  *   as "[object Object]".
+ * - An allowlist must name actions the driver declares, each once, and at
+ *   least one of them — a service with nothing to run is not something an
+ *   author means to create. (A stored allowlist can still go stale when a
+ *   driver upgrade renames an action; `allowedActions` is lenient about that
+ *   where authoring is strict.)
  * - `validateConfig` is the driver's own offline check; `validateConfigOnline`
  *   is the network-touching one (the http driver's SSRF pre-check lives
  *   there). Both run at create, and again whenever the config changes. The
@@ -105,6 +116,8 @@ interface ServiceRow {
   driver: string;
   params: string;
   pins: string;
+  /** JSON array of action names, or null for every action the driver declares. */
+  actions: string | null;
 }
 
 // ---- Validation -------------------------------------------------------------
@@ -151,6 +164,27 @@ function validatePins(pins: Record<string, unknown>, declared: string[]): void {
     // reach the driver mangled rather than rejected.
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
       throw invalid(`pinned parameter "${name}" must be a string, number, or boolean`);
+    }
+  }
+}
+
+/**
+ * The authoring-time rule for an allowlist: a non-empty array of distinct
+ * names, each an action the driver declares. Strict on purpose — a name the
+ * driver does not know would silently vanish from the service (see
+ * `allowedActions`), and an author deserves to hear about the typo now.
+ */
+function validateActions(def: DriverDefinition, actions: unknown): asserts actions is string[] {
+  if (!Array.isArray(actions) || actions.length === 0 || actions.some((a) => typeof a !== "string")) {
+    throw invalid("service actions must be a non-empty array of action names");
+  }
+  const declared = Object.keys(def.actions);
+  const seen = new Set<string>();
+  for (const name of actions as string[]) {
+    if (seen.has(name)) throw invalid(`duplicate action "${name}"`);
+    seen.add(name);
+    if (!declared.includes(name)) {
+      throw invalid(`unknown action "${name}" for driver "${def.name}" (declared: ${declared.join(", ") || "none"})`);
     }
   }
 }
@@ -247,8 +281,37 @@ export function resolveActionParams(
 }
 
 /**
- * The effective, agent-visible action view: every action with its callable
- * parameters.
+ * The actions a service actually has: its stored allowlist intersected with
+ * what the driver declares, in the driver's order. This is the one place the
+ * stored column is read, and it is deliberately lenient where `validateActions`
+ * is strict — the listing and the runner both go through it, and neither may
+ * fall over on a row that was valid when it was written:
+ *
+ * - A name the driver no longer declares (renamed in an upgrade) drops out;
+ *   the rest of the allowlist stands. Every name stale → no actions, which the
+ *   runner reports as "no runnable actions".
+ * - A value that is not a JSON array (or not JSON at all) is treated as no
+ *   allowlist: every action the driver declares.
+ *
+ * Exported for the runner, so what an agent is shown and what it may run are
+ * the same computation.
+ */
+export function allowedActions(def: DriverDefinition, stored: string | null): string[] {
+  const declared = Object.keys(def.actions);
+  if (stored === null) return declared;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    return declared;
+  }
+  if (!Array.isArray(parsed)) return declared;
+  return declared.filter((name) => parsed.includes(name));
+}
+
+/**
+ * The effective, agent-visible action view: every allowed action with its
+ * callable parameters.
  *
  * A service whose driver is not installed lists with no actions rather than
  * failing the whole listing: the row is real, an operator needs to see it, and
@@ -258,11 +321,12 @@ function effectiveActions(
   def: DriverDefinition | undefined,
   params: ServiceParamSpec[],
   pins: ServicePins,
+  actions: string | null,
 ): ServiceActionInfo[] {
   if (!def) return [];
-  return Object.entries(def.actions).map(([name, action]) => ({
+  return allowedActions(def, actions).map((name) => ({
     name,
-    description: action.description,
+    description: def.actions[name]!.description,
     params: resolveActionParams(def, name, params, pins).callable,
   }));
 }
@@ -276,7 +340,7 @@ function toInfo(registry: DriverRegistry, row: ServiceRow): ServiceInfo {
     name: row.name,
     description: row.description,
     driver: row.driver,
-    actions: effectiveActions(def, params, pins),
+    actions: effectiveActions(def, params, pins, row.actions),
   };
 }
 
@@ -292,6 +356,7 @@ export async function listServicesUnchecked(env: ServiceEnv, bundleId: string): 
       driver: services.driver,
       params: services.params,
       pins: services.pins,
+      actions: services.actions,
     })
     .from(services)
     .where(eq(services.bundleId, bundleId))
@@ -351,6 +416,8 @@ export async function createService(
     driver?: string;
     params?: ServiceParamSpec[];
     pins?: ServicePins;
+    /** Which of the driver's actions this service exposes; absent = all. */
+    actions?: string[];
     config: unknown;
   },
 ): Promise<ServiceInfo> {
@@ -366,6 +433,8 @@ export async function createService(
   validateParamSpecs(params);
   const pins = (input.pins ?? {}) as Record<string, unknown>;
   validatePins(pins, declaredNames(def, params));
+  if (input.actions !== undefined) validateActions(def, input.actions);
+  const actions = input.actions === undefined ? null : JSON.stringify(input.actions);
   await validateDriverConfig(env, def, input.config);
   await assertNameFree(db, bundleId, name);
 
@@ -381,11 +450,12 @@ export async function createService(
     driver,
     params: JSON.stringify(params),
     pins: JSON.stringify(pins),
+    actions,
     configEncrypted: encryptSecret(JSON.stringify(input.config), env.config.masterKey),
     createdAt: now,
     updatedAt: now,
   });
-  return { id, name, description, driver, actions: effectiveActions(def, params, pins as ServicePins) };
+  return { id, name, description, driver, actions: effectiveActions(def, params, pins as ServicePins, actions) };
 }
 
 export async function updateService(
@@ -398,6 +468,8 @@ export async function updateService(
     params?: ServiceParamSpec[];
     /** A record replaces the pin set wholesale; null clears it. */
     pins?: ServicePins | null;
+    /** An array replaces the allowlist wholesale; null clears it (all actions). */
+    actions?: string[] | null;
     config?: unknown;
   },
 ): Promise<ServiceInfo> {
@@ -410,7 +482,8 @@ export async function updateService(
   // re-describing such a service still works; anything the driver would have
   // to vouch for does not.
   const def = env.registry.has(row.driver) ? env.registry.get(row.driver) : undefined;
-  const needsDriver = patch.params !== undefined || patch.pins !== undefined || patch.config !== undefined;
+  const needsDriver =
+    patch.params !== undefined || patch.pins !== undefined || patch.actions !== undefined || patch.config !== undefined;
   if (needsDriver && !def) {
     throw invalid(
       `service "${row.name}" needs the "${row.driver}" driver, which is not installed on this server; ` +
@@ -428,6 +501,9 @@ export async function updateService(
   // Re-checked whenever either side moves: narrowing params can orphan a pin
   // that was legal when it was set.
   if (patch.params !== undefined || patch.pins !== undefined) validatePins(pins, declaredNames(def!, params));
+  if (patch.actions !== undefined && patch.actions !== null) validateActions(def!, patch.actions);
+  const actions: string | null =
+    patch.actions === undefined ? row.actions : patch.actions === null ? null : JSON.stringify(patch.actions);
   if (patch.config !== undefined) await validateDriverConfig(env, def!, patch.config);
   if (name !== undefined) await assertNameFree(db, row.bundleId, name, serviceId);
 
@@ -439,6 +515,7 @@ export async function updateService(
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       ...(patch.params !== undefined ? { params: JSON.stringify(params) } : {}),
       ...(patch.pins !== undefined ? { pins: JSON.stringify(pins) } : {}),
+      ...(patch.actions !== undefined ? { actions } : {}),
       ...(patch.config !== undefined
         ? { configEncrypted: encryptSecret(JSON.stringify(patch.config), env.config.masterKey) }
         : {}),
@@ -447,13 +524,14 @@ export async function updateService(
     .where(eq(services.id, serviceId));
   // Built from the row plus the patch rather than read back: every field of the
   // view is already resolved above — the effective actions from the *post*-patch
-  // params and pins — so a second SELECT would only re-derive what is in hand.
+  // params, pins, and allowlist — so a second SELECT would only re-derive what
+  // is in hand.
   return {
     id: row.id,
     name: name ?? row.name,
     description: patch.description ?? row.description,
     driver: row.driver,
-    actions: effectiveActions(def, params, pins as ServicePins),
+    actions: effectiveActions(def, params, pins as ServicePins, actions),
   };
 }
 

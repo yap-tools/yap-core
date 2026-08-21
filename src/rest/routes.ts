@@ -842,6 +842,8 @@ export function registerRestRoutes(server: YapServer): void {
   // Pins are configuration, not parameters, and the runner String()s them
   // blindly — so the boundary accepts only the scalars core validates for.
   const servicePins = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]));
+  // Shape only; the names are checked against the driver in core.
+  const serviceActions = z.array(z.string());
 
   app.post(
     "/v1/bundles/:id/services",
@@ -854,6 +856,7 @@ export function registerRestRoutes(server: YapServer): void {
           driver: z.string().optional(),
           params: serviceParamSpecs.optional(),
           pins: servicePins.optional(),
+          actions: serviceActions.optional(),
           // Shaped by the driver, not by this boundary: required here, checked
           // by the driver's own validateConfig (and validateConfigOnline).
           config: z.unknown(),
@@ -883,6 +886,8 @@ export function registerRestRoutes(server: YapServer): void {
           params: serviceParamSpecs.optional(),
           // null clears the pin set; absent leaves it alone.
           pins: servicePins.nullable().optional(),
+          // null clears the allowlist (every driver action); absent leaves it alone.
+          actions: serviceActions.nullable().optional(),
           config: z.unknown().optional(),
         }),
         await jsonBody(c),
