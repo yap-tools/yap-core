@@ -3,7 +3,7 @@
 export const HELP_TEXT = `# Yap reference
 
 Yap stores navigable context. The tree: context (root) → spaces → bundles.
-A bundle holds docs, item-types (schemas with items), static files, and hooks.
+A bundle holds docs, item-types (schemas with items), static files, and services.
 
 ## Core concepts
 
@@ -28,10 +28,20 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
   {unique} — no two items of the type may share a value. Query multi fields with the set
   operators has/has_any/has_all/has_none, or a comparison op with a quantifier
   (any/all/none).
-- **Hook** — a named outbound HTTP call owned by a bundle. You see the hook's
-  id, name, description, and declared parameters — never its URL, headers, or
-  secrets. Fire it via fire_hook by name or id. Firing requires the fire_hooks
-  capability. Hooks are authored over REST only.
+- **Service** — a named capability owned by a bundle: a driver plus the
+  configuration that driver needs. You see the service's id, name, description,
+  driver, and the declared parameters of each of its actions — never its
+  destination, headers, or secrets, and never a parameter its operator pinned
+  to a fixed value. Services are authored over REST only (edit_services);
+  agents run them.
+- **Run** — one execution of a service, and always asynchronous. run_service
+  starts one and returns the run record; poll get_run until status is
+  succeeded or failed. wait_ms folds the first poll into the dispatch — if the
+  run finishes inside that window (capped server-side) the record comes back
+  already terminal, otherwise it keeps going on the server and nothing is lost
+  by giving up on the wait. A failed run is a record with status "failed" and
+  an error string, not a call error, so read run.status before reporting
+  success. list_runs is the bundle's run log. All three need run_services.
 - **User doc** — account-level guidance attached to you, available across all
   your spaces. Docs flagged autoload are returned by load at session start.
 - **Widget** — an interactive panel some results render inline (file cards,
@@ -50,7 +60,7 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
 2. **load_space(space_id)** — the space's instructions and its bundles.
 3. **load_bundle(bundle_ids)** — required before calling into a bundle:
    returns docs (autoloaded ones in full — follow them; list and fetch the rest
-   with read_docs), item-type schemas, files, and hooks.
+   with read_docs), item-type schemas, files, and services.
 4. **get_tools(names?)** — expand the second-tier manifest when you need full
    tool descriptions or parameter specs before calling. Pass names to fetch
    only those full specs; omit names to return the manifest.
@@ -61,7 +71,8 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
    get_tools; load exposes only the manifest. Second-tier tools:
    items (query/get/create/update/delete), docs (get/read/create/update/patch/delete),
    files (list_files, show_file, upload_request, upload_complete, delete_file),
-   hooks (fire_hook), and management — gated by the matching capability:
+   services (run_service, get_run, list_runs — fire_hook is a deprecated alias
+   for run_service, kept until 1.0), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles
    (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
    (update_bundle/delete_bundle, create/update/delete_item_type,
@@ -75,9 +86,9 @@ A bundle holds docs, item-types (schemas with items), static files, and hooks.
    yourself), replace_lines, delete_lines (1-based inclusive, line-aware).
    update_items also accepts an edits key alongside set for text properties.
 
-Hook *authoring* is the one management action not available over MCP — defining
-a hook's destination and secrets is REST-only by design; agents only fire
-hooks (fire_hooks).
+Service *authoring* is the one management action not available over MCP —
+defining a service's driver configuration and secrets is REST-only by design
+(edit_services); agents only run services (run_services).
 
 Run the discovery chain silently — do not narrate loading steps.
 
@@ -86,7 +97,7 @@ Run the discovery chain silently — do not narrate loading steps.
 Access keys identify you; roles (sets of capabilities granted on spaces and
 bundles) decide what you may do. A space grant is the baseline; bundle-level
 grants override per capability. Checks are per-capability (read_items,
-edit_items, edit_docs, read_files, edit_files, fire_hooks, ...).
+edit_items, edit_docs, read_files, edit_files, run_services, ...).
 
 Sessions may also be authenticated by an OAuth token — a delegation of an
 access key, possibly narrowed to a role (admin | member | read-only) and/or
@@ -100,8 +111,7 @@ reconnect the app with a wider scope) rather than retrying.
 Stored references stay opaque — resolve before showing them to a user:
 - file://{uuid} — resolve via show_file (returns an expiring link/widget)
 - item://{uuid} — resolve via get_items to the item's fields
-- hook://{uuid} — an invokable hook; call it by name via fire_hook
 
-Never surface raw reference URIs, durable storage locations, or hook
-transports to the user.
+Never surface raw reference URIs, durable storage locations, or a service's
+destination to the user.
 `;

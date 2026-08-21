@@ -186,7 +186,7 @@ describeEachAdapter("MCP surface", (adapter) => {
       ]);
     });
 
-    it("load_bundle returns binding docs, schemas, files, and hooks", async () => {
+    it("load_bundle returns binding docs, schemas, files, and services", async () => {
       const result = await alice.call("load_bundle", { bundle_ids: [todosBundleId] });
       const bundle = result.bundles[0];
       expect(bundle.docs.autoloaded).toEqual([
@@ -202,13 +202,16 @@ describeEachAdapter("MCP surface", (adapter) => {
         { id: expect.any(String), name: "status", datatype: "text", required: true, multi: false },
       ]);
       expect(bundle.files).toEqual([]);
+      expect(bundle.services).toEqual([]);
+      // The legacy key rides along until 1.0.
       expect(bundle.hooks).toEqual([]);
     });
 
     it("help returns concept documentation", async () => {
       const text = await alice.call("help");
       expect(text).toContain("load_bundle");
-      expect(text).toContain("hook");
+      expect(text).toContain("run_service");
+      expect(text).toContain("get_run");
     });
 
     it("resolves 'show me open todos' end-to-end through the chain", async () => {

@@ -5,7 +5,7 @@
  * funnel through that core path, so the two surfaces cannot drift.
  *
  * Config is persisted as a JSON-text column on `properties` (empty string =
- * no constraints), mirroring `hooks.params` and staying inside the
+ * no constraints), mirroring `services.params` and staying inside the
  * SQLite∩Postgres subset (no jsonb).
  */
 import { z } from "zod";

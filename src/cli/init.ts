@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { generateSecret } from "../crypto.js";
-import { dataDir, envPath as instanceEnvPath } from "../instance/layout.js";
+import { dataDir, driversDir, envPath as instanceEnvPath } from "../instance/layout.js";
 
 export interface InitResult {
   envPath: string;
@@ -25,6 +25,9 @@ export function initInstance(dir: string, options: { port?: string } = {}): Init
   if (existsSync(envPath)) return { envPath, created: false, sysadminKey: "" };
 
   mkdirSync(dataDir(dir), { recursive: true });
+  // Present from the start, empty: an operator installs a driver by dropping
+  // its package folder in here, and an existing directory says where.
+  mkdirSync(driversDir(dir), { recursive: true });
 
   const sysadminKey = generateSecret("yap_sys_");
   const masterKey = randomBytes(32).toString("base64");
@@ -34,13 +37,16 @@ export function initInstance(dir: string, options: { port?: string } = {}): Init
 
 # Environment credential for user provisioning over REST (never MCP).
 YAP_SYSADMIN_KEY=${sysadminKey}
-# Base64-encoded 32 bytes: hook-secret encryption + link/token signing.
-# Changing it orphans encrypted hook secrets and invalidates minted links.
+# Base64-encoded 32 bytes: service-config encryption + link/token signing.
+# Changing it orphans encrypted service configs and invalidates minted links.
 YAP_MASTER_KEY=${masterKey}
 
 # Paths resolve relative to this directory.
 YAP_SQLITE_PATH=./data/yap.db
 YAP_BLOB_FS_ROOT=./data/blobs
+# Service drivers: one folder per installed driver (a package.json declaring
+# yap.driverApi plus its entry module). Loaded at startup.
+YAP_DRIVERS_DIR=./drivers
 
 # Give each instance on this machine its own port.
 ${options.port ? `YAP_PORT=${options.port}` : "# YAP_PORT=8787"}

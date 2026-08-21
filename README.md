@@ -32,7 +32,7 @@ context (root)
         ├── docs        (one or more; autoloaded binding instructions and read-on-demand docs)
         ├── item-types  (one or more schemas; each holds many items)
         ├── files       (many static files)
-        └── hooks       (many named outbound calls)
+        └── services    (many named, driver-backed capabilities agents can run)
 ```
 
 Spaces do not nest. Combining bundles is a **runtime act** — a session loads
@@ -135,9 +135,9 @@ Three ways to run an instance, by how much you need it to survive:
 |---|---|---|---|
 | Foreground | `yap` / `yap serve` | no | no |
 | Detached | `yap start` / `stop` | yes | no |
-| Supervised | `yap service install` | yes | yes |
+| Supervised | `yap daemon install` | yes | yes |
 
-`yap service install` generates a systemd unit (Linux) or launchd plist
+`yap daemon install` generates a systemd unit (Linux) or launchd plist
 (macOS) pointing at the instance directory and prints the activation
 commands — the OS owns supervision; the CLI deliberately is not a process
 manager. `yap upgrade [version]` reinstalls the vendored server and restarts
@@ -167,7 +167,7 @@ local dev.
 |---|---|---|
 | `YAP_ENV_FILE` | — | Explicit env-file path (beats the instance directory's `./.env`) |
 | `YAP_SYSADMIN_KEY` | *(required)* | Environment credential for user provisioning over REST |
-| `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: hook-secret encryption + link/token signing |
+| `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: service-config encryption + link/token signing |
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
 | `YAP_DB` | `sqlite` | `sqlite` or `postgres` |
 | `YAP_SQLITE_PATH` | `./data/yap.db` | SQLite database file |
@@ -175,11 +175,15 @@ local dev.
 | `YAP_BLOB` | `fs` | `fs` or `s3` |
 | `YAP_BLOB_FS_ROOT` | `./data/blobs` | Local blob root |
 | `YAP_S3_BUCKET` / `YAP_S3_REGION` / `YAP_S3_ENDPOINT` / `YAP_S3_ACCESS_KEY_ID` / `YAP_S3_SECRET_ACCESS_KEY` / `YAP_S3_FORCE_PATH_STYLE` | — | S3-compatible storage (R2/GCS-interop/MinIO via endpoint) |
+| `YAP_DRIVERS_DIR` | `./drivers` | Installed service drivers, one package folder each; loaded at startup |
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | Upload size cap |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` | 600 / 14400 / 600 | Link/token lifetimes |
-| `YAP_HOOK_TIMEOUT_MS` | 30000 | Hook firing timeout (no automatic retries) |
-| `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal hook targets |
+| `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
+| `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal service targets; keeps its pre-services name — it IS the knob |
+| `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
+| `YAP_RUN_TIMEOUT_CAP_MS` | *(unset = uncapped)* | Operator ceiling on any driver action's own `timeoutMs` |
+| `YAP_RUN_RETENTION_DAYS` | 7 | Terminal runs (`succeeded`/`failed`) older than this are pruned |
 | `YAP_ORPHAN_SWEEP_INTERVAL_MS` / `YAP_ORPHAN_MAX_AGE_MS` | 10 min / 60 min | Reserved-placeholder cleanup |
 | `YAP_BACKUP_BEFORE_MIGRATE` | `true` | Snapshot automatically before pending schema migrations |
 | `YAP_BACKUP_SINK` | `fs` | Where archives go: `fs` or `s3` |
@@ -235,7 +239,8 @@ metadata and descending only into the relevant branch:
 - **`load`** → reachable spaces (id, name, description, keywords, role) +
   autoloading user docs + a lightweight second-tier tool manifest
 - **`load_space`** → the space's instructions and bundles
-- **`load_bundle`** → binding docs, item-type schemas, files, hooks
+- **`load_bundle`** → binding docs, item-type schemas, files, services (plus a
+  legacy `hooks` projection — see [Files, services, widgets](#files-services-widgets))
   (required before calling into a bundle)
 - **`get_tools`** → expand the second-tier manifest when full descriptions or
   parameter specs are needed. Pass `names` to fetch only those full specs, or
@@ -246,7 +251,8 @@ metadata and descending only into the relevant branch:
   `create_items`, `update_items`, `delete_items`, `get_doc`, `read_docs`,
   `create_doc`, `update_doc`, `patch_doc`, `delete_doc`,
   `list_files`, `show_file`, `upload_request`, `upload_complete`, `delete_file`,
-  `fire_hook`. Management (gated by the matching capability): `update_space` /
+  `run_service`, `get_run`, `list_runs`, and the deprecated `fire_hook` alias
+  (kept until 1.0). Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
@@ -256,9 +262,10 @@ metadata and descending only into the relevant branch:
 **Surface parity:** every per-resource role capability — content and container
 (`manage_space`, `manage_roles`, `edit_bundles`, …) — is exercisable from
 either surface; REST and MCP are two transports over one capability-checked
-core. Two things stay REST-only by design: **hook authoring** (defining a
-hook's destination and secrets is too sensitive for an agent-driven surface —
-agents may fire hooks but never define them) and **operator/account actions**
+core. Two things stay REST-only by design: **service authoring** (defining a
+service's driver, configuration, and secrets is too sensitive for an
+agent-driven surface — agents may run services but never define them) and
+**operator/account actions**
 that aren't role capabilities (user provisioning via the sysadmin key, and
 access-key management). The REST API under `/v1` also remains the full
 management plane.
@@ -308,14 +315,17 @@ array). Example: `{"property": "tags", "op": "has_all", "value": ["x", "y"]}`.
 
 Capability-based. Access keys authenticate identity only; **roles** (sets of
 capabilities such as `read_items`, `edit_items`, `edit_docs`, `read_files`,
-`edit_files`, `fire_hooks`, `edit_hooks`, `manage_roles`) are granted on
-spaces and bundles as explicit **allow/deny rows**. Resolution is
-most-specific-wins: bundle beats space, deny beats allow at the same level,
-absence inherits, default deny. A space grant cascades into its bundles as a
-baseline; a bundle grant overrides per capability — so a user can fire hooks
-in one bundle and not its sibling, with the deciding row auditable either
-way. Personal spaces accept no grants; their owner implicitly holds all
-capabilities.
+`edit_files`, `run_services`, `edit_services`, `manage_roles`) are granted on
+spaces and bundles as explicit **allow/deny rows**. (The pre-services names
+`fire_hooks`/`edit_hooks` are still accepted everywhere a capability name is
+read or written — grants stored under the old names were migrated, and the
+aliases normalize to `run_services`/`edit_services` at every boundary.)
+Resolution is most-specific-wins: bundle beats space, deny beats allow at the
+same level, absence inherits, default deny. A space grant cascades into its
+bundles as a baseline; a bundle grant overrides per capability — so a user can
+run services in one bundle and not its sibling, with the deciding row
+auditable either way. Personal spaces accept no grants; their owner
+implicitly holds all capabilities.
 
 ## OAuth (connecting apps)
 
@@ -341,22 +351,87 @@ RFC 7009 `/oauth/revoke`. Both lanes — keys and
 tokens — work on every REST and MCP endpoint. OAuth needs `YAP_BASE_URL` to
 be the instance's externally reachable origin (https except on loopback).
 
-## Files, hooks, widgets
+## Files, services, widgets
 
 - **Files** upload in three phases (request → direct-to-storage upload →
   complete, with size read from storage) and download via mint-on-demand
   expiring links. With S3 the bytes never touch the API layer; on local disk
   Yap serves them behind its own signed-token endpoints. Deleting a file
   deletes the blob immediately.
-- **Hooks** are pre-configured outbound HTTP calls: the agent sees a name,
-  description, and declared parameters; the transport (URL, method, headers,
-  secrets) stays encrypted at rest and is never returned by any surface.
-  Private/link-local destinations are denied by default, checked at creation,
-  again at fire time, and pinned at connect time (the request connects only to
-  the validated address, closing DNS-rebinding). JSON request bodies use a
-  structured `body_json` whose values are escaped on serialization, so a
-  free-text parameter can never break or inject JSON; `body_template` carries
-  raw (unescaped) bodies for non-JSON formats.
+- **Services** are the bundle-owned, named capabilities agents can run — what
+  hooks used to be, generalized. A service is a **driver** (an installed,
+  in-process module — the built-in `http` driver, or one an operator adds)
+  plus the **configuration** that driver needs. The two halves have very
+  different visibility: an agent sees the service's id, name, description,
+  driver, and the *callable* parameters of each action; the config — URL,
+  headers, credentials, whatever the driver's shape requires — is
+  AES-256-GCM-encrypted at rest and decrypted only in memory inside a run,
+  never returned by any surface. An author can also **pin** a parameter to a
+  fixed value at authoring time: a pinned name disappears from the listing
+  entirely (an agent cannot even learn it exists, let alone what it's fixed
+  to) and is merged in by the runner only after the caller's own parameters
+  have been validated, so it can never be overridden.
+
+  The built-in **`http` driver** — what every hook was, and still the default
+  when a service names no driver — fires an outbound HTTP request with the
+  declared parameters substituted in. Private/link-local destinations are
+  denied by default (`YAP_HOOK_ALLOW_HOSTS` to allowlist), checked at
+  authoring time, again at run time, and pinned at connect time so the
+  request connects only to the validated address (closing DNS-rebinding).
+  JSON bodies use a structured `body_json` whose substituted values are
+  escaped on serialization, so a free-text parameter can never break or
+  inject JSON; `body_template` carries raw (unescaped) bodies for non-JSON
+  formats.
+
+  Drivers are installed **per instance**, not per bundle: `yap driver add
+  <npm-spec>` packs and installs a package (a registry name, git spec,
+  tarball URL, or local path — anything `npm pack` resolves) into
+  `<instance>/drivers/` and loads it once with the same loader boot uses, so
+  a driver that doesn't satisfy the contract fails at install time rather
+  than in front of an agent. `yap driver remove <name>` uninstalls it; `yap
+  driver list` shows what's installed, with its actions. Services then
+  reference an installed driver by name when they're authored.
+
+  Calling a service is **always asynchronous**: `run_service` (or `POST
+  /v1/services/:id/run`) inserts a `queued` run and returns as soon as either
+  the run finishes or the caller's `wait_ms` elapses, whichever comes first
+  — so `wait_ms` folds the first poll into the dispatch rather than being a
+  separate step, and the run keeps going server-side even if the caller's
+  wait was too short. `wait_ms` is capped at `YAP_RUN_WAIT_CAP_MS` (default
+  25000); a caller that gets back a non-terminal run polls `get_run` (or
+  `GET /v1/runs/:id`) until `status` is `succeeded` or `failed`. Every run is
+  a durable, inspectable row — its params (the caller's half only; pins never
+  land on a run record), result or error, and any items it wrote — pruned
+  after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
+  carries its own time budget, and only the built-in `http` driver's is
+  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); an external driver declares its
+  budget itself, which an operator can bound downward — never upward — with
+  `YAP_RUN_TIMEOUT_CAP_MS`.
+
+  **Trust model:** a driver is trusted code running in the server process.
+  Installing one is the same class of decision as installing a plugin — it
+  runs with the server's privileges, not a sandboxed subset of them. What the
+  SSRF egress guard defends against is a different, narrower thing: a
+  *hostile parameter* passed through an *honest* driver (an agent trying to
+  make a well-behaved `http` service call an internal address). It is not,
+  and cannot be, a defense against a driver that was written to misbehave —
+  that risk is exactly what an operator accepts at `yap driver add` time, the
+  same way it's accepted for any other server-side dependency.
+
+  **Deprecation note.** Hooks are now the `http` driver under the hood, and
+  the old surfaces remain, byte-compatible, until 1.0: the `fire_hook` call
+  alias (starts a run and waits, like the old synchronous fire), the
+  `/v1/**/hooks*` REST routes, and the `hooks` key `load_bundle` still
+  returns alongside `services`. New integrations should use `run_service` /
+  `get_run` / `list_runs` and the `/v1/services`, `/v1/services/:id/run`,
+  `/v1/runs/*` routes instead. A few error-message and status-code details
+  changed underneath the compatible surfaces, worth knowing if you scrape
+  error text: a missing hook/service now 404s as `service <id> not found`
+  (not `hook <id> not found`); the SSRF guard's message now says "service
+  destination…" instead of "hook destination…"; an unlisted call parameter
+  now says `unknown parameter "…"`; and a timed-out run's error reads `run
+  timed out after Nms` (the old "no automatic retries" hint is gone from that
+  particular message — it still applies, just isn't repeated there).
 - **Widgets** (MCP Apps / SEP-1865) are self-contained `ui://` resources
   rendered three ways: result pointers on `call`, the generic `show_widget`
   shell, or origin-hosted pages at signed expiring URLs for hosts that can't

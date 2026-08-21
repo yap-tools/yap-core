@@ -71,7 +71,7 @@ describe("scopeAllows (the token clamp)", () => {
     expect(scopeAllows(scope, "read_items", { space })).toBe(true);
     expect(scopeAllows(scope, "read_files", { space })).toBe(true);
     expect(scopeAllows(scope, "edit_items", { space })).toBe(false);
-    expect(scopeAllows(scope, "fire_hooks", { space })).toBe(false);
+    expect(scopeAllows(scope, "run_services", { space })).toBe(false);
   });
 
   it("resource restriction covers a listed space and a listed bundle, nothing else", () => {

@@ -1,5 +1,5 @@
 /**
- * OS supervision: `yap service install` generates a systemd unit (Linux) or
+ * OS supervision: `yap daemon install` generates a systemd unit (Linux) or
  * launchd plist (macOS) pointing at the instance directory and prints the
  * activation commands. We write a config file and hand control to the OS —
  * the CLI is deliberately not a process supervisor.
@@ -99,7 +99,7 @@ export function planService(dir: string, name: string, platform: NodeJS.Platform
     }
     return plan;
   }
-  throw new CliError(`\`yap service\` supports linux (systemd) and macOS (launchd), not ${platform}`);
+  throw new CliError(`\`yap daemon\` supports linux (systemd) and macOS (launchd), not ${platform}`);
 }
 
 export function installService(plan: ServicePlan): void {

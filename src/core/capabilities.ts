@@ -23,9 +23,24 @@ export const CONTENT_CAPABILITIES = [
   "edit_docs",
   "read_files",
   "edit_files",
-  "fire_hooks",
-  "edit_hooks",
+  "run_services",
+  "edit_services",
 ] as const;
+
+/** Legacy capability names accepted at API boundaries (pre-rename hook
+ * capabilities). Grant writes and capability checks normalize through this
+ * map so old names keep working; stored rows are already migrated to the new
+ * names by migration 0006. */
+const LEGACY_CAPABILITY_ALIASES: Record<string, string> = {
+  fire_hooks: "run_services",
+  edit_hooks: "edit_services",
+};
+
+/** Maps a legacy capability name to its current name; unknown/current names
+ * pass through unchanged. */
+export function normalizeCapability(name: string): string {
+  return LEGACY_CAPABILITY_ALIASES[name] ?? name;
+}
 
 /** Container capabilities manage the space itself; they cascade mechanically
  * like any capability but gate space-level actions, not bundle content. */
@@ -64,9 +79,10 @@ const ROLE_MASKS: Record<string, readonly string[] | null> = {
  * holder's own personal space. `allowed = liveGrants ∧ mask ∧ restriction`.
  */
 export function scopeAllows(scope: TokenScope, capability: string, ctx: CapabilityContext): boolean {
+  const cap = normalizeCapability(capability);
   const mask = ROLE_MASKS[scope.role];
   if (mask === undefined) return false; // unknown role carries no authority
-  if (mask !== null && !mask.includes(capability)) return false;
+  if (mask !== null && !mask.includes(cap)) return false;
   if (scope.spaces?.length || scope.bundles?.length) {
     const inSpaces = scope.spaces?.includes(ctx.space.id) ?? false;
     const inBundles = (ctx.bundleId !== undefined && scope.bundles?.includes(ctx.bundleId)) ?? false;
@@ -109,8 +125,9 @@ export async function resolveCapability(
   capability: string,
   ctx: CapabilityContext,
 ): Promise<Decision> {
+  const cap = normalizeCapability(capability);
   const tokenScope = currentTokenAuth()?.scope;
-  if (tokenScope && !scopeAllows(tokenScope, capability, ctx)) {
+  if (tokenScope && !scopeAllows(tokenScope, cap, ctx)) {
     return { allowed: false, decidedBy: "token_scope" };
   }
   if (ctx.space.personal && ctx.space.ownerId === userId) {
@@ -123,7 +140,7 @@ export async function resolveCapability(
     .where(
       and(
         eq(grants.userId, userId),
-        eq(grants.capability, capability),
+        eq(grants.capability, cap),
         or(
           and(eq(grants.resourceType, "space"), eq(grants.resourceId, ctx.space.id)),
           ...(ctx.bundleId ? [and(eq(grants.resourceType, "bundle"), eq(grants.resourceId, ctx.bundleId))] : []),

@@ -68,7 +68,7 @@ describe("isPrivateAddress", () => {
     }
   });
 
-  it("denies bracketed hex-mapped loopback as a hook destination", async () => {
+  it("denies bracketed hex-mapped loopback as a service destination", async () => {
     await expect(assertPublicDestination("http://[::ffff:7f00:1]/x", [])).rejects.toThrow(YapError);
     await expect(assertPublicDestination("http://[::ffff:a9fe:a9fe]/latest/meta-data/", [])).rejects.toThrow(
       YapError,

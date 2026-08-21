@@ -1,7 +1,8 @@
 /**
  * REST/MCP parity: every per-resource role capability is exercisable over MCP,
- * gated by the same capability as REST. Hook authoring (edit_hooks) is the one
- * deliberate exception — defining a hook's transport stays REST-only.
+ * gated by the same capability as REST. Service authoring (edit_services) is
+ * the one deliberate exception — defining a service's driver configuration and
+ * secrets stays REST-only.
  */
 import { describe, expect, it } from "vitest";
 
@@ -13,16 +14,36 @@ import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js"
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
 
 describe("capability coverage (drift guard)", () => {
-  it("every role capability except edit_hooks is reachable as an MCP tool", () => {
+  it("every role capability except edit_services is reachable as an MCP tool", () => {
     const viaCall = new Set(Object.values(secondTier).map((t) => t.capability));
     const reachable = new Set<string>([...viaCall, "create_bundles"]); // create_bundles → top-level bundle_create
-    const REST_ONLY = new Set(["edit_hooks"]); // documented exception
+    const REST_ONLY = new Set(["edit_services"]); // documented exception
     for (const cap of [...CONTENT_CAPABILITIES, ...CONTAINER_CAPABILITIES]) {
       if (REST_ONLY.has(cap)) continue;
       expect(reachable.has(cap), `${cap} should be reachable over MCP`).toBe(true);
     }
     // The exception really is absent from the MCP surface.
-    expect(viaCall.has("edit_hooks")).toBe(false);
+    expect(viaCall.has("edit_services")).toBe(false);
+    // The pre-rename capability string is gone from the catalog.
+    expect(viaCall.has("fire_hooks")).toBe(false);
+  });
+
+  it("run_services is reachable through the run family, with fire_hook only as an alias", () => {
+    for (const name of ["run_service", "get_run", "list_runs"]) {
+      expect(secondTier[name], `${name} should be in the second-tier catalog`).toBeTruthy();
+      expect(secondTier[name]!.capability).toBe("run_services");
+    }
+    expect(secondTier.run_service!.params?.id?.required).toBe(true);
+    expect(Object.keys(secondTier.run_service!.params ?? {}).sort()).toEqual([
+      "action",
+      "id",
+      "params",
+      "wait_ms",
+    ]);
+    expect(Object.keys(secondTier.list_runs!.params ?? {}).sort()).toEqual(["cursor", "limit", "service"]);
+    // The alias survives until 1.0 and says so where an agent will read it.
+    expect(secondTier.fire_hook!.description).toMatch(/deprecated alias/i);
+    expect(secondTier.fire_hook!.description).toContain("run_service");
   });
 });
 
@@ -271,17 +292,19 @@ describeEachAdapter("MCP management parity", (adapter) => {
     }
   });
 
-  it("hook authoring is NOT exposed over MCP (the documented exception)", async () => {
+  it("service authoring is NOT exposed over MCP (the documented exception)", async () => {
     await setup();
     try {
-      for (const tool of ["create_hook", "update_hook", "delete_hook"]) {
+      for (const tool of ["create_service", "update_service", "delete_service", "create_hook", "update_hook", "delete_hook"]) {
         const res = await one(alice, spaceId, { bundle_id: bundleId, tool, params: {} });
         expect(res.ok).toBe(false);
         expect(res.error.message).toContain("unknown tool");
       }
-      // But firing remains available.
+      // But running remains available.
       const tools = await alice.client.listTools();
-      expect(tools.tools.map((t) => t.name)).not.toContain("create_hook");
+      expect(tools.tools.map((t) => t.name)).not.toContain("create_service");
+      const denied = await one(alice, spaceId, { bundle_id: bundleId, tool: "list_runs", params: {} });
+      expect(denied.ok).toBe(true);
     } finally {
       await alice.close();
       await bob.close();

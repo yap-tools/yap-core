@@ -4,9 +4,11 @@
  * detection, pidfile hygiene, table formatting, and service-unit generation.
  * (Delegation — execInServer — is covered in instance.test.ts.)
  */
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { existsSync } from "node:fs";
@@ -38,6 +40,23 @@ function tempDir(): string {
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+const run = promisify(execFile);
+const ROOT = resolve(import.meta.dirname, "../..");
+const TSX = join(ROOT, "node_modules/.bin/tsx");
+const ENTRY = join(ROOT, "src/index.ts");
+
+/** Spawn the real CLI; returns stdout/stderr and never throws on exit 1. */
+async function yap(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("YAP_")));
+  try {
+    const { stdout, stderr } = await run(TSX, [ENTRY, ...args], { cwd, env: env as NodeJS.ProcessEnv });
+    return { code: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { code?: number; stdout?: string; stderr?: string };
+    return { code: e.code ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  }
+}
 
 describe("resolveEnvFile", () => {
   it("prefers an existing YAP_ENV_FILE over the cwd .env", () => {
@@ -83,7 +102,11 @@ describe("initInstance", () => {
     expect(content).toContain("YAP_SQLITE_PATH=./data/yap.db");
     expect(content).toContain("YAP_BLOB_FS_ROOT=./data/blobs");
 
+    expect(content).toContain("YAP_DRIVERS_DIR=./drivers");
+
     expect(statSync(join(dir, "data")).isDirectory()).toBe(true);
+    // Empty, but present: it is where an operator drops a driver package.
+    expect(statSync(join(dir, "drivers")).isDirectory()).toBe(true);
     expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain(".env");
   });
 
@@ -253,7 +276,7 @@ describe("table", () => {
   });
 });
 
-describe("service generation", () => {
+describe("daemon unit generation", () => {
   it("systemd unit runs the instance's server from its directory", () => {
     const unit = systemdUnit("/srv/yap-a", "/srv/yap-a/node_modules/yap-core/dist/index.js", "yap-a");
     expect(unit).toContain("WorkingDirectory=/srv/yap-a");
@@ -266,5 +289,22 @@ describe("service generation", () => {
     expect(plist).toContain("<string>tools.yap.yap-a</string>");
     expect(plist).toContain("<key>KeepAlive</key><true/>");
     expect(plist).toContain(join("/srv/yap-a", ".yap", "logs", "yap.log"));
+  });
+});
+
+describe("yap daemon / yap service alias", () => {
+  it("`yap service` prints exactly one deprecation line to stderr, then behaves exactly like `yap daemon`", async () => {
+    const dir = tempDir();
+    const daemon = await yap(["daemon", "install"], dir);
+    const service = await yap(["service", "install"], dir);
+
+    const DEPRECATION = 'yap: "yap service" is now "yap daemon" (deprecated alias, removed at 1.0)';
+    const lines = service.stderr.split("\n");
+    expect(lines[0]).toBe(DEPRECATION);
+    // Everything after the deprecation line matches `yap daemon`'s own stderr exactly —
+    // proving the alias delegates rather than reimplementing behavior.
+    expect(lines.slice(1).join("\n")).toBe(daemon.stderr);
+    expect(service.stdout).toBe(daemon.stdout);
+    expect(service.code).toBe(daemon.code);
   });
 });

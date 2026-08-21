@@ -43,6 +43,13 @@
       "when": 1781294169251,
       "tag": "0005_friendly_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787171244415,
+      "tag": "0006_broken_frank_castle",
+      "breakpoints": true
     }
   ]
 }

@@ -179,8 +179,8 @@ export const files = sqliteTable(
   (t) => [index("files_bundle_idx").on(t.bundleId)],
 );
 
-export const hooks = sqliteTable(
-  "hooks",
+export const services = sqliteTable(
+  "services",
   {
     id: text("id").primaryKey(),
     bundleId: text("bundle_id")
@@ -188,12 +188,46 @@ export const hooks = sqliteTable(
       .references(() => bundles.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
+    driver: text("driver").notNull().default("http"),
     params: text("params").notNull().default("[]"), // JSON: declared parameter specs
-    transportEncrypted: text("transport_encrypted").notNull(), // AES-GCM blob, never returned
+    pins: text("pins").notNull().default("{}"), // JSON: driver-specific pinned targets
+    configEncrypted: text("config_encrypted").notNull(), // AES-GCM blob, never returned
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
-  (t) => [uniqueIndex("hooks_bundle_name_idx").on(t.bundleId, t.name)],
+  (t) => [uniqueIndex("services_bundle_name_idx").on(t.bundleId, t.name)],
+);
+
+/** Async service invocations — the audit trail for calls and their write-backs.
+ * A run outlives the service it came from (service_id goes null; service_name
+ * keeps the label) but dies with its bundle. */
+export const runs = sqliteTable(
+  "runs",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    serviceId: text("service_id").references(() => services.id, { onDelete: "set null" }),
+    serviceName: text("service_name").notNull(),
+    action: text("action").notNull(),
+    status: text("status").notNull(), // 'queued' | 'running' | 'succeeded' | 'failed'
+    params: text("params").notNull().default("{}"), // JSON: the call's arguments
+    result: text("result"),
+    error: text("error"),
+    errorCode: text("error_code"), // the YapError code behind `error`, for faithful re-throws
+    writes: text("writes").notNull().default("[]"), // JSON: write-backs applied
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+  },
+  (t) => [
+    index("runs_bundle_created_idx").on(t.bundleId, t.createdAt),
+    index("runs_service_created_idx").on(t.serviceId, t.createdAt),
+    // The retention sweep's predicate: terminal runs with a finished_at older
+    // than the window. Without it the sweep is a full scan of every run ever.
+    index("runs_finished_idx").on(t.status, t.finishedAt),
+  ],
 );
 
 /** OAuth clients (RFC 7591 dynamic registration). Public clients only — no

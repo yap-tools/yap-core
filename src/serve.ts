@@ -5,10 +5,12 @@ import { createBackupSink } from "./backup/sink.js";
 import { createBlobStore } from "./blob/index.js";
 import { resolveEnvFile } from "./instance/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
+import { DriverLoadError, loadExternalDrivers } from "./core/drivers/load.js";
 import { sweepOrphans } from "./core/files.js";
+import { pruneRuns, recoverInterruptedRuns } from "./core/runs.js";
 import { createDb } from "./db/index.js";
 import { createLogger } from "./logger.js";
-import { buildServer } from "./server.js";
+import { buildServer, createDriverRegistry } from "./server.js";
 
 // Resolves from src/ (tsx) and dist/ (built) alike — both sit one level below
 // the package root.
@@ -78,7 +80,30 @@ export async function serve(): Promise<void> {
     );
   }
 
-  const server = buildServer(config, db, blob, logger);
+  // Drivers the operator installed join the built-ins before the server is
+  // built, so the first request already sees the full table. A broken driver
+  // fails the boot rather than silently disappearing from it.
+  const registry = createDriverRegistry(config);
+  try {
+    await loadExternalDrivers(config.driversDir, registry, logger);
+  } catch (err) {
+    if (err instanceof DriverLoadError) {
+      console.error(`yap: ${err.message}`);
+      await db.close();
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  // A run in flight when the process died is stranded in a non-terminal state;
+  // nothing will ever finish it, so the restart is what closes it out. Before
+  // the listener opens, not after: once requests are being served, runs this
+  // process started itself are `queued`/`running` too, and a sweep meant for
+  // the *previous* process would retire them.
+  const recovered = await recoverInterruptedRuns(db);
+  if (recovered > 0) logger.info(`marked ${recovered} run(s) failed: interrupted by the previous shutdown`);
+
+  const server = buildServer(config, db, blob, logger, registry);
   await server.start();
   logger.info(`yap listening on ${config.baseUrl} (REST under /v1, MCP at /mcp)`);
 
@@ -88,6 +113,14 @@ export async function serve(): Promise<void> {
     );
   }, config.orphanSweepIntervalMs);
   sweeper.unref();
+
+  // Run retention rides the sweep cadence rather than adding a knob of its
+  // own: both are lazy background housekeeping, and the window that matters
+  // (YAP_RUN_RETENTION_DAYS) is measured in days.
+  const runPruner = setInterval(() => {
+    pruneRuns(db, config.runRetentionDays).catch((err) => logger.error("run retention sweep failed", err));
+  }, config.orphanSweepIntervalMs);
+  runPruner.unref();
 
   let stopScheduler: (() => void) | undefined;
   if (config.backup.schedule) {
@@ -101,6 +134,7 @@ export async function serve(): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, async () => {
       clearInterval(sweeper);
+      clearInterval(runPruner);
       stopScheduler?.();
       await server.stop();
       await db.close();

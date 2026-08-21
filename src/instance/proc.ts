@@ -2,7 +2,7 @@
  * Detached lifecycle for an instance: `yap start` spawns the instance's
  * server with its output in .yap/logs/ and its pid in .yap/yap.pid. This is
  * convenience, not supervision — it survives the terminal, not a reboot or a
- * crash; `yap service install` hands those to the OS.
+ * crash; `yap daemon install` hands those to the OS.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";

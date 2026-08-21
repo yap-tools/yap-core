@@ -86,15 +86,29 @@ Filters AND-combine: `{"property", "op", "value", "quantifier"?}`.
 
 Then: `GET /v1/bundles/:id/files` (list), `GET /v1/files/:id/link` (mint expiring download link — always resolve `file://` refs this way before showing a user), `DELETE /v1/files/:id` (blob deleted immediately).
 
-### Hooks
+### Services & runs
 | Method & path | Notes |
 |---|---|
-| `GET /v1/bundles/:id/hooks` | name, description, declared params — transport never returned |
-| `POST /v1/bundles/:id/hooks` | **authoring is REST-only by design** — URL/method/headers/secrets, encrypted at rest |
-| `GET/PATCH/DELETE /v1/hooks/:id` | |
-| `POST /v1/hooks/:id/fire` | the only hook verb agent surfaces get |
+| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (each with its callable — unpinned — params); config never returned |
+| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "config"}`; `driver` defaults to `http`; config is driver-shaped and encrypted at rest |
+| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "config"?}` (`pins: null` clears the pin set) |
+| `POST /v1/services/:id/run` | `{"action"?, "params"?, "wait_ms"?}` → a run record; `wait_ms` clamped to `YAP_RUN_WAIT_CAP_MS` (25000 default) |
+| `GET /v1/runs/:id` | one run: status (`queued\|running\|succeeded\|failed`), the caller's params, result/error, items it wrote |
+| `GET /v1/bundles/:id/runs` | `?service=` filter, `cursor`, `limit`; newest first |
 
-Private/link-local destinations denied unless allowlisted via `YAP_HOOK_ALLOW_HOSTS`. No automatic retries; timeout `YAP_HOOK_TIMEOUT_MS` (30 s default).
+Service egress (the `http` driver, or any driver declaring `egress: true`) denies private/link-local destinations unless allowlisted via `YAP_HOOK_ALLOW_HOSTS` (still that name). The `http` driver's own timeout is `YAP_HOOK_TIMEOUT_MS` (30 s default, still that name); no automatic retries.
+
+**Drivers** are installed per instance, not authored over REST: `yap driver add <npm-spec>` / `remove <name>` / `list`, into `YAP_DRIVERS_DIR` (default `./drivers`). A driver is trusted code running in-process — the SSRF guard defends hostile *parameters* through an honest driver, not a driver written to misbehave.
+
+**Legacy hook surface (kept byte-compatible until 1.0):** a hook is exactly a service on the `http` driver, viewed through the old four-field shape (`id`, `name`, `description`, `params` — no `driver`/`action`).
+
+| Method & path | Notes |
+|---|---|
+| `GET/POST /v1/bundles/:id/hooks` | list / create (forces `driver: "http"`; body takes `transport` where a service body takes `config`) |
+| `PATCH/DELETE /v1/hooks/:id` | no GET single, same as services |
+| `POST /v1/hooks/:id/fire` | synchronous: waits past the driver's own timeout and returns `{status, body}` or throws — never a run id |
+
+`load_bundle` likewise returns both `services` and a legacy `hooks` projection (http-driver services only). MCP: `run_service`/`get_run`/`list_runs` are current; `fire_hook` is the deprecated alias. A few error strings changed under these compatible surfaces: a missing hook/service 404s as `service <id> not found` (was `hook <id> not found`); the SSRF guard says "service destination…" (was "hook destination…"); an unlisted call parameter says `unknown parameter "…"`.
 
 ### Users, keys, OAuth (operator lane)
 | Method & path | Notes |
@@ -108,23 +122,24 @@ OAuth: each instance is an OAuth 2.1 authorization server (PKCE, dynamic client 
 
 ## Permissions model
 
-Capability-based: roles (e.g. `read_items`, `edit_items`, `edit_docs`, `read_files`, `edit_files`, `fire_hooks`, `edit_hooks`, `manage_roles`) granted as allow/deny rows on spaces and bundles. Resolution: most-specific wins — bundle beats space, deny beats allow at the same level, absence inherits, default deny. Personal spaces accept no grants; the owner holds all capabilities.
+Capability-based: roles (e.g. `read_items`, `edit_items`, `edit_docs`, `read_files`, `edit_files`, `run_services`, `edit_services`, `manage_roles`) granted as allow/deny rows on spaces and bundles. The pre-services names `fire_hooks`/`edit_hooks` are still accepted anywhere a capability is read or written — they normalize to `run_services`/`edit_services`. Resolution: most-specific wins — bundle beats space, deny beats allow at the same level, absence inherits, default deny. Personal spaces accept no grants; the owner holds all capabilities.
 
 ## CLI
 
 ```
 Instance:  init [--version v] [--port n] [--no-install] | create <dir> [--user n] | upgrade [version]
-Run:       serve (foreground) | start/stop/status | logs [-n N] [-f] | service install|uninstall
+Run:       serve (foreground) | start/stop/status | logs [-n N] [-f] | daemon install|uninstall
 Manage:    user create <name> | api <METHOD> </path> [body|-] [--sysadmin]
            users list|delete | keys list|create|rotate|delete
            spaces list|show|create|delete | bundles list <spaceId> | show <id>
            items query <bundleId> --type t [--filters json] | get <bundleId> <ids>
+           driver add <npm-spec> | remove <name> | list
            connections list | revoke <id>      (--json on any list)
 ```
 
 Credentials: sysadmin + master keys live in the instance's `.env` (generated by `init`, printed once); the CLI's user access key lives in `.yap/credentials.json` (0600, shape `{"accessKey", "userId", "userName"}`). Logs at `.yap/logs/yap.log`, pid at `.yap/yap.pid`. `yap create <dir>` accepts any path (resolved absolute) and runs init + start + user create (default user `admin`).
 
-`yap service install` writes the unit and prints activation commands — it does not stop a `yap start` process, so `yap stop` first. `<name>` defaults to the instance directory's basename (`--name` overrides). Both unit types auto-restart on crash (`KeepAlive` / `Restart=always`). macOS: LaunchAgent at `~/Library/LaunchAgents/tools.yap.<name>.plist`, activated with `launchctl load -w <path>` (starts at login; use a root LaunchDaemon yourself if you need boot-time start on a headless Mac). Linux: systemd user unit at `~/.config/systemd/user/yap-<name>.service` (`systemctl --user enable --now` + `loginctl enable-linger` to survive logout), or a system unit in `/etc/systemd/system` when run as root.
+`yap daemon install` writes the unit and prints activation commands — it does not stop a `yap start` process, so `yap stop` first. `<name>` defaults to the instance directory's basename (`--name` overrides). Both unit types auto-restart on crash (`KeepAlive` / `Restart=always`). macOS: LaunchAgent at `~/Library/LaunchAgents/tools.yap.<name>.plist`, activated with `launchctl load -w <path>` (starts at login; use a root LaunchDaemon yourself if you need boot-time start on a headless Mac). Linux: systemd user unit at `~/.config/systemd/user/yap-<name>.service` (`systemctl --user enable --now` + `loginctl enable-linger` to survive logout), or a system unit in `/etc/systemd/system` when run as root.
 
 ## Server configuration (env, `.env` fallback)
 
@@ -138,5 +153,9 @@ Credentials: sysadmin + master keys live in the instance's `.env` (generated by 
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | upload cap |
 | `YAP_MIME_ALLOWLIST` | `*` | comma list, `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` | 600 / 300 | link lifetimes |
-| `YAP_HOOK_TIMEOUT_MS` / `YAP_HOOK_ALLOW_HOSTS` | 30000 / empty | hook firing |
+| `YAP_HOOK_TIMEOUT_MS` / `YAP_HOOK_ALLOW_HOSTS` | 30000 / empty | http driver timeout / SSRF allowlist (still those names) |
+| `YAP_RUN_WAIT_CAP_MS` | 25000 | ceiling on a caller's `wait_ms` when starting a run |
+| `YAP_RUN_TIMEOUT_CAP_MS` | unset (uncapped) | operator ceiling on any driver action's own timeout |
+| `YAP_RUN_RETENTION_DAYS` | 7 | terminal runs older than this are pruned |
+| `YAP_DRIVERS_DIR` | `./drivers` | installed service drivers, one package folder each; loaded at startup |
 | `YAP_ENV_FILE` | — | explicit env-file path (real env vars always win) |

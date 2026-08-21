@@ -141,13 +141,14 @@ describeEachAdapter("spaces & grants", (adapter) => {
       expect(bobEdit.map((g: any) => g.effect).sort()).toEqual(["allow", "deny"]);
     });
 
-    it("deleting a grant row removes it (single capability per row)", async () => {
+    it("deleting a grant row removes it (single capability per row); legacy capability name normalizes on write", async () => {
       const grant = await alice.post(`/v1/spaces/${spaceId}/grants`, {
         userId: bobId,
-        capabilities: "fire_hooks",
+        capabilities: "fire_hooks", // legacy name — must land/behave as run_services
         effect: "allow",
       });
       const grantId = grant.body.data[0].id;
+      expect(grant.body.data[0].capability).toBe("run_services");
       expect((await alice.delete(`/v1/spaces/${spaceId}/grants/${grantId}`)).status).toBe(200);
       const rows = (await alice.get(`/v1/spaces/${spaceId}/grants`)).body.data;
       expect(rows.some((g: any) => g.id === grantId)).toBe(false);

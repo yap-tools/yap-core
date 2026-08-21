@@ -1,7 +1,7 @@
 /**
  * Cryptographic primitives:
  * - access-key generation and hashing (keys are stored hashed, never plain)
- * - AES-256-GCM secret encryption for hook transports (master key from env)
+ * - AES-256-GCM secret encryption for service configs (master key from env)
  * - HMAC-signed expiring tokens for upload/download links and widget pages
  */
 import {
