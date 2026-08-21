@@ -91,6 +91,11 @@ const testDriver: DriverDefinition = {
       params: [],
       timeoutMs: 5_000,
     },
+    overreach: {
+      description: "Fails through ctx.fail with a code a driver may not claim.",
+      params: [],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     // Deliberately signal-deaf: the runner's deadline, not the driver, has to
@@ -122,6 +127,8 @@ const testDriver: DriverDefinition = {
       throw new Error("secret internal detail");
     }
     if (ctx.action === "missing") throw ctx.fail("message 42 is not in INBOX", "not_found");
+    // A plain-JS driver can pass any string; the runner must not mint it.
+    if (ctx.action === "overreach") throw ctx.fail("nice try", "forbidden" as never);
     return { echoed: ctx.params, config: ctx.config };
   },
 };
@@ -473,6 +480,14 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.status).toBe("failed");
       expect(run.error).toBe("message 42 is not in INBOX");
       expect(run.errorCode).toBe("not_found");
+
+      const overreach = await runService(env, aliceId, bundleId, {
+        service: "honest-failer",
+        action: "overreach",
+        waitMs: 5_000,
+      });
+      expect(overreach.error).toBe("nice try");
+      expect(overreach.errorCode).toBe("invalid_request");
     });
 
     it("writes a failed run's detail to the operator log and nothing but the flat line to the row", async () => {

@@ -321,14 +321,17 @@ type Outcome = Ending & { writes: unknown[]; logs: string[] };
 
 const timedOutMessage = (budgetMs: number): string => `run timed out after ${budgetMs}ms`;
 
-/** Turns whatever the driver threw into one agent-safe line plus its code. */
 /**
  * The one sanctioned way for an out-of-tree driver to put words on the row:
  * `failureOf` below keeps a YapError verbatim, and this is how a driver that
- * imports nothing from Yap makes one.
+ * imports nothing from Yap makes one. Drivers are plain JS, so the code is
+ * checked at runtime too — anything but the two caller-fault verdicts is
+ * `invalid_request`, never a code the driver has no business claiming.
  */
-const driverFail: RunContext["fail"] = (message, code = "invalid_request") => new YapError(code, message);
+const driverFail: RunContext["fail"] = (message, code) =>
+  new YapError(code === "not_found" ? "not_found" : "invalid_request", String(message));
 
+/** Turns whatever the driver threw into one agent-safe line plus its code. */
 function failureOf(
   err: unknown,
   timedOut: boolean,
