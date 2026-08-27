@@ -4,7 +4,8 @@
  * Why hand-rolled: the network door a Yap driver gets is `ctx.egress.connect()`,
  * which hands back an already-connected socket, and no IMAP library accepts an
  * injected socket. So this speaks the subset the mail actions need — LIST,
- * SELECT/EXAMINE, UID SEARCH, UID FETCH, UID STORE, APPEND — and nothing more.
+ * SELECT/EXAMINE, UID SEARCH, UID FETCH, UID STORE, UID EXPUNGE,
+ * APPEND — and nothing more.
  * It is a client for *this driver*, not a library: every method maps onto one
  * action need and returns already-shaped data (decoded folder names, parsed
  * envelopes, a BODYSTRUCTURE tree) so the actions layer never sees a token.
@@ -564,6 +565,15 @@ export class ImapClient {
       return (Array.isArray(got) ? got : []).filter((f): f is string => typeof f === "string");
     }
     throw this.fail(`message ${uid} not found`, "UID STORE", undefined, { agent: "not_found" });
+  }
+
+  async deleteDraft(folder: string, uid: number): Promise<void> {
+    if (!this.capabilities.has("UIDPLUS")) {
+      throw this.fail("delete_draft requires the IMAP UIDPLUS capability for UID EXPUNGE", "UID EXPUNGE", undefined, { agent: "invalid_request" });
+    }
+    await this.select(folder, { readOnly: false });
+    await this.store(uid, "+FLAGS", ["\\Deleted"]);
+    await this.command(`UID EXPUNGE ${uid}`, { step: "UID EXPUNGE" });
   }
 
   async append(folder: string, message: Buffer, flags: string[] = []): Promise<{ uid: number | null }> {

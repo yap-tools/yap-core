@@ -533,6 +533,26 @@ async function dispatch(conn: Conn, tag: string, command: string, args: Token[])
       send(`${tag} OK STORE completed`);
       return;
     }
+    case "UID EXPUNGE": {
+      const mb = needSelected();
+      if (!mb) return;
+      if (conn.readOnly) {
+        send(`${tag} NO [READ-ONLY] Mailbox is read-only`);
+        return;
+      }
+      const uids = new Set(parseSet(textOf(args[0]) ?? "", mb));
+      for (let i = 0; i < mb.messages.length; ) {
+        const msg = mb.messages[i];
+        if (msg && uids.has(msg.uid) && msg.flags.includes("\\Deleted")) {
+          mb.messages.splice(i, 1);
+          send(`* ${i + 1} EXPUNGE`);
+          continue;
+        }
+        i++;
+      }
+      send(`${tag} OK EXPUNGE completed`);
+      return;
+    }
     case "APPEND": {
       if (!needAuth()) return;
       const mb = state.mailboxes.find((m) => m.name === textOf(args[0]));

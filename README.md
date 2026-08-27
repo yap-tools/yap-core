@@ -395,8 +395,8 @@ be the instance's externally reachable origin (https except on loopback).
   formats.
 
   The built-in **`mail` driver** gives an agent one operator-configured
-  IMAP/SMTP account through six actions — `folders`, `search`, `read`,
-  `mark`, `send`, `draft` — and the service's `actions` allowlist decides
+  IMAP/SMTP account through seven actions — `folders`, `search`, `read`,
+  `mark`, `send`, `draft`, `delete_draft` — and the service's `actions` allowlist decides
   which of them a given agent gets. Its config is the account: `user` plus
   either `pass` (an app password) or an `oauth2` block (XOAUTH2 for Google
   Workspace / Microsoft 365), `from` (and an optional display `name`), and

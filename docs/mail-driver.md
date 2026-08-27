@@ -1,6 +1,6 @@
 # The built-in `mail` driver
 
-Yap ships a `mail` driver alongside `http`. It lets an agent read, search, flag, send, and draft email through one operator-configured IMAP/SMTP account — and the *service* decides which of those a given agent may do. A read-only mailbox, a triage assistant that can only propose replies, and a notifier that can send but not choose recipients are three services on the same driver.
+Yap ships a `mail` driver alongside `http`. It lets an agent read, search, flag, send, draft, and delete drafts through one operator-configured IMAP/SMTP account — and the *service* decides which of those a given agent may do. A read-only mailbox, a triage assistant that can only propose replies, and a notifier that can send but not choose recipients are three services on the same driver.
 
 The host, port, and credentials live encrypted in the service record and never reach the agent. Every connection goes through the same guarded egress door the `http` driver uses, so it is subject to the server's SSRF policy (`YAP_HOOK_ALLOW_HOSTS` to allowlist a private mail server); TLS is verified; credentials are never sent in the clear unless an operator explicitly says so for a lab server.
 
@@ -29,7 +29,7 @@ Nothing to install: a service with `"driver": "mail"` works on every instance. (
 | `pass` | Password or app password. Exactly one of `pass` / `oauth2`. |
 | `oauth2` | `{ client_id, client_secret, refresh_token, token_url }` — the driver exchanges the refresh token for an access token (through the egress guard, cached until shortly before expiry) and authenticates with XOAUTH2 on both protocols. `token_url` must be https. |
 | `from` | The address mail is sent as. Required. `name` is the optional display name. |
-| `imap` | `{ host, port, security? }`. Needed by `folders`, `search`, `read`, `mark`, `draft`, by replies, and by `save_sent`. |
+| `imap` | `{ host, port, security? }`. Needed by `folders`, `search`, `read`, `mark`, `draft`, `delete_draft`, by replies, and by `save_sent`. |
 | `smtp` | `{ host, port, security? }`. Needed by `send`. At least one of `imap` / `smtp` is required. |
 | `security` | `"tls"` (implicit TLS from the first byte), `"starttls"` (upgrade after the greeting; refused if the server does not offer it), or `"none"`. Defaults by port: 993 and 465 → `tls`, 143 and 587 → `starttls`, anything else → `tls`. `none` is never a default. |
 | `allow_plaintext_auth` | Send credentials over a `security: "none"` connection. Lab servers only. |
@@ -61,6 +61,7 @@ Every parameter is a string; the driver parses numbers and dates.
 | `mark` | imap | `uid`, `flag` ∈ `seen` / `unseen` / `flagged` / `unflagged`, `folder?` | `{ uid, flags }` — the message's flags after the change. |
 | `send` | smtp (+imap for `reply_to_uid` and `save_sent`) | `to` (comma-separated; required unless replying), `cc?`, `bcc?` (comma-separated; at most 50 recipients in all), `subject` (required unless replying), `body`, `reply_to_uid?`, `folder?` | `{ accepted: true, message_id }`. `bcc` recipients are on the envelope only, never in a header. If any recipient is refused, nothing is sent. |
 | `draft` | imap | same as `send` | `{ folder, uid }` — `uid` is `null` when the server lacks UIDPLUS. Nothing is delivered; `bcc` is written as a `Bcc:` header, which is how a mail client carries it until the human sends. |
+| `delete_draft` | imap with UIDPLUS | `uid` | `{ folder, uid }` — deletes exactly that UID from the resolved Drafts folder. There is deliberately no `folder` parameter, so the action cannot be aimed at any other mailbox. |
 
 `reply_to_uid` fetches the original's `Message-ID`, `References`, `Subject`, `Reply-To` and `From` and sets `In-Reply-To` and `References` so the reply threads in every client; when `subject` is omitted it becomes `Re: <original subject>` (not doubled if the original already starts with `Re:`), and when `to` is omitted the reply goes to the original's `Reply-To`, else its `From`. A reply never adds `cc` on its own — reply-all is an explicit choice, made by supplying `cc`.
 
@@ -83,13 +84,13 @@ POST /v1/bundles/:id/services
 }
 ```
 
-**Triage** — reads, flags, and proposes replies; no mail leaves without a human:
+**Triage** — reads, flags, proposes replies, and can remove stale drafts; no mail leaves without a human:
 
 ```
 {
   "name": "triage",
   "driver": "mail",
-  "actions": ["search", "read", "mark", "draft"],
+  "actions": ["search", "read", "mark", "draft", "delete_draft"],
   "config": { "user": "…", "pass": "…", "from": "me@example.com",
               "imap": { "host": "imap.fastmail.com", "port": 993 } }
 }
@@ -122,9 +123,12 @@ run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.
 
 `draft` writes the message into the account's Drafts folder with the `\Draft` flag and threading headers intact. The human opens their usual mail client, finds the draft, edits it if they like, and presses send — or deletes it. There is nothing new to build or learn: the approval surface is the Drafts folder the user already has, the audit trail is the run record, and mail leaves only through a client the human controls. When the server supports UIDPLUS the result carries the new draft's `uid`, which a follow-up `read` in that folder can show.
 
+`delete_draft` completes the rewrite loop: after creating a replacement draft, an agent can delete the stale draft by UID. The driver resolves Drafts with the same `drafts_folder` / `\Drafts` / `Drafts` rules as `draft`, selects that mailbox itself, and uses UID EXPUNGE so only the requested UID is removed. Servers without UIDPLUS are refused with an agent-visible error instead of falling back to plain `EXPUNGE`, which could purge unrelated deleted messages in Drafts.
+
 ## Limits and safety
 
 - Results never contain config, credentials, hosts, or pinned values. Folder names and message ids are returned — the agent needs them to refer to things.
+- `delete_draft` has no folder parameter and can only operate in the resolved Drafts folder; it requires UIDPLUS so deletion is UID-scoped.
 - `search` returns at most 100 summaries per call; `read` text is capped at `max_chars` (≤ 100 000) and the fetched section at 512 KiB, with `truncated: true` when either cap applied.
 - Attachments are listed with name, type, and size, never fetched.
 - Header injection is blocked: no CR/LF in any header-bound parameter (addresses, subject, display name). Bodies are normalised to CRLF and dot-stuffed on the wire so no line can impersonate the SMTP terminator.
@@ -139,7 +143,7 @@ run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.
 
 The runs layer shows an agent only the failures a driver raises as Yap's own errors; any other error collapses to a flat "run failed" on the run row, with the detail kept in the operator log. The mail driver raises an agent-visible error for what an agent can act on:
 
-- `invalid_request`: a missing, malformed, or too-large parameter (uid, limit, max_chars, dates, flag, addresses, subject, body, search text, a header-bound value with a line break, a recipient field supplied on a service whose recipients are pinned, two non-ASCII criteria in one search); an action the service's account cannot do (`send` without an `smtp` block, a reply or `save_sent` without `imap`); an unknown action; no Drafts/Sent folder found (the error names the config field that settles it); a server that cannot search non-ASCII text; a replied-to message with no usable Reply-To or From; and a recipient the server refused — reported as exactly that, with neither the address (it may be pinned) nor the server's reply line, both of which go to the log.
+- `invalid_request`: a missing, malformed, or too-large parameter (uid, limit, max_chars, dates, flag, addresses, subject, body, search text, a header-bound value with a line break, a recipient field supplied on a service whose recipients are pinned, two non-ASCII criteria in one search); an action the service's account cannot do (`send` without an `smtp` block, a reply or `save_sent` without `imap`); an unknown action; no Drafts/Sent folder found (the error names the config field that settles it); `delete_draft` on a server without UIDPLUS; a server that cannot search non-ASCII text; a replied-to message with no usable Reply-To or From; and a recipient the server refused — reported as exactly that, with neither the address (it may be pinned) nor the server's reply line, both of which go to the log.
 - `not_found`: `folder "…" not found` (the name is the agent's own input) and `message <uid> not found` in the given folder.
 
 Connection, TLS, authentication, and other protocol failures — and a service config that no longer validates — are never shown: their messages can name the host or carry a server reply, so they reach the operator log only.

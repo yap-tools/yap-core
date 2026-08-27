@@ -34,7 +34,7 @@ export const configDoc = [
   "pass: its password — an app password on Fastmail and personal Gmail (exactly one of pass / oauth2)",
   "oauth2: { client_id, client_secret, refresh_token, token_url (https) } for XOAUTH2 on Google Workspace / Microsoft 365",
   "from: the address mail is sent as (required); name: the display name shown with it (optional)",
-  "imap: { host, port, security? } — needed for folders/search/read/mark/draft and for replies (optional)",
+  "imap: { host, port, security? } — needed for folders/search/read/mark/draft/delete_draft and for replies (optional)",
   "smtp: { host, port, security? } — needed for send (optional); at least one of imap / smtp is required",
   'security: "tls" (implicit TLS), "starttls", or "none"; defaults by port: 993/465 → tls, 143/587 → starttls, other → tls',
   "allow_plaintext_auth: true to send credentials over a security:none connection — lab servers only (default false)",
@@ -42,7 +42,7 @@ export const configDoc = [
   "sent_folder: where sent mail is copied when save_sent is on (default: the folder flagged \\Sent, else \"Sent\")",
   "save_sent: true to append a copy of every sent message to the sent folder (default false; needs imap)",
   "",
-  "Restrict what a service may do with its `actions` allowlist, and pin `to` for a service that can send but not aim.",
+  "Restrict what a service may do with its `actions` allowlist; `delete_draft` is safe to grant because it can only touch Drafts. Pin `to` for a service that can send but not aim.",
 ].join("\n");
 
 export function defaultSecurity(port: number): Security {

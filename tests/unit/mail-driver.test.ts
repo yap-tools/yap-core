@@ -1,5 +1,5 @@
 /**
- * The mail driver's six actions against the in-process IMAP and SMTP mocks:
+ * The mail driver's actions against the in-process IMAP and SMTP mocks:
  * what each returns, what goes on the wire, and — the part that matters most
  * for a built-in — which failures reach an agent. A `YapError` is shown to
  * the agent verbatim by the runs layer; anything else collapses to "run
@@ -96,17 +96,18 @@ function mailboxes(extra: MockMailboxSeed[] = []): MockMailboxSeed[] {
 }
 
 describe("definition", () => {
-  it("declares the mail driver with six actions and their params", () => {
+  it("declares the mail driver actions and their params", () => {
     expect(driver.name).toBe("mail");
     expect(driver.api).toBe(1);
     expect(driver.egress).toBe(true);
-    expect(Object.keys(driver.actions).sort()).toEqual(["draft", "folders", "mark", "read", "search", "send"]);
+    expect(Object.keys(driver.actions).sort()).toEqual(["delete_draft", "draft", "folders", "mark", "read", "search", "send"]);
     for (const [name, spec] of Object.entries(driver.actions)) {
       expect(spec.description, name).toBeTypeOf("string");
       expect(Array.isArray(spec.params), name).toBe(true);
       expect(Number.isInteger(spec.timeoutMs) && spec.timeoutMs > 0, name).toBe(true);
     }
     expect(driver.actions["send"]!.params!.filter((p) => p.required).map((p) => p.name)).toEqual(["body"]);
+    expect(driver.actions["delete_draft"]!.params!.map((p) => p.name)).toEqual(["uid"]);
     expect(driver.actions["read"]!.params!.find((p) => p.name === "uid")!.required).toBe(true);
     expect(driver.actions["mark"]!.params!.map((p) => p.name)).toEqual(["uid", "flag", "folder"]);
     expect(driver.configDoc).toContain("allow_plaintext_auth");
@@ -610,6 +611,66 @@ describe("draft", () => {
   it("fails clearly when imap is not configured", async () => {
     const smtp = await smtpMock();
     await expect(run(config({ smtp }), "draft", params)).rejects.toThrow(/requires an imap block/);
+  });
+});
+
+describe("delete_draft", () => {
+  it("deletes exactly the requested UID from the resolved Drafts folder", async () => {
+    const imap = await imapMock({
+      mailboxes: mailboxes([
+        {
+          name: "Drafts",
+          attributes: ["\\Drafts"],
+          messages: [
+            { uid: 7, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Old draft" }) },
+            { uid: 8, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Other draft" }) },
+          ],
+        },
+        { name: "Archive", messages: [{ uid: 7, flags: [], internalDate: new Date(), raw: msg({ subject: "Real mail" }) }] },
+      ]),
+    });
+    const { result } = await run(config({ imap }), "delete_draft", { uid: "7" });
+    expect(result).toEqual({ folder: "Drafts", uid: 7 });
+    expect(imap.mailbox("Drafts")!.messages.map((m) => m.uid)).toEqual([8]);
+    expect(imap.mailbox("Archive")!.messages.map((m) => m.uid)).toEqual([7]);
+    expect(imap.commands.some((c) => /SELECT "Drafts"$/.test(c))).toBe(true);
+    expect(imap.commands.some((c) => /UID STORE 7 \+FLAGS \(\\Deleted\)$/.test(c))).toBe(true);
+    expect(imap.commands.some((c) => /UID EXPUNGE 7$/.test(c))).toBe(true);
+    expect(imap.commands.every((c) => !/^A\d+ EXPUNGE$/.test(c))).toBe(true);
+  });
+
+  it("honours drafts_folder even if an extraneous folder parameter reaches the driver", async () => {
+    const imap = await imapMock({
+      mailboxes: mailboxes([
+        { name: "Drafts", attributes: ["\\Drafts"], messages: [{ uid: 3, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Default draft" }) }] },
+        { name: "Proposals", messages: [{ uid: 3, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Configured draft" }) }] },
+      ]),
+    });
+    const { result } = await run(config({ imap, drafts_folder: "Proposals" }), "delete_draft", { uid: "3", folder: "Drafts" });
+    expect(result).toEqual({ folder: "Proposals", uid: 3 });
+    expect(imap.mailbox("Proposals")!.messages).toHaveLength(0);
+    expect(imap.mailbox("Drafts")!.messages.map((m) => m.uid)).toEqual([3]);
+  });
+
+  it("fails clearly without UIDPLUS instead of plain EXPUNGE", async () => {
+    const imap = await imapMock({
+      mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [{ uid: 4, flags: ["\\Draft"], internalDate: new Date(), raw: msg() }] }]),
+      noUidplus: true,
+    });
+    const err = await failure(config({ imap }), "delete_draft", { uid: "4" });
+    expect(err).toBeInstanceOf(YapError);
+    expect(agentSafe(err)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(err.message).toMatch(/UIDPLUS/);
+    expect(imap.mailbox("Drafts")!.messages.map((m) => m.uid)).toEqual([4]);
+    expect(imap.commands.every((c) => !/EXPUNGE/.test(c))).toBe(true);
+  });
+
+  it("reports missing draft UIDs as not_found", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [] }]) });
+    const err = await failure(config({ imap }), "delete_draft", { uid: "99" });
+    expect(err).toBeInstanceOf(YapError);
+    expect(agentSafe(err)).toEqual({ agentSafe: true, code: "not_found" });
+    expect(err.message).toMatch(/message 99 not found/);
   });
 });
 

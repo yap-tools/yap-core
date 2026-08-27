@@ -1,15 +1,15 @@
 /**
- * The built-in `mail` driver: read, search, send, and draft email through one
+ * The built-in `mail` driver: read, search, send, draft, and delete drafts through one
  * operator-configured IMAP/SMTP account.
  *
- * The driver declares six actions and the *service* decides which of them an
+ * The driver declares seven actions and the *service* decides which of them an
  * agent gets (the service's `actions` allowlist). That is what turns one
  * driver into three very different capabilities:
  *
  * - a **reader** (`actions: ["folders","search","read"]`) can look and change
  *   nothing;
- * - a **triage** service (`["search","read","mark","draft"]`) flags messages
- *   and proposes replies into the Drafts folder, where a human sends them;
+ * - a **triage** service (`["search","read","mark","draft","delete_draft"]`) flags messages,
+ *   proposes replies into the Drafts folder, and can remove stale drafts there;
  * - a **notifier** (`["send"]` with `pins: {to: "ops@…"}`) can send but cannot
  *   aim.
  *
@@ -107,6 +107,7 @@ type Handler = (ctx: RunContext, config: MailConfig, params: Params) => Promise<
 
 const folderParam: DriverParamSpec = { name: "folder", description: "Mailbox name (default INBOX)", required: false };
 const uidParam: DriverParamSpec = { name: "uid", description: "The message's UID in that folder, as returned by search", required: true };
+const draftUidParam: DriverParamSpec = { name: "uid", description: "The draft message's UID in the Drafts folder, as returned by draft or search", required: true };
 const composeParams: DriverParamSpec[] = [
   { name: "to", description: "Recipient address, or several separated by commas (a reply defaults to the original sender)", required: false },
   { name: "cc", description: "Cc addresses, comma-separated", required: false },
@@ -162,13 +163,18 @@ const actions: Record<string, DriverActionSpec> = {
     params: composeParams,
     timeoutMs: 60_000,
   },
+  delete_draft: {
+    description: "Delete a draft by UID; this action can only ever touch the Drafts folder.",
+    params: [draftUidParam],
+    timeoutMs: 30_000,
+  },
 };
 
 export function createMailDriver(): DriverDefinition {
   return {
     name: "mail",
     api: DRIVER_API,
-    description: "Reads, searches, sends, and drafts email through an IMAP/SMTP account; the service picks which of those an agent may do.",
+    description: "Reads, searches, sends, drafts, and deletes drafts through an IMAP/SMTP account; the service picks which of those an agent may do.",
     egress: true,
     configDoc,
 
@@ -356,6 +362,16 @@ const handlers: Record<string, Handler> = {
       const folder = await discoverFolder(client, config.drafts_folder, "\\DRAFTS", "drafts", "drafts_folder");
       const { message } = await composeMessage(config, draft, client, { bccHeader: true });
       const { uid } = await client.append(folder, message, ["\\Draft"]);
+      return { folder, uid };
+    });
+  },
+
+  async delete_draft(ctx, config, params) {
+    requireBlock(config, "imap", "delete_draft");
+    const uid = intParam(params, "uid", { required: true }) as number;
+    return await withImap(ctx, config, async (client) => {
+      const folder = await discoverFolder(client, config.drafts_folder, "\\DRAFTS", "drafts", "drafts_folder");
+      await client.deleteDraft(folder, uid);
       return { folder, uid };
     });
   },
