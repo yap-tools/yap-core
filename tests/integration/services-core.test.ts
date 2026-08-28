@@ -26,7 +26,7 @@ import { createHttpDriver } from "../../src/core/drivers/http.js";
 import { DriverRegistry } from "../../src/core/drivers/registry.js";
 import { DRIVER_API, type BundleFile, type BundleReader, type BundleWriter, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
 import { createItemType } from "../../src/core/itemTypes.js";
-import { queryItems } from "../../src/core/items.js";
+import { createItems, getItems, queryItems } from "../../src/core/items.js";
 import { getRun, runService, type RunEnv } from "../../src/core/runs.js";
 import {
   createService,
@@ -193,6 +193,38 @@ const writingDriver: DriverDefinition = {
       params: [{ name: "itemType", required: true }],
       timeoutMs: 5_000,
     },
+    update: {
+      description: "Updates one item by id.",
+      params: [
+        { name: "id", required: true },
+        { name: "title", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    update_file: {
+      description: "Updates one item with a file reference.",
+      params: [
+        { name: "id", required: true },
+        { name: "ref", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    edit: {
+      description: "Applies a surgical text edit to one item.",
+      params: [
+        { name: "id", required: true },
+        { name: "suffix", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    detached_update: {
+      description: "Starts an item update without awaiting it and returns at once.",
+      params: [
+        { name: "id", required: true },
+        { name: "title", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     const writer = ctx.writer!;
@@ -207,11 +239,29 @@ const writingDriver: DriverDefinition = {
       void writer.createItems(ctx.params.itemType!, [{ title: "landed late" }]).catch(() => {});
       return { detached: true };
     }
+    if (ctx.action === "detached_update") {
+      void writer.updateItems([{ id: ctx.params.id!, set: { title: ctx.params.title } }]).catch(() => {});
+      return { detached: true };
+    }
     if (ctx.action === "batch") {
       return { ids: await writer.createItems(ctx.params.itemType!, [{ title: "one" }, { title: "two" }]) };
     }
     if (ctx.action === "bogus") {
       return { ids: await writer.createItems(ctx.params.itemType!, [{ nonsense: "no such property" }]) };
+    }
+    if (ctx.action === "update") {
+      const [item] = await writer.updateItems([{ id: ctx.params.id!, set: { title: ctx.params.title } }]);
+      return { id: item!.id, values: item!.values };
+    }
+    if (ctx.action === "update_file") {
+      const [item] = await writer.updateItems([{ id: ctx.params.id!, set: { source: ctx.params.ref } }]);
+      return { id: item!.id, values: item!.values };
+    }
+    if (ctx.action === "edit") {
+      const [item] = await writer.updateItems([
+        { id: ctx.params.id!, edits: { title: [{ op: "append", content: ctx.params.suffix! }] } },
+      ]);
+      return { id: item!.id, values: item!.values };
     }
     return { ids: await writer.createItems(ctx.params.itemType!, [{ title: ctx.params.title }]) };
   },
@@ -297,7 +347,10 @@ describeEachAdapter("services core", (adapter) => {
     for (const bundle of [bundleId, otherBundleId]) {
       await createItemType(app.db, aliceId, bundle, {
         name: "Note",
-        properties: [{ name: "title", datatype: "text", required: true }],
+        properties: [
+          { name: "title", datatype: "text", required: true },
+          { name: "source", datatype: "file" },
+        ],
       });
     }
     await createItemType(app.db, aliceId, otherBundleId, {
@@ -1010,6 +1063,66 @@ describeEachAdapter("services core", (adapter) => {
       expect((run.writes[0] as { ids: string[] }).ids).toHaveLength(2);
     });
 
+    it("updates items in the run's bundle and records them on the run row", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "transcribing" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "updater", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "updater",
+        action: "update",
+        params: { id: item!.id, title: "transcribed" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toEqual({ id: item!.id, values: { title: "transcribed" } });
+      expect(run.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
+      const [reread] = await getItems(app.db, aliceId, bundleId, [item!.id]);
+      expect(reread!.values.title).toBe("transcribed");
+    });
+
+    it("applies surgical edits through the driver's update handle", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "transcript" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "editor", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "editor",
+        action: "edit",
+        params: { id: item!.id, suffix: " ready" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toEqual({ id: item!.id, values: { title: "transcript ready" } });
+      expect(run.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
+    });
+
+    it("validates file refs through the driver's update handle", async () => {
+      const fileId = await makeFile(bundleId, "source media", { name: "source.txt" });
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "needs source" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "source-updater", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "source-updater",
+        action: "update_file",
+        params: { id: item!.id, ref: fileId },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toEqual({ id: item!.id, values: { title: "needs source", source: `file://${fileId}` } });
+      expect(run.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
+    });
+
     it("cannot reach an item-type that lives in another bundle", async () => {
       await createService(env, aliceId, bundleId, { name: "trespasser", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
@@ -1024,6 +1137,27 @@ describeEachAdapter("services core", (adapter) => {
       expect(run.writes).toEqual([]);
       const ledger = await queryItems(app.db, aliceId, otherBundleId, { itemType: "Ledger" });
       expect(ledger.data).toHaveLength(0);
+    });
+
+    it("cannot update an item that lives in another bundle", async () => {
+      const [item] = await createItems(app.db, aliceId, otherBundleId, {
+        itemType: "Note",
+        items: [{ title: "private elsewhere" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "cross-bundle-updater", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "cross-bundle-updater",
+        action: "update",
+        params: { id: item!.id, title: "leaked" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("failed");
+      expect(run.error).toMatch(/item .* not found in bundle/);
+      expect(run.writes).toEqual([]);
+      const [reread] = await getItems(app.db, aliceId, otherBundleId, [item!.id]);
+      expect(reread!.values.title).toBe("private elsewhere");
     });
 
     it("applies the item layer's validation to a driver's write", async () => {
@@ -1066,6 +1200,21 @@ describeEachAdapter("services core", (adapter) => {
       // …but the stored value that caused it never reaches the agent-visible row.
       expect(clash.error).not.toContain("SECRET-SERIAL-42");
       expect(clash.writes).toEqual([]);
+
+      const [target] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Ticket",
+        items: [{ title: "ordinary" }],
+      });
+      const updateClash = await runService(env, aliceId, bundleId, {
+        service: "ticketer",
+        action: "update",
+        params: { id: target!.id, title: "SECRET-SERIAL-42" },
+        waitMs: 5_000,
+      });
+      expect(updateClash.status).toBe("failed");
+      expect(updateClash.error).toMatch(/uniqueness/i);
+      expect(updateClash.error).not.toContain("SECRET-SERIAL-42");
+      expect(updateClash.writes).toEqual([]);
     });
 
     it("audits a write the driver never awaited", async () => {
@@ -1085,6 +1234,27 @@ describeEachAdapter("services core", (adapter) => {
       // …and it is on the run's trail, not floating in the bundle unexplained.
       const finished = await getRun(env, aliceId, run.id);
       expect(finished.writes).toEqual([{ type: "items", itemType: "Note", ids: [landed[0]!.id] }]);
+    });
+
+    it("audits an update the driver never awaited", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "waiting" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "update-detacher", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "update-detacher",
+        action: "detached_update",
+        params: { id: item!.id, title: "updated late" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      const [reread] = await getItems(app.db, aliceId, bundleId, [item!.id]);
+      expect(reread!.values.title).toBe("updated late");
+      const finished = await getRun(env, aliceId, run.id);
+      expect(finished.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
     });
 
     it("hands a driver that declared no writes a null writer", async () => {
@@ -1114,6 +1284,9 @@ describeEachAdapter("services core", (adapter) => {
       // A driver keeping its handle past the run would write outside the audit
       // trail; the handle is closed with the run instead.
       await expect(escapedWriter!.createItems("Note", [{ title: "after the fact" }])).rejects.toThrow(
+        /write handle is no longer usable/,
+      );
+      await expect(escapedWriter!.updateItems([{ id: randomUUID(), set: { title: "after the fact" } }])).rejects.toThrow(
         /write handle is no longer usable/,
       );
       expect(await titles(bundleId)).not.toContain("after the fact");

@@ -656,14 +656,29 @@ export async function getItems(
   return result.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
+export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> };
+
 export async function updateItems(
   db: Db,
   userId: string,
   bundleId: string,
-  updates: { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }[],
+  updates: ItemUpdateInput[],
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_items", ctx);
+  return updateItemsUnchecked(db, bundleId, updates);
+}
+
+/**
+ * Internal: update without the capability check. Service drivers use this
+ * through their bundle-scoped writer; validation, reference checks, uniqueness,
+ * and all-or-nothing per-item semantics are identical to the gated path.
+ */
+export async function updateItemsUnchecked(
+  db: Db,
+  bundleId: string,
+  updates: ItemUpdateInput[],
+): Promise<MaterializedItem[]> {
   if (!Array.isArray(updates) || updates.length === 0) throw invalid("updates must be a non-empty array");
 
   const { items, itemValues, itemTypes } = db.tables;

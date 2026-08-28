@@ -63,7 +63,7 @@ import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition } from "./drivers/types.js";
 import { invalid, notFound, tooLarge, YapError } from "./errors.js";
-import { createItemsUnchecked } from "./items.js";
+import { createItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -715,10 +715,11 @@ export interface ScopedBundleWriter extends BundleWriter {
  *   drains whatever is still in flight so a write that lands late is announced
  *   before the row is written rather than after it.
  *
- * Validation is not relaxed for drivers: `createItemsUnchecked` runs every
- * check the gated path runs. Only the `edit_items` capability check is absent,
- * because a run has no acting user to check it against — the operator who
- * authored the service over privileged REST is the grant.
+ * Validation is not relaxed for drivers: `createItemsUnchecked` and
+ * `updateItemsUnchecked` run every check the gated paths run. Only the
+ * `edit_items` capability check is absent, because a run has no acting user
+ * to check it against — the operator who authored the service over privileged
+ * REST is the grant.
  */
 export function createBundleWriter(
   db: Db,
@@ -727,7 +728,7 @@ export function createBundleWriter(
 ): ScopedBundleWriter {
   let closed = false;
   // Writes started but not yet announced. A driver need not await its own
-  // `createItems` — `void writer.createItems(...)` is legal JS — so the run can
+  // `createItems`/`updateItems` — `void writer.createItems(...)` is legal JS — so the run can
   // reach its end with items on the way to the database. Tracking them is what
   // lets `close()` wait instead of walking away from their audit entries.
   const inFlight = new Set<Promise<unknown>>();
@@ -756,6 +757,29 @@ export function createBundleWriter(
       })();
       // Held from before the first await to after the announcement, so a
       // `close()` racing this write can never observe the gap between them.
+      inFlight.add(landing);
+      try {
+        return await landing;
+      } finally {
+        inFlight.delete(landing);
+      }
+    },
+    async updateItems(updates: ItemUpdateInput[]) {
+      if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
+      const landing = (async () => {
+        const updated = await updateItemsUnchecked(db, bundleId, updates).catch((err: unknown) => {
+          if (err instanceof YapError && (err.code === "conflict" || /must be unique/.test(err.message))) {
+            throw new YapError("conflict", "service write-back hit a uniqueness conflict");
+          }
+          throw err;
+        });
+        const byType = new Map<string, string[]>();
+        for (const item of updated) {
+          byType.set(item.itemType, [...(byType.get(item.itemType) ?? []), item.id]);
+        }
+        for (const [itemType, ids] of byType) audit({ type: "items", itemType, ids, op: "update" });
+        return updated;
+      })();
       inFlight.add(landing);
       try {
         return await landing;

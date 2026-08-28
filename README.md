@@ -429,9 +429,11 @@ be the instance's externally reachable origin (https except on loopback).
   scoped to finalized files in the service run's bundle; `file.stream()` is
   the primary byte surface, while `file.bytes()` and `file.text()` are
   capped convenience helpers. A driver that declares `writes: { items: true }`
-  receives `ctx.writer.createItems(itemTypeName, values)`, also scoped to the
-  run bundle and validated by the normal item layer. Undeclared read/write
-  surfaces are `null` on the run context.
+  receives `ctx.writer.createItems(itemTypeName, values)` and
+  `ctx.writer.updateItems(updates)`, also scoped to the run bundle and
+  validated by the normal item layer. `updateItems` uses the same update shape
+  as the REST/MCP item update APIs: an array of `{id, set?, edits?}`.
+  Undeclared read/write surfaces are `null` on the run context.
   [`examples/drivers/smtp`](examples/drivers/smtp) is the minimal reference
   for writing one — a send-only driver in plain JavaScript that imports
   nothing from Yap (the built-in `mail` driver is the full-featured one).

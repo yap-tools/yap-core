@@ -13,7 +13,8 @@
  *   pool — a socket returned by `connect()` is the driver's, and the driver
  *   must close it itself.
  * - Writes: a driver receives a `writer` only for the write surfaces it
- *   declared. Undeclared writes are simply not reachable — `writer` is null.
+ *   declared. Item writes can create and update items in the run bundle.
+ *   Undeclared writes are simply not reachable — `writer` is null.
  * - Config: the decrypted service config reaches the driver only inside
  *   `run`, never any listing or agent-visible surface (mirrors hook
  *   transports).
@@ -25,6 +26,7 @@
 import type { Readable } from "node:stream";
 
 import type { ErrorCode } from "../errors.js";
+import type { EditOp } from "../textEdits.js";
 import type { Egress } from "./egress.js";
 
 /**
@@ -88,6 +90,9 @@ export interface BundleReader {
 
 export interface BundleWriter {
   createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]>;
+  updateItems(
+    updates: Array<{ id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }>,
+  ): Promise<Array<{ id: string; itemType: string; createdAt: string; updatedAt: string; values: Record<string, unknown> }>>;
 }
 
 /** The verdicts a driver may attach to a `ctx.fail` — the subset of Yap's

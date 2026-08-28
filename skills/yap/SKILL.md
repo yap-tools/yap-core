@@ -86,6 +86,6 @@ All commands resolve the instance from the current directory — run them inside
 |---|---|
 | Inventing endpoints (`/v1/notes`, `/v1/todos`) | Only the tree resources exist — see reference.md |
 | Using the sysadmin key as a user credential | Rejected. It only provisions users (`yap user create`, `--sysadmin`) |
-| Showing `item://<id>` / `file://<id>` values to users | Opaque references — resolve them first (get items / `GET /v1/files/<id>/link`); driver-internal file reads use `ctx.reader.readFile` only for services whose installed driver declares `reads.files` |
+| Showing `item://<id>` / `file://<id>` values to users | Opaque references — resolve them first (get items / `GET /v1/files/<id>/link`); driver-internal file reads use `ctx.reader.readFile` only for services whose installed driver declares `reads.files`; driver item write-backs use `ctx.writer.createItems` / `ctx.writer.updateItems` only when the driver declares `writes.items` |
 | Defining a service's driver/config via MCP or as an agent | Service authoring is deliberately REST-only; agents may only run services (`run_service`, or the deprecated `fire_hook` alias) |
 | Expecting open access | Default deny. Grants resolve most-specific-wins: bundle beats space, deny beats allow |
