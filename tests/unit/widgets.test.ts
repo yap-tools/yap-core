@@ -25,16 +25,32 @@ describe("widgetHtml", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain('var displayName = String(d.name || "file")');
     expect(render).toContain("var name = esc(displayName)");
-    expect(render).toContain("esc(d.mime_type");
+    expect(render).toContain('var mime = String(d.mime_type || "")');
+    expect(render).toContain("esc(mime)");
     expect(render).toContain("safeUrl(d.url)");
   });
 
   it("the media-card renderer sets runtime titles and audio/video Media Session metadata", () => {
     const render = WIDGETS["media-card"]!.render;
     expect(render).toContain("document.title = displayName");
-    expect(render).toContain('d.kind === "audio" || d.kind === "video"');
+    expect(render).toContain('kind === "audio" || kind === "video"');
     expect(render).toContain("window.MediaMetadata");
     expect(render).toContain("navigator.mediaSession.metadata = new MediaMetadata({ title: displayName })");
+  });
+
+  it("the media-card derives the kind from the mime type when the payload omits it", () => {
+    const render = WIDGETS["media-card"]!.render;
+    expect(render).toContain('var kind = String(d.kind || "")');
+    expect(render).toContain('mime.indexOf("image/") === 0');
+    expect(render).toContain('mime.indexOf("audio/") === 0');
+    expect(render).toContain('mime.indexOf("video/") === 0');
+  });
+
+  it("the media-card shows a distinct no-data state instead of a generic file named 'file'", () => {
+    const render = WIDGETS["media-card"]!.render;
+    expect(render).toContain("No file data reached the card - re-run show_file to refresh");
+    // The empty check must run before any rendering branch defaults kick in.
+    expect(render.indexOf("No file data reached the card")).toBeLessThan(render.indexOf('String(d.name || "file")'));
   });
 
   it("the media-card download uses the attachment link and opens it via the host bridge", () => {
@@ -256,6 +272,39 @@ describe("bridge: tool-result unwrapping", () => {
   it("returns nothing for an envelope that carries no structuredContent", () => {
     expect(findSc({ value: { type: "json" } })).toBeFalsy();
     expect(findSc({})).toBeFalsy();
+  });
+
+  it("digs through result envelopes (hosts that nest the CallToolResult under result)", () => {
+    expect(findSc({ result: { structuredContent: { a: 1 } } })).toEqual({ a: 1 });
+    expect(findSc({ result: { value: { structuredContent: { a: 2 } } } })).toEqual({ a: 2 });
+  });
+});
+
+describe("shell: quality-gated mount", () => {
+  // The host's two data channels race: a replayed tool-input (possibly without
+  // params) can beat the tool-result carrying the real params. A one-shot
+  // mount latch turned that race into the ticket's empty "file" card — the
+  // good data arrived moments later and was discarded forever.
+  const shell = WIDGETS["shell"]!.render;
+
+  it("a mount from empty params is upgradeable when the real data arrives", () => {
+    expect(shell).toContain("var renderedUsable");
+    expect(shell).toContain("function usable(p)");
+    expect(shell).toContain("if (renderedUsable || !usable(params)) return;");
+    expect(shell).toContain("if (widgetCb) widgetCb(params);");
+  });
+
+  it("a widget holding usable params is never re-rendered (it may carry user state)", () => {
+    // The upgrade branch is the ONLY re-entry into a mounted widget, and it is
+    // gated on the previous mount being unusable.
+    const upgrade = shell.split("if (rendered) {")[1]!.split("}")[0]!;
+    expect(upgrade).toContain("if (renderedUsable || !usable(params)) return;");
+  });
+
+  it("the bridge parses stringified tool-input arguments and params", () => {
+    const html = widgetHtml("shell", "client");
+    expect(html).toContain('if (typeof args === "string") { try { args = JSON.parse(args); } catch (_e) {} }');
+    expect(html).toContain('if (typeof wp === "string") { try { wp = JSON.parse(wp); } catch (_e) { wp = undefined; } }');
   });
 });
 

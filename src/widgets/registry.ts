@@ -27,12 +27,15 @@ export interface WidgetDef {
 
 /** Dig the tool result's structuredContent out of a (possibly nested) params
  * envelope. Hosts re-deliver a result wrapped in { value: { … } } — sometimes
- * several levels deep (MCPJam does this seconds after the first render); reading
- * only the top level misses it and the widget blanks on re-mount. Exported as
- * source so the bridge and its unit test share one definition. */
+ * several levels deep (MCPJam does this seconds after the first render) — and
+ * others nest the CallToolResult under { result: { … } }; reading only the top
+ * level misses both and the widget blanks on re-mount. Exported as source so
+ * the bridge and its unit test share one definition. */
 export const TOOL_RESULT_UNWRAP_JS =
   `function __yapSc(params){var p=params,sc=p&&p.structuredContent,g=0;` +
-  `while(!sc&&p&&typeof p.value==="object"&&p.value!==null&&g++<5){p=p.value;sc=p.structuredContent;}return sc;}`;
+  `while(!sc&&p&&g++<5){var n=(typeof p.value==="object"&&p.value!==null)?p.value:` +
+  `(typeof p.result==="object"&&p.result!==null)?p.result:null;` +
+  `if(!n)break;p=n;sc=p.structuredContent;}return sc;}`;
 
 /** The upload-dropzone's failure classifier, exported as source so the widget
  * and its unit test exercise one definition. It keys purely on the HTTP status
@@ -152,12 +155,17 @@ const BRIDGE_JS = `
     // via resources/read.
     if (m.method === "ui/notifications/tool-input") {
       var args = m.params && m.params.arguments;
+      // Some hosts replay the arguments (or just the params member) as a JSON
+      // string; an unparsed string would mount the widget with no data.
+      if (typeof args === "string") { try { args = JSON.parse(args); } catch (_e) {} }
       if (args && typeof args === "object" && args.widget) {
         // The replayed arg is whatever the caller passed (possibly a bare name);
         // normalize to the registered ui:// uri so resources/read can resolve it.
         var w = String(args.widget);
         if (w.indexOf("://") === -1) w = "${UI_SCHEME_PREFIX}" + w;
-        window.__yapOnData && window.__yapOnData({ widget: w, params: args.params });
+        var wp = args.params;
+        if (typeof wp === "string") { try { wp = JSON.parse(wp); } catch (_e) { wp = undefined; } }
+        window.__yapOnData && window.__yapOnData({ widget: w, params: wp });
       }
       return;
     }
@@ -241,49 +249,60 @@ export const WIDGETS: Record<string, WidgetDef> = {
     style: "",
     render: `
       var root = document.getElementById("root");
-      var rendered = false;
+      var rendered = false;       // a widget render is mounted in this document
+      var renderedUsable = false; // ...and it received usable (non-empty) params
+      var widgetCb = null;        // the mounted widget's onData callback
+      function usable(p) { if (!p || typeof p !== "object") return false; for (var k in p) return true; return false; }
       function fail(msg) { if (!rendered) root.innerHTML = '<div class="card err">shell: ' + msg + '</div>'; }
-      onData(function (d) {
-        if (!d || !d.widget) { fail("no widget named"); return; }
-        // A spurious re-deliver must not clobber a widget we already mounted.
-        if (rendered) return;
-        // Primary path: show_widget inlines the chosen widget's style + render in
-        // structuredContent. Mount it in THIS document — no nested iframe, which a
-        // strict host (Claude Desktop, Mistral Vibe) won't let a widget frame
-        // spawn (frame-src), leaving the old nesting shell blank.
-        if (d.render) {
-          rendered = true;
-          if (d.style) { var st = document.createElement("style"); st.textContent = d.style; document.head.appendChild(st); }
-          // Re-point the data channel: the widget's onData(cb) must receive its
-          // own params, not this shell envelope.
-          window.onData = function (cb) { cb(d.params || {}); requestAnimationFrame(announceHeight); };
-          // Inline script — runs under the same CSP the shell document already
-          // satisfies (no nested frame, no eval).
-          var s = document.createElement("script");
-          s.textContent = d.render;
-          document.body.appendChild(s);
+      // Mount the widget's {style, render} in THIS document — no nested iframe,
+      // which a strict host (Claude Desktop, Mistral Vibe) won't let a widget
+      // frame spawn (frame-src), leaving the old nesting shell blank. The mount
+      // is quality-gated, not one-shot: the host's channels race (a replayed
+      // tool-input can beat the tool-result carrying the real params), so a
+      // mount made from empty params must accept the real data when it arrives.
+      // The reverse never happens — once a widget holds usable params it is not
+      // re-rendered (it may carry user state, e.g. an upload in progress).
+      function mount(src, params) {
+        if (rendered) {
+          if (renderedUsable || !usable(params)) return;
+          renderedUsable = true;
+          if (widgetCb) widgetCb(params);
           return;
         }
+        rendered = true;
+        renderedUsable = usable(params);
+        if (src.style) { var st = document.createElement("style"); st.textContent = src.style; document.head.appendChild(st); }
+        // Re-point the data channel: the widget's onData(cb) must receive its
+        // own params, not the shell envelope. Keeping the callback lets a later
+        // delivery upgrade an empty mount in place.
+        window.onData = function (cb) {
+          widgetCb = function (p) { cb(p || {}); requestAnimationFrame(announceHeight); };
+          widgetCb(params);
+        };
+        // Inline script — runs under the same CSP the shell document already
+        // satisfies (no nested frame, no eval).
+        var s = document.createElement("script");
+        s.textContent = src.render;
+        document.body.appendChild(s);
+      }
+      onData(function (d) {
+        if (!d || !d.widget) { fail("no widget named"); return; }
+        // Primary path: show_widget inlines the chosen widget's style + render
+        // in structuredContent.
+        if (d.render) { mount(d, d.params); return; }
         // Recovery path: a host re-mounted us and replayed only the tool-input
         // {widget, params} with no inline render. Read the widget's document
-        // through the host, pull its embedded {style, render} (data-yap-src), and
-        // mount it IN THIS document — never a nested iframe, which strict hosts
-        // (Claude: frame-src 'self' …; MCPJam strict) refuse to spawn, the old blank.
+        // through the host and pull its embedded {style, render} (data-yap-src).
+        if (rendered && (renderedUsable || !usable(d.params))) return;
         var uri = d.widget.indexOf("://") === -1 ? "${UI_SCHEME_PREFIX}" + d.widget : d.widget;
         request("resources/read", { uri: uri })
           .then(function (r) {
-            if (rendered) return;
             var html = r && r.contents && r.contents[0] && r.contents[0].text;
             var doc = html && new DOMParser().parseFromString(html, "text/html");
             var el = doc && doc.querySelector("[data-yap-src]");
             var src = el ? JSON.parse(el.textContent) : null;
             if (!src || !src.render) { fail("empty widget"); return; }
-            rendered = true;
-            if (src.style) { var st = document.createElement("style"); st.textContent = src.style; document.head.appendChild(st); }
-            window.onData = function (cb) { cb(d.params || {}); requestAnimationFrame(announceHeight); };
-            var s = document.createElement("script");
-            s.textContent = src.render;
-            document.body.appendChild(s);
+            mount(src, d.params);
           })
           .catch(function (err) { fail("could not load widget (" + (err && err.message || err) + ")"); });
       });
@@ -552,6 +571,23 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
+        // Host delivery can drop or thin the payload (a replayed tool-input
+        // without params, a stringified envelope). An empty payload gets a
+        // plain "no data" state — never the generic file row, which reads as a
+        // real file named "file". A partial payload still renders as richly as
+        // it can: the kind is derived from the mime type when absent.
+        if (!d || (d.kind == null && d.url == null && d.name == null && d.mime_type == null && d.download_url == null)) {
+          root.innerHTML = '<div class="card"><div class="preview-failed">No file data reached the card - re-run show_file to refresh</div></div>';
+          return;
+        }
+        var mime = String(d.mime_type || "");
+        var kind = String(d.kind || "");
+        if (!kind) {
+          if (mime.indexOf("image/") === 0) kind = "image";
+          else if (mime.indexOf("audio/") === 0) kind = "audio";
+          else if (mime.indexOf("video/") === 0) kind = "video";
+          else kind = "file";
+        }
         var displayName = String(d.name || "file");
         var name = esc(displayName);
         var url = safeUrl(d.url);
@@ -559,16 +595,16 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var sizeNote = size ? '<span class="muted"> \\u00b7 ' + size + " bytes</span>" : "";
         var inner;
         document.title = displayName;
-        if ((d.kind === "audio" || d.kind === "video") && window.navigator && navigator.mediaSession && window.MediaMetadata) {
+        if ((kind === "audio" || kind === "video") && window.navigator && navigator.mediaSession && window.MediaMetadata) {
           try {
             navigator.mediaSession.metadata = new MediaMetadata({ title: displayName });
           } catch (_e) {}
         }
-        if (d.kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
-        else if (d.kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
-        else if (d.kind === "video") inner = '<video controls src="' + url + '"></video>';
+        if (kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
+        else if (kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
+        else if (kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
-          '</div><div class="muted">' + esc(d.mime_type || "") + '</div></div></div>';
+          '</div><div class="muted">' + esc(mime) + '</div></div></div>';
         // A download link for every file type, sitting where the expiry note
         // used to. Uses the server's dedicated attachment link (download_url) so
         // it saves the file rather than rendering inline; a direct, non-stored
