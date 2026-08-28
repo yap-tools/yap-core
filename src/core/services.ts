@@ -63,6 +63,7 @@ import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition } from "./drivers/types.js";
 import { invalid, notFound, tooLarge, YapError } from "./errors.js";
+import { writeFileUnchecked, type FileWriteInput } from "./files.js";
 import { createItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
@@ -684,8 +685,8 @@ export function createBundleReader(
  * point would be invisible in the run's audit trail.
  *
  * `close()` is async because refusing *future* calls is only half the job: a
- * write already in flight when the run ends will still land its items, and its
- * audit entry has to reach the run row with them. So closing rejects new calls
+ * write already in flight when the run ends will still land its item or file,
+ * and its audit entry has to reach the run row with it. So closing rejects new calls
  * at once and then waits for every in-flight write to settle — announcement
  * included — before it resolves. The runner awaits it before serializing the
  * outcome, which is what makes "an item with no audit trail" unreachable.
@@ -708,33 +709,38 @@ export interface ScopedBundleWriter extends BundleWriter {
  *
  * - Scope: the bundle is bound at construction (the run's bundle) and there is
  *   no parameter to point it anywhere else, so a driver cannot reach another
- *   bundle's item-types — an unknown type name is simply not found.
+ *   bundle's item-types or file namespace.
  * - Audit: every successful write is announced through `audit`, which the runs
  *   layer persists on the run row. A write with no trail is not a shape this
  *   handle can produce — including at the end of the run, where `close()`
  *   drains whatever is still in flight so a write that lands late is announced
  *   before the row is written rather than after it.
  *
- * Validation is not relaxed for drivers: `createItemsUnchecked` and
- * `updateItemsUnchecked` run every check the gated paths run. Only the
- * `edit_items` capability check is absent, because a run has no acting user
- * to check it against — the operator who authored the service over privileged
+ * Validation is not relaxed for drivers: `createItemsUnchecked`,
+ * `updateItemsUnchecked`, and `writeFileUnchecked` run every check the gated
+ * paths run. Only the edit capability check is absent, because a run uses
+ * service authority — the operator who authored the service over privileged
  * REST is the grant.
  */
 export function createBundleWriter(
   db: Db,
+  blob: BlobStore,
+  config: YapConfig,
+  ownerId: string,
   bundleId: string,
+  surfaces: { items?: boolean; files?: boolean },
   audit: (entry: unknown) => void,
 ): ScopedBundleWriter {
   let closed = false;
   // Writes started but not yet announced. A driver need not await its own
-  // `createItems`/`updateItems` — `void writer.createItems(...)` is legal JS — so the run can
+  // `createItems`/`updateItems`/`writeFile` — `void writer.createItems(...)` is legal JS — so the run can
   // reach its end with items on the way to the database. Tracking them is what
   // lets `close()` wait instead of walking away from their audit entries.
   const inFlight = new Set<Promise<unknown>>();
   return {
     async createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]> {
       if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
+      if (!surfaces.items) throw invalid("this service did not declare item writes");
       const landing = (async (): Promise<string[]> => {
         const created = await createItemsUnchecked(db, bundleId, { itemType: itemTypeName, items: values }).catch(
           (err: unknown) => {
@@ -766,6 +772,7 @@ export function createBundleWriter(
     },
     async updateItems(updates: ItemUpdateInput[]) {
       if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
+      if (!surfaces.items) throw invalid("this service did not declare item writes");
       const landing = (async () => {
         const updated = await updateItemsUnchecked(db, bundleId, updates).catch((err: unknown) => {
           if (err instanceof YapError && (err.code === "conflict" || /must be unique/.test(err.message))) {
@@ -779,6 +786,21 @@ export function createBundleWriter(
         }
         for (const [itemType, ids] of byType) audit({ type: "items", itemType, ids, op: "update" });
         return updated;
+      })();
+      inFlight.add(landing);
+      try {
+        return await landing;
+      } finally {
+        inFlight.delete(landing);
+      }
+    },
+    async writeFile(input: FileWriteInput) {
+      if (closed) throw invalid("this service run has ended; its write handle is no longer usable");
+      if (!surfaces.files) throw invalid("this service did not declare file writes");
+      const landing = (async () => {
+        const file = await writeFileUnchecked({ db, blob, config }, ownerId, bundleId, input);
+        audit({ type: "file", id: file.id, name: file.name, size: file.size });
+        return file;
       })();
       inFlight.add(landing);
       try {

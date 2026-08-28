@@ -17,6 +17,7 @@
  * declares the matching surface.
  */
 import { randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 import type { Readable } from "node:stream";
 
 import { eq } from "drizzle-orm";
@@ -25,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createHttpDriver } from "../../src/core/drivers/http.js";
 import { DriverRegistry } from "../../src/core/drivers/registry.js";
 import { DRIVER_API, type BundleFile, type BundleReader, type BundleWriter, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
+import { listFilesUnchecked, openDownloadStream } from "../../src/core/files.js";
 import { createItemType } from "../../src/core/itemTypes.js";
 import { createItems, getItems, queryItems } from "../../src/core/items.js";
 import { getRun, runService, type RunEnv } from "../../src/core/runs.js";
@@ -157,12 +159,40 @@ let escapedFile: BundleFile | null = null;
 let escapedStream: Readable | null = null;
 let escapedWriter: BundleWriter | null = null;
 
+async function streamToText(stream: Readable): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const fileOnlyDriver: DriverDefinition = {
+  name: "file-writer",
+  api: DRIVER_API,
+  description: "In-test driver that writes only files.",
+  egress: false,
+  writes: { files: true },
+  validateConfig(): void {},
+  actions: {
+    file: {
+      description: "Writes one finalized file.",
+      params: [
+        { name: "name", required: true },
+        { name: "body", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    return await ctx.writer!.writeFile({ name: ctx.params.name!, bytes: ctx.params.body! });
+  },
+};
+
 const writingDriver: DriverDefinition = {
   name: "writer",
   api: DRIVER_API,
   description: "In-test driver that writes items back into its bundle.",
   egress: false,
-  writes: { items: true },
+  writes: { items: true, files: true },
   validateConfig(): void {},
   actions: {
     record: {
@@ -225,6 +255,37 @@ const writingDriver: DriverDefinition = {
       ],
       timeoutMs: 5_000,
     },
+    file: {
+      description: "Writes one finalized file.",
+      params: [
+        { name: "name", required: true },
+        { name: "body", required: true },
+        { name: "mimeType" },
+      ],
+      timeoutMs: 5_000,
+    },
+    file_to_item: {
+      description: "Writes a file and stores its ref on an item.",
+      params: [
+        { name: "id", required: true },
+        { name: "name", required: true },
+        { name: "body", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    bad_bytes: {
+      description: "Attempts to write a file with invalid bytes input.",
+      params: [{ name: "name", required: true }],
+      timeoutMs: 5_000,
+    },
+    detached_file: {
+      description: "Starts a file write without awaiting it and returns at once.",
+      params: [
+        { name: "name", required: true },
+        { name: "body", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     const writer = ctx.writer!;
@@ -243,6 +304,10 @@ const writingDriver: DriverDefinition = {
       void writer.updateItems([{ id: ctx.params.id!, set: { title: ctx.params.title } }]).catch(() => {});
       return { detached: true };
     }
+    if (ctx.action === "detached_file") {
+      void writer.writeFile({ name: ctx.params.name!, bytes: ctx.params.body! }).catch(() => {});
+      return { detached: true };
+    }
     if (ctx.action === "batch") {
       return { ids: await writer.createItems(ctx.params.itemType!, [{ title: "one" }, { title: "two" }]) };
     }
@@ -256,6 +321,24 @@ const writingDriver: DriverDefinition = {
     if (ctx.action === "update_file") {
       const [item] = await writer.updateItems([{ id: ctx.params.id!, set: { source: ctx.params.ref } }]);
       return { id: item!.id, values: item!.values };
+    }
+    if (ctx.action === "file") {
+      return await writer.writeFile({
+        name: ctx.params.name!,
+        mimeType: ctx.params.mimeType,
+        bytes: ctx.params.body!,
+      });
+    }
+    if (ctx.action === "file_to_item") {
+      const file = await writer.writeFile({ name: ctx.params.name!, mimeType: "text/plain", bytes: ctx.params.body! });
+      const [item] = await writer.updateItems([{ id: ctx.params.id!, set: { source: file.ref } }]);
+      return { file, item: { id: item!.id, values: item!.values } };
+    }
+    if (ctx.action === "bad_bytes") {
+      return await writer.writeFile({
+        name: ctx.params.name!,
+        bytes: { not: "bytes" } as unknown as string,
+      });
     }
     if (ctx.action === "edit") {
       const [item] = await writer.updateItems([
@@ -310,11 +393,12 @@ describeEachAdapter("services core", (adapter) => {
   }
 
   beforeAll(async () => {
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "", YAP_MAX_FILE_SIZE_BYTES: "64", YAP_MIME_ALLOWLIST: "text/plain" }, await adapter.makeDb());
     const registry = new DriverRegistry();
     registry.register(createHttpDriver(app.config));
     registry.register(plainDriver);
     registry.register(writingDriver);
+    registry.register(fileOnlyDriver);
     registry.register(readingDriver);
     // A resolver that keeps the online config check off the real network:
     // example.com is public, internal.corp is not.
@@ -1257,6 +1341,125 @@ describeEachAdapter("services core", (adapter) => {
       expect(finished.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
     });
 
+    it("writes finalized files into the run's bundle and records them on the run row", async () => {
+      await createService(env, aliceId, bundleId, { name: "file-output", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "file-output",
+        action: "file",
+        params: { name: "transcript.txt", mimeType: "text/plain", body: "hello transcript" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      const file = run.result as { id: string; ref: string; name: string; mimeType: string; size: number; status: string };
+      expect(file).toMatchObject({
+        ref: `file://${file.id}`,
+        name: "transcript.txt",
+        mimeType: "text/plain",
+        size: Buffer.byteLength("hello transcript"),
+        status: "finalized",
+      });
+      expect(run.writes).toEqual([{ type: "file", id: file.id, name: "transcript.txt", size: file.size }]);
+      const opened = await openDownloadStream({ db: app.db, blob: app.blob, config: app.config }, file.id);
+      expect(await streamToText(opened.stream)).toBe("hello transcript");
+    });
+
+    it("can write a file and store its ref on an item in the same run", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "needs generated file" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "file-and-item", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "file-and-item",
+        action: "file_to_item",
+        params: { id: item!.id, name: "summary.txt", body: "summary body" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      const result = run.result as { file: { id: string; ref: string }; item: { values: Record<string, unknown> } };
+      expect(result.item.values.source).toBe(result.file.ref);
+      expect(run.writes).toEqual([
+        { type: "file", id: result.file.id, name: "summary.txt", size: Buffer.byteLength("summary body") },
+        { type: "items", itemType: "Note", ids: [item!.id], op: "update" },
+      ]);
+    });
+
+    it("hands a files-only driver a writer", async () => {
+      await createService(env, aliceId, bundleId, { name: "files-only", driver: "file-writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "files-only",
+        params: { name: "only.txt", body: "file only" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect((run.result as { name: string }).name).toBe("only.txt");
+      expect(run.writes).toEqual([
+        {
+          type: "file",
+          id: (run.result as { id: string }).id,
+          name: "only.txt",
+          size: Buffer.byteLength("file only"),
+        },
+      ]);
+    });
+
+    it("audits a file write the driver never awaited", async () => {
+      await createService(env, aliceId, bundleId, { name: "file-detacher", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "file-detacher",
+        action: "detached_file",
+        params: { name: "late.txt", body: "late bytes" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      const finished = await getRun(env, aliceId, run.id);
+      expect(finished.writes).toEqual([
+        { type: "file", id: (finished.writes[0] as { id: string }).id, name: "late.txt", size: Buffer.byteLength("late bytes") },
+      ]);
+    });
+
+    it("rejects invalid file writes without audit entries or finalized records", async () => {
+      await createService(env, aliceId, bundleId, { name: "strict-file-output", driver: "writer", config: {} });
+
+      for (const [label, params, pattern] of [
+        ["bad-name", { name: "../nope.txt", mimeType: "text/plain", body: "ok" }, /path separators/],
+        ["bad-mime", { name: "image.png", mimeType: "image/png", body: "ok" }, /MIME type image\/png is not allowed/],
+        ["too-large", { name: "large.txt", mimeType: "text/plain", body: "x".repeat(65) }, /maximum size of 64 bytes/],
+      ] as const) {
+        const before = await listFilesUnchecked(app.db, bundleId);
+        const run = await runService(env, aliceId, bundleId, {
+          service: "strict-file-output",
+          action: "file",
+          params,
+          waitMs: 5_000,
+        });
+        expect(run.status, label).toBe("failed");
+        expect(run.error, label).toMatch(pattern);
+        expect(run.writes, label).toEqual([]);
+        expect(await listFilesUnchecked(app.db, bundleId), label).toEqual(before);
+      }
+
+      const before = await listFilesUnchecked(app.db, bundleId);
+      const badBytes = await runService(env, aliceId, bundleId, {
+        service: "strict-file-output",
+        action: "bad_bytes",
+        params: { name: "bad.bin" },
+        waitMs: 5_000,
+      });
+      expect(badBytes.status).toBe("failed");
+      expect(badBytes.error).toMatch(/file bytes must be a string or Uint8Array/);
+      expect(badBytes.writes).toEqual([]);
+      expect(await listFilesUnchecked(app.db, bundleId)).toEqual(before);
+    });
+
     it("hands a driver that declared no writes a null writer", async () => {
       await createService(env, aliceId, bundleId, { name: "inspector", driver: "plain", config: {} });
       const run = await runService(env, aliceId, bundleId, {
@@ -1287,6 +1490,9 @@ describeEachAdapter("services core", (adapter) => {
         /write handle is no longer usable/,
       );
       await expect(escapedWriter!.updateItems([{ id: randomUUID(), set: { title: "after the fact" } }])).rejects.toThrow(
+        /write handle is no longer usable/,
+      );
+      await expect(escapedWriter!.writeFile({ name: "late.txt", bytes: "after the fact" })).rejects.toThrow(
         /write handle is no longer usable/,
       );
       expect(await titles(bundleId)).not.toContain("after the fact");

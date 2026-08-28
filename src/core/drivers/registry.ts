@@ -142,13 +142,6 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
         throw invalid(`driver "${def.name}" writes.${surface} must be a boolean when present`);
       }
     }
-    // The field is part of the declared shape but nothing is wired behind it:
-    // a driver declaring it would still get a writer with no file surface on
-    // it, and would fail at run time believing it had been granted one. Say so
-    // at install time instead.
-    if (def.writes.files === true) {
-      throw invalid(`driver "${def.name}" writes.files is reserved and not yet supported`);
-    }
   }
   if (def.configDoc !== undefined && typeof def.configDoc !== "string") {
     throw invalid(`driver "${def.name}" configDoc must be a string when present`);

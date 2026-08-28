@@ -293,6 +293,7 @@ function buildParams(
 
 interface Job {
   runId: string;
+  userId: string;
   bundleId: string;
   /** For the operator-side failure line only — the row already carries it. */
   serviceName: string;
@@ -401,7 +402,9 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     // Undeclared write surfaces are simply not reachable: no handle, no door.
     // The writer is scoped to *this run's* bundle at construction, so a driver
     // has no way to point it at another one.
-    writer = job.def.writes?.items ? createBundleWriter(db, job.bundleId, (entry) => writes.push(entry)) : null;
+    writer = job.def.writes?.items || job.def.writes?.files
+      ? createBundleWriter(db, env.blob, config, job.userId, job.bundleId, job.def.writes, (entry) => writes.push(entry))
+      : null;
     const running = job.def.run({
       config: serviceConfig,
       action: job.action,
@@ -602,6 +605,7 @@ export async function runService(
   // promise can never reject unhandled.
   const execution = execute(env, {
     runId,
+    userId,
     bundleId,
     serviceName: service.name,
     def,

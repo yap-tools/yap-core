@@ -175,11 +175,11 @@ describe("validateDriverDefinition", () => {
     expect(validateDriverDefinition(definition({ writes: { items: true } }))).toBeTruthy();
   });
 
-  it("rejects writes.files, which is declared but not wired to anything", () => {
-    expect(() => validateDriverDefinition(definition({ writes: { files: true } }))).toThrow(
-      /writes\.files is reserved and not yet supported/,
-    );
-    // Declaring it as *not* wanted is simply nothing to grant.
+  it("accepts supported write surface declarations", () => {
+    expect(validateDriverDefinition(definition({ writes: { items: true } }))).toBeTruthy();
+    expect(validateDriverDefinition(definition({ writes: { files: true } }))).toBeTruthy();
+    expect(validateDriverDefinition(definition({ writes: { items: true, files: true } }))).toBeTruthy();
+    // Declaring a surface as *not* wanted is simply nothing to grant.
     expect(validateDriverDefinition(definition({ writes: { items: true, files: false } }))).toBeTruthy();
   });
 

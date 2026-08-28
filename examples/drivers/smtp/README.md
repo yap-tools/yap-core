@@ -89,9 +89,9 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   socket in a `finally`, on every path.
 - **Writes.** It declares none, so `ctx.writer` is `null` and no write surface is reachable from it. A driver
   that wants to create or update items declares `writes: { items: true }` and gets bundle-scoped
-  `ctx.writer.createItems(itemTypeName, values)` and `ctx.writer.updateItems([{id, set?, edits?}])`;
-  `writes.files` is reserved — declaring it is refused at load time, since no file surface exists on the
-  writer yet.
+  `ctx.writer.createItems(itemTypeName, values)` and `ctx.writer.updateItems([{id, set?, edits?}])`. A driver
+  that wants to write finalized files declares `writes: { files: true }` and gets
+  `ctx.writer.writeFile({name, mimeType?, bytes})`, which returns a `file://` ref.
 - **Reads.** It declares no bundle reads, so `ctx.reader` is `null`. A driver that needs stored file
   bytes declares `reads: { files: true }` and gets `ctx.reader.readFile(refOrId)`, scoped to finalized files
   in the service run's bundle. Prefer `file.stream()` for large files; `file.bytes()` and `file.text()`

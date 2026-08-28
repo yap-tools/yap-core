@@ -92,6 +92,76 @@ export interface UploadRequestResult {
   status: "reserved";
 }
 
+export interface FileWriteInput {
+  name: string;
+  mimeType?: string;
+  bytes: Uint8Array | string;
+}
+
+export type WrittenFileInfo = FileInfo & { ref: string };
+
+/**
+ * Internal: write a finalized file without the edit_files capability check.
+ * Service drivers use this through their bundle-scoped writer; name, MIME,
+ * size, storage, and finalized-row semantics match the normal file layer.
+ */
+export async function writeFileUnchecked(
+  env: FileEnv,
+  ownerId: string,
+  bundleId: string,
+  input: FileWriteInput,
+): Promise<WrittenFileInfo> {
+  const { db, blob, config } = env;
+  const ctx = await getBundleContext(db, bundleId);
+  const name = cleanFileName(input.name);
+  const mimeType = input.mimeType ?? "";
+  if (mimeType && !mimeAllowed(config, mimeType)) {
+    throw unsupportedMediaType(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
+  }
+  if (typeof input.bytes !== "string" && !(input.bytes instanceof Uint8Array)) {
+    throw invalid("file bytes must be a string or Uint8Array");
+  }
+  const bytes = typeof input.bytes === "string" ? Buffer.from(input.bytes) : input.bytes;
+  if (bytes.byteLength > config.maxFileSizeBytes) {
+    throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+  }
+
+  const { files } = db.tables;
+  const fileId = newId();
+  const storageKey = `${ctx.space.id}/${bundleId}/${fileId}`;
+  await blob.put(storageKey, bytes);
+  try {
+    const now = nowIso();
+    await db.client.insert(files).values({
+      id: fileId,
+      bundleId,
+      spaceId: ctx.space.id,
+      ownerId,
+      status: "finalized",
+      name,
+      mimeType,
+      size: bytes.byteLength,
+      storageKey,
+      uploadConsumed: 1,
+      createdAt: now,
+      finalizedAt: now,
+    });
+  } catch (err) {
+    await blob.delete(storageKey).catch(() => {});
+    throw err;
+  }
+
+  return {
+    id: fileId,
+    ref: `file://${fileId}`,
+    name,
+    mimeType,
+    size: bytes.byteLength,
+    status: "finalized",
+    createdAt: (await getFileRow(db, fileId)).createdAt,
+  };
+}
+
 export async function requestUpload(
   env: FileEnv,
   userId: string,

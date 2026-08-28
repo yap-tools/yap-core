@@ -12,9 +12,10 @@
  *   driver must not retain it past its `run`. Disposal releases only the fetch
  *   pool — a socket returned by `connect()` is the driver's, and the driver
  *   must close it itself.
- * - Writes: a driver receives a `writer` only for the write surfaces it
- *   declared. Item writes can create and update items in the run bundle.
- *   Undeclared writes are simply not reachable — `writer` is null.
+ * - Writes: a driver receives a `writer` when it declares at least one write
+ *   surface. Item writes can create/update items in the run bundle; file writes
+ *   create finalized files there. A driver declaring no writes receives `null`;
+ *   a writer method for an undeclared surface rejects.
  * - Config: the decrypted service config reaches the driver only inside
  *   `run`, never any listing or agent-visible surface (mirrors hook
  *   transports).
@@ -64,8 +65,6 @@ export interface DriverReads {
 /** Write surfaces a driver may reach through `RunContext.writer`. */
 export interface DriverWrites {
   items?: boolean;
-  /** Reserved: no file surface exists on the writer yet, so declaring this is
-   *  refused at load time rather than granting something that is not there. */
   files?: boolean;
 }
 
@@ -93,6 +92,15 @@ export interface BundleWriter {
   updateItems(
     updates: Array<{ id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }>,
   ): Promise<Array<{ id: string; itemType: string; createdAt: string; updatedAt: string; values: Record<string, unknown> }>>;
+  writeFile(input: { name: string; mimeType?: string; bytes: Uint8Array | string }): Promise<{
+    id: string;
+    ref: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    status: string;
+    createdAt: string;
+  }>;
 }
 
 /** The verdicts a driver may attach to a `ctx.fail` — the subset of Yap's
