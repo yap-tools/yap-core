@@ -8,7 +8,7 @@ the decrypted config, the caller's parameters, the names of the pinned ones, a g
 signal, a log sink, and `ctx.fail` for errors the agent may read.
 
 It is a reference, not the way to get email into Yap: every instance already ships the built-in `mail` driver
-(IMAP + SMTP, six actions, documented in [docs/mail-driver.md](../../../docs/mail-driver.md)), which needs no
+(IMAP + SMTP, seven actions, documented in [docs/mail-driver.md](../../../docs/mail-driver.md)), which needs no
 install. Use this folder when you are writing a driver of your own.
 
 ## Install
@@ -91,6 +91,10 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   that wants to create items declares `writes: { items: true }` and gets a bundle-scoped
   `ctx.writer.createItems(itemTypeName, values)`; `writes.files` is reserved — declaring it is refused at load
   time, since no file surface exists on the writer yet.
+- **Reads.** It declares no bundle reads, so `ctx.reader` is `null`. A driver that needs stored file
+  bytes declares `reads: { files: true }` and gets `ctx.reader.readFile(refOrId)`, scoped to finalized files
+  in the service run's bundle. Prefer `file.stream()` for large files; `file.bytes()` and `file.text()`
+  are capped convenience helpers.
 - **Abort.** Every read races `ctx.signal`, so a run that hits its budget tears the session down rather than
   holding a socket open.
 - **Injection.** `to` and `from` must be single addresses that require a dotted domain (`name@host.tld`) — a

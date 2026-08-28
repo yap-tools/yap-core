@@ -129,6 +129,7 @@ export function createCtx(
     config: {},
     action: "",
     params: {},
+    reader: null,
     writer: null,
   };
 }

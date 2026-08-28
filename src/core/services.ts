@@ -47,17 +47,22 @@
  *   operator-facing surface, and the operator is precisely who needs to know
  *   which address was refused.
  */
+import { Buffer } from "node:buffer";
+import type { Readable } from "node:stream";
+import { finished } from "node:stream/promises";
+
 import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 
+import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import { encryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
-import type { BundleWriter, DriverDefinition } from "./drivers/types.js";
-import { invalid, notFound, YapError } from "./errors.js";
+import type { BundleReader, BundleWriter, DriverDefinition } from "./drivers/types.js";
+import { invalid, notFound, tooLarge, YapError } from "./errors.js";
 import { createItemsUnchecked } from "./items.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
@@ -542,6 +547,131 @@ export async function deleteService(env: ServiceEnv, userId: string, serviceId: 
   await requireBundleCapability(db, userId, "edit_services", ctx);
   const { services } = db.tables;
   await db.client.delete(services).where(eq(services.id, serviceId));
+}
+
+// ---- The bundle reader ------------------------------------------------------
+
+const FILE_REF_PREFIX = "file://";
+const DRIVER_INLINE_FILE_CAP_BYTES = 10 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function fileIdFromRef(refOrId: string): string {
+  const ref = refOrId.trim();
+  const id = ref.startsWith(FILE_REF_PREFIX) ? ref.slice(FILE_REF_PREFIX.length) : ref;
+  if (!UUID_RE.test(id)) throw invalid("readFile expects a file://{uuid} reference or file id");
+  return id;
+}
+
+export function defaultDriverInlineFileCap(config: YapConfig): number {
+  return Math.min(config.maxFileSizeBytes, DRIVER_INLINE_FILE_CAP_BYTES);
+}
+
+export interface ScopedBundleReader extends BundleReader {
+  close(): Promise<void>;
+}
+
+async function readStreamUpTo(stream: Readable, maxBytes: number, fileId: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of stream) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += bytes.byteLength;
+      if (total > maxBytes) {
+        stream.destroy();
+        throw tooLarge(`file ${fileId} exceeds the maximum inline read size of ${maxBytes} bytes`);
+      }
+      chunks.push(bytes);
+    }
+  } catch (err) {
+    stream.destroy();
+    throw err;
+  }
+  return Buffer.concat(chunks, total);
+}
+
+export function createBundleReader(
+  db: Db,
+  blob: BlobStore,
+  bundleId: string,
+  defaultMaxBytes: number,
+  audit: (entry: unknown) => void,
+): ScopedBundleReader {
+  let closed = false;
+  const inFlight = new Set<Promise<unknown>>();
+
+  const track = async <T>(start: () => Promise<T>): Promise<T> => {
+    if (closed) throw invalid("this service run has ended; its read handle is no longer usable");
+    const operation = start();
+    inFlight.add(operation);
+    try {
+      return await operation;
+    } finally {
+      inFlight.delete(operation);
+    }
+  };
+
+  const trackStream = (stream: Readable): Readable => {
+    const lifetime = finished(stream, { cleanup: true }).catch(() => {});
+    inFlight.add(lifetime);
+    void lifetime.finally(() => inFlight.delete(lifetime));
+    return stream;
+  };
+
+  return {
+    async readFile(refOrId: string) {
+      if (closed) throw invalid("this service run has ended; its read handle is no longer usable");
+      const id = fileIdFromRef(refOrId);
+      const { files } = db.tables;
+      const rows = await db.client.select().from(files).where(eq(files.id, id));
+      const file = rows[0];
+      if (!file || file.bundleId !== bundleId || file.status !== "finalized") throw notFound("file", id);
+
+      let announced = false;
+      const announce = (): void => {
+        if (announced) return;
+        announced = true;
+        audit({ type: "file_read", id: file.id, name: file.name, size: file.size });
+      };
+      const cap = (maxBytes?: number): number => {
+        const limit = maxBytes ?? defaultMaxBytes;
+        if (!Number.isSafeInteger(limit) || limit < 0) throw invalid("maxBytes must be a non-negative integer");
+        if (file.size > limit) {
+          throw tooLarge(`file ${file.id} exceeds the maximum inline read size of ${limit} bytes`);
+        }
+        return limit;
+      };
+      const open = async () => {
+        const stream = await blob.getStream(file.storageKey);
+        announce();
+        return stream;
+      };
+
+      return {
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        stream: async () => track(() => open().then(trackStream)),
+        bytes: async (opts?: { maxBytes?: number }) => {
+          const limit = cap(opts?.maxBytes);
+          const bytes = await track(() => open().then((stream) => readStreamUpTo(stream, limit, file.id)));
+          return new Uint8Array(bytes);
+        },
+        text: async (opts?: { maxBytes?: number; encoding?: BufferEncoding }) => {
+          const limit = cap(opts?.maxBytes);
+          const bytes = await track(() => open().then((stream) => readStreamUpTo(stream, limit, file.id)));
+          return bytes.toString(opts?.encoding ?? "utf8");
+        },
+      };
+    },
+    async close(): Promise<void> {
+      closed = true;
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+    },
+  };
 }
 
 // ---- The bundle writer ------------------------------------------------------

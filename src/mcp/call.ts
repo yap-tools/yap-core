@@ -386,7 +386,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   get_run: {
     description:
-      "Read one run back: its status, the parameters it was given, the result or error, and any items it wrote. Poll this after run_service until status is succeeded or failed. Params: id (the run id run_service returned).",
+      "Read one run back: its status, the parameters it was given, the result or error, and its bundle I/O trail. Poll this after run_service until status is succeeded or failed. Params: id (the run id run_service returned).",
     capability: "run_services",
     params: idParam,
     // Access is decided by the run's *own* bundle, not by the bundle_id this

@@ -44,6 +44,7 @@
  */
 import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 
+import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import { decryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
@@ -55,9 +56,12 @@ import type { DriverDefinition, RunContext } from "./drivers/types.js";
 import { type ErrorCode, invalid, notFound, YapError } from "./errors.js";
 import { clampLimit, decodeCursor, toPage } from "./pagination.js";
 import {
+  createBundleReader,
   createBundleWriter,
+  defaultDriverInlineFileCap,
   allowedActions,
   resolveActionParams,
+  type ScopedBundleReader,
   type ScopedBundleWriter,
   type ServiceParamSpec,
   type ServicePins,
@@ -99,6 +103,7 @@ export interface RunRecord {
 
 export interface RunEnv {
   db: Db;
+  blob: BlobStore;
   config: YapConfig;
   registry: DriverRegistry;
   resolver?: Resolver;
@@ -377,17 +382,22 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     if (logs.length > LOG_RING_SIZE) logs.shift();
   };
 
-  // The audit trail this run leaves behind. The writer appends to it as the
-  // driver writes; it lands on the row whichever way the run ends.
+  // The bundle I/O trail this run leaves behind. The reader and writer append
+  // metadata to it; it lands on the row whichever way the run ends.
   const writes: unknown[] = [];
 
   let egress: Egress | null = null;
+  let reader: ScopedBundleReader | null = null;
   let writer: ScopedBundleWriter | null = null;
   try {
     await db.client.update(runs).set({ status: "running", startedAt: nowIso() }).where(eq(runs.id, job.runId));
     // The decrypted config exists only here, only in memory.
     const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
+    // Undeclared read surfaces are simply not reachable: no handle, no door.
+    reader = job.def.reads?.files
+      ? createBundleReader(db, env.blob, job.bundleId, defaultDriverInlineFileCap(config), (entry) => writes.push(entry))
+      : null;
     // Undeclared write surfaces are simply not reachable: no handle, no door.
     // The writer is scoped to *this run's* bundle at construction, so a driver
     // has no way to point it at another one.
@@ -398,6 +408,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
       params: job.values,
       pinned: job.pinnedNames,
       egress,
+      reader,
       writer,
       signal: controller.signal,
       log,
@@ -427,6 +438,7 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     // drains the ones already in flight, so their audit entries are pushed onto
     // `writes` before this attempt resolves and `execute` serializes it. An
     // item that landed can therefore never be missing from the run's trail.
+    await reader?.close();
     await writer?.close();
     if (egress) {
       try {

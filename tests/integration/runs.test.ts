@@ -262,6 +262,7 @@ describeEachAdapter("runs", (adapter) => {
     // rather than silenced, so the "failed" tests can assert what it says.
     env = {
       db: app.db,
+      blob: app.blob,
       config: app.config,
       registry,
       logger: createLogger({
@@ -425,7 +426,7 @@ describeEachAdapter("runs", (adapter) => {
       try {
         const registry = new DriverRegistry();
         registry.register(testDriver);
-        const cappedEnv: RunEnv = { db: capped.db, config: capped.config, registry };
+        const cappedEnv: RunEnv = { db: capped.db, blob: capped.blob, config: capped.config, registry };
         const sysadmin = apiClient(capped.baseUrl, TEST_SYSADMIN_KEY);
         const u = await sysadmin.post("/v1/users", { name: "U" });
         const user = apiClient(capped.baseUrl, u.body.initialKey.key);

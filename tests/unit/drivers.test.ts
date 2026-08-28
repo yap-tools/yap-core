@@ -182,6 +182,14 @@ describe("validateDriverDefinition", () => {
     // Declaring it as *not* wanted is simply nothing to grant.
     expect(validateDriverDefinition(definition({ writes: { items: true, files: false } }))).toBeTruthy();
   });
+
+  it("validates read surface declarations", () => {
+    expect(() => validateDriverDefinition(definition({ reads: "files" }))).toThrow(/reads/);
+    expect(() => validateDriverDefinition(definition({ reads: { files: "yes" } }))).toThrow(/reads\.files/);
+    expect(() => validateDriverDefinition(definition({ reads: { docs: true } }))).toThrow(/reads\.docs/);
+    expect(validateDriverDefinition(definition({ reads: { files: true } }))).toBeTruthy();
+    expect(validateDriverDefinition(definition({ reads: { files: false } }))).toBeTruthy();
+  });
 });
 
 describe("DriverRegistry", () => {

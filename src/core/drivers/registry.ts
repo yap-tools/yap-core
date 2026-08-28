@@ -119,6 +119,19 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
     throw invalid(`driver "${def.name}" description must be a non-empty string`);
   }
   requireBoolean(def.egress, `"${def.name}" egress`);
+  if (def.reads !== undefined) {
+    if (!isPlainObject(def.reads)) {
+      throw invalid(`driver "${def.name}" reads must be an object when present, got ${describe(def.reads)}`);
+    }
+    for (const surface of Object.keys(def.reads)) {
+      if (surface !== "files") {
+        throw invalid(`driver "${def.name}" reads.${surface} is not supported`);
+      }
+    }
+    if (def.reads.files !== undefined && typeof def.reads.files !== "boolean") {
+      throw invalid(`driver "${def.name}" reads.files must be a boolean when present`);
+    }
+  }
   if (def.writes !== undefined) {
     if (!isPlainObject(def.writes)) {
       throw invalid(`driver "${def.name}" writes must be an object when present, got ${describe(def.writes)}`);

@@ -151,7 +151,7 @@ export function registerRestRoutes(server: YapServer): void {
   const fileEnv: filesCore.FileEnv = { db, blob, config };
   // `logger` rides along for the runs layer: a failed run's detail belongs in
   // the server log, since the row an agent reads keeps only the flat message.
-  const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, config, registry, logger };
+  const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, blob, config, registry, logger };
 
   const handle =
     (fn: Handler) =>

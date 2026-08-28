@@ -22,6 +22,8 @@
  * is checked structurally at load time by `validateDriverDefinition` in
  * registry.ts rather than trusted from the declaration here.
  */
+import type { Readable } from "node:stream";
+
 import type { ErrorCode } from "../errors.js";
 import type { Egress } from "./egress.js";
 
@@ -52,6 +54,11 @@ export interface DriverActionSpec {
   timeoutMs: number;
 }
 
+/** Read surfaces a driver may reach through `RunContext.reader`. */
+export interface DriverReads {
+  files?: boolean;
+}
+
 /** Write surfaces a driver may reach through `RunContext.writer`. */
 export interface DriverWrites {
   items?: boolean;
@@ -65,6 +72,20 @@ export interface DriverWrites {
  * Implemented in the bundle writer module; declared minimally here so the
  * contract does not depend on it.
  */
+export interface BundleFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  stream(): Promise<Readable>;
+  bytes(opts?: { maxBytes?: number }): Promise<Uint8Array>;
+  text(opts?: { maxBytes?: number; encoding?: BufferEncoding }): Promise<string>;
+}
+
+export interface BundleReader {
+  readFile(refOrId: string): Promise<BundleFile>;
+}
+
 export interface BundleWriter {
   createItems(itemTypeName: string, values: Array<Record<string, unknown>>): Promise<string[]>;
 }
@@ -82,6 +103,8 @@ export interface RunContext {
   /** The guarded network door; null when the driver declared `egress: false`.
    * Valid for the duration of this call only — the runner disposes it after. */
   egress: Egress | null;
+  /** Bundle-scoped reads; null when the driver declared no reads. */
+  reader: BundleReader | null;
   /** Bundle-scoped writes; null when the driver declared no writes. */
   writer: BundleWriter | null;
   /**
@@ -114,6 +137,7 @@ export interface DriverDefinition {
   api: number;
   description: string;
   egress: boolean;
+  reads?: DriverReads;
   writes?: DriverWrites;
   /** Operator-facing help for the config shape, shown by the CLI. */
   configDoc?: string;

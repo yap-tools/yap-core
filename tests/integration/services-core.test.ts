@@ -4,24 +4,27 @@
  * This suite drives `src/core/services.ts` (and the writer half of
  * `src/core/runs.ts`) directly — the REST surface arrives in a later task, so
  * the core functions are the contract under test here. It uses a registry of
- * three drivers: the built-in http one (the only one with an online config
- * check), a plain in-test driver that declares no writes, and a writing driver
+ * four drivers: the built-in http one (the only one with an online config
+ * check), a plain in-test driver, a file-reading driver, and a writing driver
  * that reaches the item layer through `ctx.writer`.
  *
  * What is pinned: the capability split (`edit_services` authors,
  * `run_services` does not), the authoring-time validation that would otherwise
  * fail at fire time (unknown driver, bad param names, pins that name nothing
  * or hold non-scalars, configs the driver rejects offline *and* online), the
- * effective per-action parameter view with pins stripped, and the writer —
- * scoped to its run's bundle, audited on the run row, absent for a driver that
- * never declared writes.
+ * effective per-action parameter view with pins stripped, and the reader/writer handles —
+ * scoped to the run's bundle, audited on the run row, absent unless a driver
+ * declares the matching surface.
  */
+import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
+
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createHttpDriver } from "../../src/core/drivers/http.js";
 import { DriverRegistry } from "../../src/core/drivers/registry.js";
-import { DRIVER_API, type BundleWriter, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
+import { DRIVER_API, type BundleFile, type BundleReader, type BundleWriter, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
 import { createItemType } from "../../src/core/itemTypes.js";
 import { queryItems } from "../../src/core/items.js";
 import { getRun, runService, type RunEnv } from "../../src/core/runs.js";
@@ -61,11 +64,97 @@ const plainDriver: DriverDefinition = {
     },
   },
   async run(ctx: RunContext): Promise<unknown> {
-    return { hasWriter: ctx.writer !== null, hasEgress: ctx.egress !== null, params: ctx.params };
+    return {
+      hasWriter: ctx.writer !== null,
+      hasReader: ctx.reader !== null,
+      hasEgress: ctx.egress !== null,
+      params: ctx.params,
+    };
   },
 };
 
-/** Set by the `escape` action so a test can use the handle after the run. */
+const readingDriver: DriverDefinition = {
+  name: "reader",
+  api: DRIVER_API,
+  description: "In-test driver that reads finalized files from its bundle.",
+  egress: false,
+  reads: { files: true },
+  validateConfig(): void {},
+  actions: {
+    read: {
+      description: "Reads one text file.",
+      params: [{ name: "ref", required: true }],
+      timeoutMs: 5_000,
+    },
+    capped: {
+      description: "Reads one file through the capped bytes helper.",
+      params: [
+        { name: "ref", required: true },
+        { name: "maxBytes", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    capped_text: {
+      description: "Reads one file through the capped text helper.",
+      params: [
+        { name: "ref", required: true },
+        { name: "maxBytes", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    escape: {
+      description: "Stashes its reader handle and returns without reading.",
+      params: [],
+      timeoutMs: 5_000,
+    },
+    stream_escape: {
+      description: "Opens a stream, stashes it, and returns without consuming it.",
+      params: [{ name: "ref", required: true }],
+      timeoutMs: 5_000,
+    },
+    file_escape: {
+      description: "Resolves a file handle, stashes it, and returns without reading bytes.",
+      params: [{ name: "ref", required: true }],
+      timeoutMs: 5_000,
+    },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    if (ctx.action === "escape") {
+      escapedReader = ctx.reader!;
+      return { stashed: true };
+    }
+    const file = await ctx.reader!.readFile(ctx.params.ref!);
+    if (ctx.action === "stream_escape") {
+      escapedStream = await file.stream();
+      return { stashed: true };
+    }
+    if (ctx.action === "file_escape") {
+      escapedFile = file;
+      return { stashed: true };
+    }
+    if (ctx.action === "capped") {
+      const bytes = await file.bytes({ maxBytes: Number(ctx.params.maxBytes) });
+      return { id: file.id, length: bytes.byteLength };
+    }
+    if (ctx.action === "capped_text") {
+      const text = await file.text({ maxBytes: Number(ctx.params.maxBytes) });
+      return { id: file.id, text };
+    }
+    return {
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      text: await file.text(),
+    };
+  },
+};
+
+
+/** Set by the `escape` actions so tests can use handles after the run. */
+let escapedReader: BundleReader | null = null;
+let escapedFile: BundleFile | null = null;
+let escapedStream: Readable | null = null;
 let escapedWriter: BundleWriter | null = null;
 
 const writingDriver: DriverDefinition = {
@@ -142,17 +231,46 @@ describeEachAdapter("services core", (adapter) => {
 
   const httpConfig = { url: "https://example.com/hook", method: "POST" as const, body_json: { text: "{{message}}" } };
 
+  async function makeFile(
+    bundle: string,
+    body: string,
+    opts: { status?: "finalized" | "reserved"; name?: string; mimeType?: string; recordedSize?: number } = {},
+  ): Promise<string> {
+    const status = opts.status ?? "finalized";
+    const id = randomUUID();
+    const storageKey = `${spaceId}/${bundle}/${id}`;
+    if (status === "finalized") await app.blob.put(storageKey, Buffer.from(body));
+    const now = new Date().toISOString();
+    const { files } = app.db.tables;
+    await app.db.client.insert(files).values({
+      id,
+      bundleId: bundle,
+      spaceId,
+      ownerId: aliceId,
+      status,
+      name: opts.name ?? "input.txt",
+      mimeType: opts.mimeType ?? "text/plain",
+      size: opts.recordedSize ?? Buffer.byteLength(body),
+      storageKey,
+      uploadConsumed: status === "finalized" ? 1 : 0,
+      createdAt: now,
+      finalizedAt: status === "finalized" ? now : null,
+    });
+    return id;
+  }
+
   beforeAll(async () => {
     app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "" }, await adapter.makeDb());
     const registry = new DriverRegistry();
     registry.register(createHttpDriver(app.config));
     registry.register(plainDriver);
     registry.register(writingDriver);
+    registry.register(readingDriver);
     // A resolver that keeps the online config check off the real network:
     // example.com is public, internal.corp is not.
     const resolver = async (hostname: string): Promise<string[]> =>
       hostname === "internal.corp" ? ["10.1.2.3"] : ["93.184.216.34"];
-    env = { db: app.db, config: app.config, registry, resolver };
+    env = { db: app.db, blob: app.blob, config: app.config, registry, resolver };
 
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
@@ -657,6 +775,199 @@ describeEachAdapter("services core", (adapter) => {
       await expect(
         createService(env, outsiderId, bundleId, { name: "trespass", config: httpConfig }),
       ).rejects.toMatchObject({ code: "not_found" });
+    });
+  });
+
+  describe("the bundle reader", () => {
+    it("reads finalized file refs from the run bundle and records metadata on the run row", async () => {
+      const fileId = await makeFile(bundleId, "hello from a file", { name: "note.txt" });
+      await createService(env, aliceId, bundleId, { name: "file-reader", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "file-reader",
+        action: "read",
+        params: { ref: `file://${fileId}` },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toEqual({
+        id: fileId,
+        name: "note.txt",
+        mimeType: "text/plain",
+        size: Buffer.byteLength("hello from a file"),
+        text: "hello from a file",
+      });
+      expect(run.writes).toEqual([
+        { type: "file_read", id: fileId, name: "note.txt", size: Buffer.byteLength("hello from a file") },
+      ]);
+    });
+
+    it("accepts bare file ids", async () => {
+      const fileId = await makeFile(bundleId, "bare id works");
+      await createService(env, aliceId, bundleId, { name: "bare-file-reader", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "bare-file-reader",
+        action: "read",
+        params: { ref: fileId },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toMatchObject({ id: fileId, text: "bare id works" });
+    });
+
+    it("rejects URLs and malformed refs", async () => {
+      await createService(env, aliceId, bundleId, { name: "strict-file-reader", driver: "reader", config: {} });
+
+      for (const ref of ["https://example.com/x.txt", "item://abc", "file://", "not a ref"]) {
+        const run = await runService(env, aliceId, bundleId, {
+          service: "strict-file-reader",
+          action: "read",
+          params: { ref },
+          waitMs: 5_000,
+        });
+        expect(run.status, ref).toBe("failed");
+        expect(run.error, ref).toMatch(/file:\/\/\{uuid\} reference or file id/);
+        expect(run.writes, ref).toEqual([]);
+      }
+    });
+
+    it("does not read reserved, missing, or cross-bundle files", async () => {
+      const reserved = await makeFile(bundleId, "not finalized", { status: "reserved" });
+      const crossBundle = await makeFile(otherBundleId, "wrong bundle");
+      await createService(env, aliceId, bundleId, { name: "scoped-file-reader", driver: "reader", config: {} });
+
+      for (const ref of [`file://${reserved}`, `file://${randomUUID()}`, `file://${crossBundle}`]) {
+        const run = await runService(env, aliceId, bundleId, {
+          service: "scoped-file-reader",
+          action: "read",
+          params: { ref },
+          waitMs: 5_000,
+        });
+        expect(run.status, ref).toBe("failed");
+        expect(run.error, ref).toMatch(/file .* not found/);
+        expect(run.writes, ref).toEqual([]);
+      }
+    });
+
+    it("hands a driver that declared no reads a null reader", async () => {
+      await createService(env, aliceId, bundleId, { name: "readless", driver: "plain", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "readless",
+        action: "inspect",
+        params: { note: "hi" },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toMatchObject({ hasReader: false });
+    });
+
+    it("enforces bytes and text helper caps", async () => {
+      const fileId = await makeFile(bundleId, "too large for cap");
+      await createService(env, aliceId, bundleId, { name: "capped-file-reader", driver: "reader", config: {} });
+
+      for (const action of ["capped", "capped_text"]) {
+        const run = await runService(env, aliceId, bundleId, {
+          service: "capped-file-reader",
+          action,
+          params: { ref: `file://${fileId}`, maxBytes: "3" },
+          waitMs: 5_000,
+        });
+
+        expect(run.status, action).toBe("failed");
+        expect(run.error, action).toMatch(/exceeds the maximum inline read size of 3 bytes/);
+        expect(run.writes, action).toEqual([]);
+      }
+    });
+
+    it("enforces helper caps while consuming the stream", async () => {
+      const fileId = await makeFile(bundleId, "stored bytes are larger than the row says", { recordedSize: 1 });
+      await createService(env, aliceId, bundleId, { name: "mismatched-file-reader", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "mismatched-file-reader",
+        action: "capped",
+        params: { ref: `file://${fileId}`, maxBytes: "3" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("failed");
+      expect(run.error).toMatch(/exceeds the maximum inline read size of 3 bytes/);
+      expect(run.writes).toEqual([{ type: "file_read", id: fileId, name: "input.txt", size: 1 }]);
+    });
+
+    it("revokes the reader handle once the run is over", async () => {
+      escapedReader = null;
+      const fileId = await makeFile(bundleId, "after run");
+      await createService(env, aliceId, bundleId, { name: "reader-escapee", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "reader-escapee",
+        action: "escape",
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(escapedReader).not.toBeNull();
+
+      await expect(escapedReader!.readFile(`file://${fileId}`)).rejects.toThrow(/read handle is no longer usable/);
+      const finished = await getRun(env, aliceId, run.id);
+      expect(finished.writes).toEqual([]);
+    });
+
+    it("keeps an opened stream inside the run until it is closed", async () => {
+      escapedStream = null;
+      const fileId = await makeFile(bundleId, "stream stays audited");
+      await createService(env, aliceId, bundleId, { name: "stream-escapee", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "stream-escapee",
+        action: "stream_escape",
+        params: { ref: `file://${fileId}` },
+        waitMs: 50,
+      });
+      expect(run.status).toBe("running");
+      expect(escapedStream).not.toBeNull();
+
+      escapedStream!.destroy();
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const finished = await getRun(env, aliceId, run.id);
+        if (finished.status === "succeeded") {
+          expect(finished.writes).toEqual([{ type: "file_read", id: fileId, name: "input.txt", size: 20 }]);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(await getRun(env, aliceId, run.id)).toMatchObject({ status: "succeeded" });
+    });
+
+    it("revokes escaped file helpers once the run is over", async () => {
+      escapedFile = null;
+      const fileId = await makeFile(bundleId, "helper after run");
+      await createService(env, aliceId, bundleId, { name: "file-escapee", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "file-escapee",
+        action: "file_escape",
+        params: { ref: `file://${fileId}` },
+        waitMs: 5_000,
+      });
+      expect(run.status).toBe("succeeded");
+      expect(escapedFile).not.toBeNull();
+
+      const getStream = vi.spyOn(app.blob, "getStream");
+      try {
+        await expect(escapedFile!.bytes()).rejects.toThrow(/read handle is no longer usable/);
+        await expect(escapedFile!.text()).rejects.toThrow(/read handle is no longer usable/);
+        await expect(escapedFile!.stream()).rejects.toThrow(/read handle is no longer usable/);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(getStream).not.toHaveBeenCalled();
+      } finally {
+        getStream.mockRestore();
+      }
+      const finished = await getRun(env, aliceId, run.id);
+      expect(finished.writes).toEqual([]);
     });
   });
 

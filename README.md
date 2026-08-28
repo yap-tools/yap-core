@@ -424,7 +424,14 @@ be the instance's externally reachable origin (https except on loopback).
   a driver that doesn't satisfy the contract fails at install time rather
   than in front of an agent. `yap driver remove <name>` uninstalls it; `yap
   driver list` shows what's installed, with its actions. Services then
-  reference an installed driver by name when they're authored.
+  reference an installed driver by name when they're authored. A driver that
+  declares `reads: { files: true }` receives `ctx.reader.readFile(refOrId)`,
+  scoped to finalized files in the service run's bundle; `file.stream()` is
+  the primary byte surface, while `file.bytes()` and `file.text()` are
+  capped convenience helpers. A driver that declares `writes: { items: true }`
+  receives `ctx.writer.createItems(itemTypeName, values)`, also scoped to the
+  run bundle and validated by the normal item layer. Undeclared read/write
+  surfaces are `null` on the run context.
   [`examples/drivers/smtp`](examples/drivers/smtp) is the minimal reference
   for writing one — a send-only driver in plain JavaScript that imports
   nothing from Yap (the built-in `mail` driver is the full-featured one).
@@ -438,7 +445,7 @@ be the instance's externally reachable origin (https except on loopback).
   25000); a caller that gets back a non-terminal run polls `get_run` (or
   `GET /v1/runs/:id`) until `status` is `succeeded` or `failed`. Every run is
   a durable, inspectable row — its params (the caller's half only; pins never
-  land on a run record), result or error, and any items it wrote — pruned
+  land on a run record), result or error, and its bundle I/O trail — file reads and item writes recorded as metadata only — pruned
   after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
   carries its own time budget, and only the built-in `http` driver's is
   operator-tunable (`YAP_HOOK_TIMEOUT_MS`); the `mail` driver and any
