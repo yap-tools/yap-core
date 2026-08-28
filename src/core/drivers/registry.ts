@@ -123,13 +123,16 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
     if (!isPlainObject(def.reads)) {
       throw invalid(`driver "${def.name}" reads must be an object when present, got ${describe(def.reads)}`);
     }
-    for (const surface of Object.keys(def.reads)) {
-      if (surface !== "files") {
-        throw invalid(`driver "${def.name}" reads.${surface} is not supported`);
+    for (const surface of ["files", "items"] as const) {
+      const value = def.reads[surface];
+      if (value !== undefined && typeof value !== "boolean") {
+        throw invalid(`driver "${def.name}" reads.${surface} must be a boolean when present`);
       }
     }
-    if (def.reads.files !== undefined && typeof def.reads.files !== "boolean") {
-      throw invalid(`driver "${def.name}" reads.files must be a boolean when present`);
+    for (const surface of Object.keys(def.reads)) {
+      if (surface !== "files" && surface !== "items") {
+        throw invalid(`driver "${def.name}" reads.${surface} is not supported`);
+      }
     }
   }
   if (def.writes !== undefined) {

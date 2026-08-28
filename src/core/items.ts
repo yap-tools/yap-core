@@ -638,6 +638,11 @@ export async function getItems(
 ): Promise<MaterializedItem[]> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "read_items", ctx);
+  return getItemsUnchecked(db, bundleId, ids);
+}
+
+/** Internal: materialize items in one bundle without the read_items gate. */
+export async function getItemsUnchecked(db: Db, bundleId: string, ids: string[]): Promise<MaterializedItem[]> {
   if (!Array.isArray(ids) || ids.length === 0) throw invalid("ids must be a non-empty array");
   const { items, itemTypes } = db.tables;
   const rows = await db.client
@@ -652,8 +657,11 @@ export async function getItems(
     const props = await loadProperties(db, typeId);
     result.push(...(await materialize(db, rows.filter((r) => r.itemTypeId === typeId), typeRows[0]!.name, props)));
   }
-  const order = new Map(ids.map((id, i) => [id, i]));
-  return result.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const byId = new Map(result.map((item) => [item.id, item]));
+  return ids.flatMap((id) => {
+    const item = byId.get(id);
+    return item ? [item] : [];
+  });
 }
 
 export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> };

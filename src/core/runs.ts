@@ -395,9 +395,10 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
     // The decrypted config exists only here, only in memory.
     const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
-    // Undeclared read surfaces are simply not reachable: no handle, no door.
-    reader = job.def.reads?.files
-      ? createBundleReader(db, env.blob, job.bundleId, defaultDriverInlineFileCap(config), (entry) => writes.push(entry))
+    // A reader exists only when the driver declared at least one read surface;
+    // individual undeclared reader methods reject on the handle itself.
+    reader = job.def.reads?.files || job.def.reads?.items
+      ? createBundleReader(db, env.blob, job.bundleId, job.def.reads, defaultDriverInlineFileCap(config), (entry) => writes.push(entry))
       : null;
     // Undeclared write surfaces are simply not reachable: no handle, no door.
     // The writer is scoped to *this run's* bundle at construction, so a driver

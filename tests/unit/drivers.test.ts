@@ -186,8 +186,11 @@ describe("validateDriverDefinition", () => {
   it("validates read surface declarations", () => {
     expect(() => validateDriverDefinition(definition({ reads: "files" }))).toThrow(/reads/);
     expect(() => validateDriverDefinition(definition({ reads: { files: "yes" } }))).toThrow(/reads\.files/);
+    expect(() => validateDriverDefinition(definition({ reads: { items: "yes" } }))).toThrow(/reads\.items/);
     expect(() => validateDriverDefinition(definition({ reads: { docs: true } }))).toThrow(/reads\.docs/);
     expect(validateDriverDefinition(definition({ reads: { files: true } }))).toBeTruthy();
+    expect(validateDriverDefinition(definition({ reads: { items: true } }))).toBeTruthy();
+    expect(validateDriverDefinition(definition({ reads: { files: true, items: true } }))).toBeTruthy();
     expect(validateDriverDefinition(definition({ reads: { files: false } }))).toBeTruthy();
   });
 });

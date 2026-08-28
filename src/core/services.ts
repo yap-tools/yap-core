@@ -61,10 +61,10 @@ import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
-import type { BundleReader, BundleWriter, DriverDefinition } from "./drivers/types.js";
+import type { BundleReader, BundleWriter, DriverDefinition, DriverReads } from "./drivers/types.js";
 import { invalid, notFound, tooLarge, YapError } from "./errors.js";
 import { writeFileUnchecked, type FileWriteInput } from "./files.js";
-import { createItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
+import { createItemsUnchecked, getItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -595,6 +595,7 @@ export function createBundleReader(
   db: Db,
   blob: BlobStore,
   bundleId: string,
+  surfaces: DriverReads,
   defaultMaxBytes: number,
   audit: (entry: unknown) => void,
 ): ScopedBundleReader {
@@ -622,6 +623,7 @@ export function createBundleReader(
   return {
     async readFile(refOrId: string) {
       if (closed) throw invalid("this service run has ended; its read handle is no longer usable");
+      if (!surfaces.files) throw invalid("this service did not declare file reads");
       const id = fileIdFromRef(refOrId);
       const { files } = db.tables;
       const rows = await db.client.select().from(files).where(eq(files.id, id));
@@ -665,6 +667,20 @@ export function createBundleReader(
           return bytes.toString(opts?.encoding ?? "utf8");
         },
       };
+    },
+    async getItems(ids: string[]) {
+      if (closed) throw invalid("this service run has ended; its read handle is no longer usable");
+      if (!surfaces.items) throw invalid("this service did not declare item reads");
+      return track(async () => {
+        const items = await getItemsUnchecked(db, bundleId, ids);
+        if (items.length !== ids.length) {
+          const found = new Set(items.map((item) => item.id));
+          const missing = ids.find((id) => !found.has(id)) ?? ids[0];
+          throw notFound("item", missing);
+        }
+        audit({ type: "item_read", ids: items.map((item) => item.id) });
+        return items;
+      });
     },
     async close(): Promise<void> {
       closed = true;

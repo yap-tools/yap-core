@@ -75,12 +75,57 @@ const plainDriver: DriverDefinition = {
   },
 };
 
+const itemOnlyReader: DriverDefinition = {
+  name: "item-reader-only",
+  api: DRIVER_API,
+  description: "In-test driver that reads only items.",
+  egress: false,
+  reads: { items: true },
+  validateConfig(): void {},
+  actions: {
+    item: {
+      description: "Reads one item by id.",
+      params: [{ name: "id", required: true }],
+      timeoutMs: 5_000,
+    },
+    file: {
+      description: "Attempts to read one file.",
+      params: [{ name: "ref", required: true }],
+      timeoutMs: 5_000,
+    },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    if (ctx.action === "file") return await ctx.reader!.readFile(ctx.params.ref!);
+    const [item] = await ctx.reader!.getItems([ctx.params.id!]);
+    return { hasReader: ctx.reader !== null, item };
+  },
+};
+
+const fileOnlyReader: DriverDefinition = {
+  name: "file-reader-only",
+  api: DRIVER_API,
+  description: "In-test driver that reads only files.",
+  egress: false,
+  reads: { files: true },
+  validateConfig(): void {},
+  actions: {
+    item: {
+      description: "Attempts to read one item by id.",
+      params: [{ name: "id", required: true }],
+      timeoutMs: 5_000,
+    },
+  },
+  async run(ctx: RunContext): Promise<unknown> {
+    return await ctx.reader!.getItems([ctx.params.id!]);
+  },
+};
+
 const readingDriver: DriverDefinition = {
   name: "reader",
   api: DRIVER_API,
-  description: "In-test driver that reads finalized files from its bundle.",
+  description: "In-test driver that reads finalized files and items from its bundle.",
   egress: false,
-  reads: { files: true },
+  reads: { files: true, items: true },
   validateConfig(): void {},
   actions: {
     read: {
@@ -119,11 +164,28 @@ const readingDriver: DriverDefinition = {
       params: [{ name: "ref", required: true }],
       timeoutMs: 5_000,
     },
+    item: {
+      description: "Reads one item by id.",
+      params: [{ name: "id", required: true }],
+      timeoutMs: 5_000,
+    },
+    items: {
+      description: "Reads several items by id.",
+      params: [{ name: "ids", required: true }],
+      timeoutMs: 5_000,
+    },
   },
   async run(ctx: RunContext): Promise<unknown> {
     if (ctx.action === "escape") {
       escapedReader = ctx.reader!;
       return { stashed: true };
+    }
+    if (ctx.action === "item") {
+      const [item] = await ctx.reader!.getItems([ctx.params.id!]);
+      return item;
+    }
+    if (ctx.action === "items") {
+      return await ctx.reader!.getItems(ctx.params.ids!.split(","));
     }
     const file = await ctx.reader!.readFile(ctx.params.ref!);
     if (ctx.action === "stream_escape") {
@@ -399,6 +461,8 @@ describeEachAdapter("services core", (adapter) => {
     registry.register(plainDriver);
     registry.register(writingDriver);
     registry.register(fileOnlyDriver);
+    registry.register(itemOnlyReader);
+    registry.register(fileOnlyReader);
     registry.register(readingDriver);
     // A resolver that keeps the online config check off the real network:
     // example.com is public, internal.corp is not.
@@ -940,6 +1004,112 @@ describeEachAdapter("services core", (adapter) => {
       ]);
     });
 
+    it("reads items from the run bundle and records metadata on the run row", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "readable item" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "item-reader", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "item-reader",
+        action: "item",
+        params: { id: item!.id },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toMatchObject({ id: item!.id, itemType: "Note", values: { title: "readable item" } });
+      expect(run.writes).toEqual([{ type: "item_read", ids: [item!.id] }]);
+    });
+
+    it("hands an items-only driver a reader", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "item-only readable" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "items-only", driver: "item-reader-only", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "items-only",
+        action: "item",
+        params: { id: item!.id },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect(run.result).toMatchObject({ hasReader: true, item: { id: item!.id, values: { title: "item-only readable" } } });
+      expect(run.writes).toEqual([{ type: "item_read", ids: [item!.id] }]);
+    });
+
+    it("reads multiple items in input order with one audit entry", async () => {
+      const [first, second] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "first" }, { title: "second" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "multi-item-reader", driver: "reader", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        service: "multi-item-reader",
+        action: "items",
+        params: { ids: `${second!.id},${first!.id},${second!.id}` },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      expect((run.result as Array<{ id: string }>).map((item) => item.id)).toEqual([second!.id, first!.id, second!.id]);
+      expect(run.writes).toEqual([{ type: "item_read", ids: [second!.id, first!.id, second!.id] }]);
+    });
+
+    it("rejects undeclared reader methods", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "blocked" }],
+      });
+      const fileId = await makeFile(bundleId, "blocked");
+      await createService(env, aliceId, bundleId, { name: "file-only-reader", driver: "file-reader-only", config: {} });
+      await createService(env, aliceId, bundleId, { name: "item-only-reader", driver: "item-reader-only", config: {} });
+
+      const itemRun = await runService(env, aliceId, bundleId, {
+        service: "file-only-reader",
+        params: { id: item!.id },
+        waitMs: 5_000,
+      });
+      expect(itemRun.status).toBe("failed");
+      expect(itemRun.error).toMatch(/did not declare item reads/);
+      expect(itemRun.writes).toEqual([]);
+
+      const fileRun = await runService(env, aliceId, bundleId, {
+        service: "item-only-reader",
+        action: "file",
+        params: { ref: `file://${fileId}` },
+        waitMs: 5_000,
+      });
+      expect(fileRun.status).toBe("failed");
+      expect(fileRun.error).toMatch(/did not declare file reads/);
+      expect(fileRun.writes).toEqual([]);
+    });
+
+    it("does not read missing or cross-bundle items", async () => {
+      const [crossBundle] = await createItems(app.db, aliceId, otherBundleId, {
+        itemType: "Note",
+        items: [{ title: "wrong bundle" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "scoped-item-reader", driver: "reader", config: {} });
+
+      for (const id of [randomUUID(), crossBundle!.id]) {
+        const run = await runService(env, aliceId, bundleId, {
+          service: "scoped-item-reader",
+          action: "item",
+          params: { id },
+          waitMs: 5_000,
+        });
+        expect(run.status, id).toBe("failed");
+        expect(run.error, id).toMatch(/item .* not found/);
+        expect(run.writes, id).toEqual([]);
+      }
+    });
+
     it("accepts bare file ids", async () => {
       const fileId = await makeFile(bundleId, "bare id works");
       await createService(env, aliceId, bundleId, { name: "bare-file-reader", driver: "reader", config: {} });
@@ -1049,6 +1219,7 @@ describeEachAdapter("services core", (adapter) => {
       expect(escapedReader).not.toBeNull();
 
       await expect(escapedReader!.readFile(`file://${fileId}`)).rejects.toThrow(/read handle is no longer usable/);
+      await expect(escapedReader!.getItems([randomUUID()])).rejects.toThrow(/read handle is no longer usable/);
       const finished = await getRun(env, aliceId, run.id);
       expect(finished.writes).toEqual([]);
     });

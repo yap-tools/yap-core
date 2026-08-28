@@ -95,7 +95,8 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
 - **Reads.** It declares no bundle reads, so `ctx.reader` is `null`. A driver that needs stored file
   bytes declares `reads: { files: true }` and gets `ctx.reader.readFile(refOrId)`, scoped to finalized files
   in the service run's bundle. Prefer `file.stream()` for large files; `file.bytes()` and `file.text()`
-  are capped convenience helpers.
+  are capped convenience helpers. A driver that needs stored items declares `reads: { items: true }` and gets
+  `ctx.reader.getItems(ids)`, scoped to the run bundle.
 - **Abort.** Every read races `ctx.signal`, so a run that hits its budget tears the session down rather than
   holding a socket open.
 - **Injection.** `to` and `from` must be single addresses that require a dotted domain (`name@host.tld`) — a
