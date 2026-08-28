@@ -11,3 +11,10 @@ data/
 
 # Local planning scratch — not part of the published repo
 docs/superpowers/
+
+# Local agent/dev-preview artifacts
+.claude/
+.devsite/
+.dockerignore
+Dockerfile
+dev-site.yml
