@@ -37,6 +37,13 @@ export interface Db {
   dialect: "sqlite" | "pg";
   client: DbClient;
   tables: Tables;
+  /**
+   * Run fn as one transaction: its writes commit together, or — when it
+   * throws — none of them land. fn must use the client it is handed, and must
+   * await nothing but database calls: SQLite has a single connection, so
+   * anything else that ran while the transaction was open would join it.
+   */
+  transaction<T>(fn: (tx: DbClient) => Promise<T>): Promise<T>;
   migrate(): Promise<void>;
   /** Apply migrations only up to (and including) journal index `index`. */
   migrateTo(index: number): Promise<void>;
@@ -123,10 +130,29 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
           .all() as { name: string }[]
       ).map((r) => r.name);
 
+    // One connection, so transactions run one at a time; the queue only
+    // matters if a transaction body ever yields to the event loop.
+    let txQueue: Promise<unknown> = Promise.resolve();
+
     return {
       dialect: "sqlite",
       client,
       tables: sqliteSchema,
+      transaction: (fn) => {
+        const run = txQueue.then(async () => {
+          sqlite.exec("BEGIN IMMEDIATE");
+          try {
+            const result = await fn(client);
+            sqlite.exec("COMMIT");
+            return result;
+          } catch (err) {
+            if (sqlite.inTransaction) sqlite.exec("ROLLBACK");
+            throw err;
+          }
+        });
+        txQueue = run.catch(() => {});
+        return run;
+      },
       migrate: async () => {
         migrateSqlite(client, { migrationsFolder: resolve(repoRoot, "drizzle/sqlite") });
       },
@@ -197,6 +223,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     dialect: "pg",
     client: client as unknown as DbClient,
     tables: pgSchema as unknown as Tables,
+    transaction: (fn) => client.transaction((tx) => fn(tx as unknown as DbClient)),
     migrate: async () => {
       await migratePg(client, { migrationsFolder: resolve(repoRoot, "drizzle/pg") });
     },

@@ -180,15 +180,16 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Users (sysadmin key) -------------------------------------------------
 
-  const createUserSchema = z.object({ name: z.string() });
+  const createUserSchema = z.object({ name: z.string(), externalId: z.string().nullish() });
 
   app.post(
     "/v1/users",
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createUserSchema, await jsonBody(c));
-      const created = await usersCore.createUser(db, body);
-      return c.json(created, 201);
+      const result = await usersCore.createUser(db, body);
+      // 200 without a key: the externalId already named a user, nothing was created.
+      return c.json(result, "initialKey" in result ? 201 : 200);
     }),
   );
 
@@ -196,7 +197,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/users",
     handle(async (c, auth) => {
       requireSysadmin(auth);
-      return c.json(await usersCore.listUsers(db, pageOpts(c)));
+      return c.json(await usersCore.listUsers(db, { ...pageOpts(c), externalId: c.req.query("externalId") }));
     }),
   );
 

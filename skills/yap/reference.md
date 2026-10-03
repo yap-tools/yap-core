@@ -116,10 +116,13 @@ Service egress (the `http` driver, or any driver declaring `egress: true`) denie
 ### Users, keys, OAuth (operator lane)
 | Method & path | Notes |
 |---|---|
-| `POST /v1/users` | **sysadmin** — provision a user |
-| `GET /v1/users`, `GET/DELETE /v1/users/:id` | **sysadmin** |
+| `POST /v1/users` | **sysadmin** — provision a user. Body `{name, externalId?}`. Creates the user, their personal space and an initial key as one transaction; `201` with `{user, personalSpaceId, initialKey}` (the key is shown once). With an `externalId` that already names a user, nothing is created: `200` with `{user, personalSpaceId}` and no key |
+| `GET /v1/users` | **sysadmin** — paginated list; `?externalId=…` narrows it to the one user carrying that id (an empty `data` if none) |
+| `GET/DELETE /v1/users/:id` | **sysadmin** |
 | `GET/POST /v1/keys`, `POST /v1/keys/:id/rotate`, `DELETE /v1/keys/:id` | user's own access keys |
 | `GET /v1/oauth/grants`, `DELETE /v1/oauth/grants/:id` | connected apps; also self-served at `/oauth/connections` |
+
+A user is `{id, name, externalId, createdAt}`. `externalId` is an optional correlation id for whatever system created the user — Yap attaches no meaning to it. It is a non-empty string of at most 255 characters, matched exactly, unique per instance when set, `null` otherwise, and fixed at creation (nothing updates it). It is what makes `POST /v1/users` safe to retry: a repeated create with the same `externalId` is a read — same user back, the `name` in the repeated body ignored, no key minted, nothing written — and concurrent creates with the same `externalId` yield exactly one user (one `201`, the rest `200`). Without an `externalId` every call creates a new user.
 
 OAuth: each instance is an OAuth 2.1 authorization server (PKCE, dynamic client registration, discovery). Scopes: `role:admin|member|read-only` + optional `space:<id>`/`bundle:<id>`; default `member`. Tokens are delegations of an access key — revoking the key revokes them. The authorize screen authenticates by access key (Yap has no passwords). `YAP_BASE_URL` must be the externally reachable origin; https is required except on loopback, so the default `http://localhost:8787` works out of the box for local clients.
 
