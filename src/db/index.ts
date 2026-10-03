@@ -39,11 +39,14 @@ export interface Db {
   tables: Tables;
   /**
    * Run fn as one transaction: its writes commit together, or — when it
-   * throws — none of them land. fn must use the client it is handed, and must
-   * await nothing but database calls: SQLite has a single connection, so
-   * anything else that ran while the transaction was open would join it.
+   * throws — none of them land. fn is a generator that yields each query
+   * (built on the client it is handed) and gets the query's result back, so
+   * one body serves both dialects: SQLite runs it synchronously, start to
+   * finish, because its single connection is shared with every other request
+   * and an awaited body would let their statements join the transaction;
+   * Postgres awaits each query on a connection of its own.
    */
-  transaction<T>(fn: (tx: DbClient) => Promise<T>): Promise<T>;
+  transaction<T>(fn: (tx: DbClient) => Generator<unknown, T, any>): Promise<T>;
   migrate(): Promise<void>;
   /** Apply migrations only up to (and including) journal index `index`. */
   migrateTo(index: number): Promise<void>;
@@ -130,29 +133,22 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
           .all() as { name: string }[]
       ).map((r) => r.name);
 
-    // One connection, so transactions run one at a time; the queue only
-    // matters if a transaction body ever yields to the event loop.
-    let txQueue: Promise<unknown> = Promise.resolve();
-
     return {
       dialect: "sqlite",
       client,
       tables: sqliteSchema,
-      transaction: (fn) => {
-        const run = txQueue.then(async () => {
-          sqlite.exec("BEGIN IMMEDIATE");
-          try {
-            const result = await fn(client);
-            sqlite.exec("COMMIT");
-            return result;
-          } catch (err) {
-            if (sqlite.inTransaction) sqlite.exec("ROLLBACK");
-            throw err;
-          }
-        });
-        txQueue = run.catch(() => {});
-        return run;
-      },
+      transaction: async (fn) =>
+        sqlite
+          .transaction(() => {
+            // A prepared query in drizzle's sync mode exposes the result
+            // without a promise in between.
+            type SyncQuery = { prepare(): { execute(): { sync(): unknown } } };
+            const steps = fn(client);
+            let step = steps.next();
+            while (!step.done) step = steps.next((step.value as SyncQuery).prepare().execute().sync());
+            return step.value;
+          })
+          .immediate(),
       migrate: async () => {
         migrateSqlite(client, { migrationsFolder: resolve(repoRoot, "drizzle/sqlite") });
       },
@@ -223,7 +219,13 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     dialect: "pg",
     client: client as unknown as DbClient,
     tables: pgSchema as unknown as Tables,
-    transaction: (fn) => client.transaction((tx) => fn(tx as unknown as DbClient)),
+    transaction: (fn) =>
+      client.transaction(async (tx) => {
+        const steps = fn(tx as unknown as DbClient);
+        let step = steps.next();
+        while (!step.done) step = steps.next(await step.value);
+        return step.value;
+      }),
     migrate: async () => {
       await migratePg(client, { migrationsFolder: resolve(repoRoot, "drizzle/pg") });
     },

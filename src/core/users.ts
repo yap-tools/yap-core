@@ -69,46 +69,56 @@ export async function createUser(
   const externalId = input.externalId == null ? null : checkExternalId(input.externalId);
   const { users, spaces, accessKeys } = db.tables;
 
-  return db.transaction(async (tx) => {
-    const now = nowIso();
-    const user: User = { id: newId(), name, externalId, createdAt: now };
+  return db.transaction(function* (tx) {
     // The unique index decides races: a concurrent create with the same
-    // externalId either waits for this transaction or inserts nothing.
-    const inserted = await tx.insert(users).values(user).onConflictDoNothing({ target: users.externalId }).returning();
-    if (inserted.length === 0) {
-      const [existing] = await tx.select().from(users).where(eq(users.externalId, externalId!));
-      const [personal] = await tx
-        .select({ id: spaces.id })
-        .from(spaces)
-        .where(and(eq(spaces.ownerId, existing!.id), eq(spaces.personal, 1)));
-      return { user: existing!, personalSpaceId: personal!.id };
+    // externalId either waits for this transaction or inserts nothing. The
+    // loop covers the user it lost to being deleted before it could be read.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const now = nowIso();
+      const user: User = { id: newId(), name, externalId, createdAt: now };
+      const inserted: User[] = yield tx
+        .insert(users)
+        .values(user)
+        .onConflictDoNothing({ target: users.externalId })
+        .returning();
+
+      if (inserted.length === 0) {
+        const existing: ExistingUser[] = yield tx
+          .select({ user: users, personalSpaceId: spaces.id })
+          .from(users)
+          .innerJoin(spaces, and(eq(spaces.ownerId, users.id), eq(spaces.personal, 1)))
+          .where(eq(users.externalId, externalId!));
+        if (existing.length > 0) return existing[0]!;
+        continue;
+      }
+
+      const personalSpaceId = newId();
+      yield tx.insert(spaces).values({
+        id: personalSpaceId,
+        ownerId: user.id,
+        name: "Personal",
+        description: `Personal space of ${name}`,
+        keywords: "personal",
+        context: "",
+        personal: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const key = generateAccessKey();
+      const keyId = newId();
+      yield tx.insert(accessKeys).values({
+        id: keyId,
+        userId: user.id,
+        name: "default",
+        keyHash: hashKey(key),
+        createdAt: now,
+        revokedAt: null,
+      });
+
+      return { user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
     }
-
-    const personalSpaceId = newId();
-    await tx.insert(spaces).values({
-      id: personalSpaceId,
-      ownerId: user.id,
-      name: "Personal",
-      description: `Personal space of ${name}`,
-      keywords: "personal",
-      context: "",
-      personal: 1,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    const key = generateAccessKey();
-    const keyId = newId();
-    await tx.insert(accessKeys).values({
-      id: keyId,
-      userId: user.id,
-      name: "default",
-      keyHash: hashKey(key),
-      createdAt: now,
-      revokedAt: null,
-    });
-
-    return { user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
+    throw new Error(`could not create or find the user with externalId ${externalId}`);
   });
 }
 

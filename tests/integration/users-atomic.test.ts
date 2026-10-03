@@ -54,6 +54,28 @@ describeEachAdapter("users: atomic creation", (adapter) => {
     }
   });
 
+  it("a write that overlaps a failing create is not rolled back with it", async () => {
+    const db = await adapter.makeDb();
+    try {
+      const { users } = db.tables;
+      vi.mocked(crypto.generateAccessKey).mockImplementationOnce(() => {
+        throw new Error("boom");
+      });
+      // Both start in the same tick; neither is awaited before the other begins.
+      const doomed = createUser(db, { name: "Doomed" });
+      const bystander = db.client
+        .insert(users)
+        .values({ id: "bystander", name: "Bystander", externalId: null, createdAt: "2026-01-01T00:00:00.000Z" })
+        .then(() => {});
+
+      await expect(doomed).rejects.toThrow("boom");
+      await bystander;
+      expect((await db.client.select().from(users)).map((u) => u.id)).toEqual(["bystander"]);
+    } finally {
+      await db.close();
+    }
+  });
+
   it("a database error on the last insert rolls the earlier ones back", async () => {
     const db = await adapter.makeDb();
     try {
