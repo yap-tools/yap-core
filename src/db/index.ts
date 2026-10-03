@@ -109,6 +109,9 @@ function truncatedMigrationsFolder(dialect: "sqlite" | "pg", index: number): str
   return dir;
 }
 
+/** A prepared query in drizzle's SQLite sync mode hands its result over without a promise in between. */
+type SyncQuery = { prepare(): { execute(): { sync(): unknown } } };
+
 function quoteIdent(name: string): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`invalid identifier: ${name}`);
   return `"${name}"`;
@@ -140,9 +143,6 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       transaction: async (fn) =>
         sqlite
           .transaction(() => {
-            // A prepared query in drizzle's sync mode exposes the result
-            // without a promise in between.
-            type SyncQuery = { prepare(): { execute(): { sync(): unknown } } };
             const steps = fn(client);
             let step = steps.next();
             while (!step.done) step = steps.next((step.value as SyncQuery).prepare().execute().sync());

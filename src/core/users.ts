@@ -42,7 +42,7 @@ export interface CreatedUser extends ExistingUser {
 const EXTERNAL_ID_MAX_LENGTH = 255;
 
 function checkExternalId(externalId: string): string {
-  if (typeof externalId !== "string" || externalId.length === 0) throw invalid("externalId must be a non-empty string");
+  if (externalId.length === 0) throw invalid("externalId must be a non-empty string");
   if (externalId.length > EXTERNAL_ID_MAX_LENGTH) {
     throw invalid(`externalId must be at most ${EXTERNAL_ID_MAX_LENGTH} characters`);
   }
@@ -83,13 +83,16 @@ export async function createUser(
         .returning();
 
       if (inserted.length === 0) {
-        const existing: ExistingUser[] = yield tx
+        const existing: { user: User; personalSpaceId: string | null }[] = yield tx
           .select({ user: users, personalSpaceId: spaces.id })
           .from(users)
-          .innerJoin(spaces, and(eq(spaces.ownerId, users.id), eq(spaces.personal, 1)))
+          .leftJoin(spaces, and(eq(spaces.ownerId, users.id), eq(spaces.personal, 1)))
           .where(eq(users.externalId, externalId!));
-        if (existing.length > 0) return existing[0]!;
-        continue;
+        const found = existing[0];
+        if (!found) continue;
+        // Only a row written around this function (a raw insert) lacks one.
+        if (!found.personalSpaceId) throw new Error(`user ${found.user.id} has no personal space`);
+        return { user: found.user, personalSpaceId: found.personalSpaceId };
       }
 
       const personalSpaceId = newId();
