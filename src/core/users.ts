@@ -26,6 +26,7 @@ export interface User {
 export interface CurrentUser {
   id: string;
   name: string;
+  externalId: string | null;
 }
 
 /** A user as `createUser` reports one that already existed: no key. */
@@ -152,7 +153,7 @@ export async function getUser(db: Db, userId: string): Promise<User> {
 
 export async function whoami(db: Db, userId: string): Promise<CurrentUser> {
   const user = await getUser(db, userId);
-  return { id: user.id, name: user.name };
+  return { id: user.id, name: user.name, externalId: user.externalId };
 }
 
 /**

@@ -71,7 +71,9 @@ describeEachAdapter("users: externalId", (adapter) => {
 
     // The key from the first call is untouched by the retry.
     const user = apiClient(app.baseUrl, first.body.initialKey.key);
-    expect((await user.get("/v1/whoami")).status).toBe(200);
+    const me = await user.get("/v1/whoami");
+    expect(me.status).toBe(200);
+    expect(me.body).toEqual({ id: first.body.user.id, name: "Grace", externalId: "ext-grace" });
   });
 
   it("looks a user up by externalId, or returns an empty list", async () => {
