@@ -5,11 +5,18 @@
  */
 import { index, integer, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
 
-export const users = pgTable("users", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  createdAt: text("created_at").notNull(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    // Correlation id supplied by whatever system created the user. Opaque to
+    // Yap; unique when set, and any number of users may leave it null.
+    externalId: text("external_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId)],
+);
 
 export const accessKeys = pgTable(
   "access_keys",

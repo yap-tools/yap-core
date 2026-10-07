@@ -11,11 +11,18 @@
  */
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
-export const users = sqliteTable("users", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  createdAt: text("created_at").notNull(),
-});
+export const users = sqliteTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    // Correlation id supplied by whatever system created the user. Opaque to
+    // Yap; unique when set, and any number of users may leave it null.
+    externalId: text("external_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId)],
+);
 
 export const accessKeys = sqliteTable(
   "access_keys",

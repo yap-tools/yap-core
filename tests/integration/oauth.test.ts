@@ -313,8 +313,8 @@ describeEachAdapter("oauth", (adapter) => {
       const res = await apiClient(app.baseUrl, access_token).get("/v1/whoami");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ id: aliceId, name: "Alice" });
-      expect(Object.keys(res.body).sort()).toEqual(["id", "name"]);
+      expect(res.body).toEqual({ id: aliceId, name: "Alice", externalId: null });
+      expect(Object.keys(res.body).sort()).toEqual(["externalId", "id", "name"]);
     });
 
     it("rejects a wrong PKCE verifier and burns the code on first use", async () => {
@@ -520,8 +520,8 @@ describeEachAdapter("oauth", (adapter) => {
     const mcp = await connectMcp(app.baseUrl, access_token);
     try {
       const identity = await mcp.call("whoami");
-      expect(identity).toEqual({ id: aliceId, name: "Alice", version: pkgVersion });
-      expect(Object.keys(identity).sort()).toEqual(["id", "name", "version"]);
+      expect(identity).toEqual({ id: aliceId, name: "Alice", externalId: null, version: pkgVersion });
+      expect(Object.keys(identity).sort()).toEqual(["externalId", "id", "name", "version"]);
 
       const result = await mcp.call("load");
       expect(result.spaces.some((s: any) => s.id === personalSpaceId)).toBe(true);

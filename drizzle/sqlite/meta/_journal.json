@@ -57,6 +57,13 @@
       "when": 1787500000000,
       "tag": "0007_quiet_allowlist",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791045957786,
+      "tag": "0008_user_external_id",
+      "breakpoints": true
     }
   ]
 }

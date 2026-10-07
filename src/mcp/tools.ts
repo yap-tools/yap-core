@@ -283,7 +283,7 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "whoami",
-    description: "Return the currently authenticated user's minimal identity (id and name) and the running Yap Core version.",
+    description: "Return the currently authenticated user's minimal identity (id, name and externalId) and the running Yap Core version.",
     annotations: { readOnlyHint: true, title: "Who am I" },
     execute: async (_args, ctx) => {
       try {

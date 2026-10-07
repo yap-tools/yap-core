@@ -72,8 +72,8 @@ describeEachAdapter("identity & keys", (adapter) => {
       const res = await user.get("/v1/whoami");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ id: created.body.user.id, name: created.body.user.name });
-      expect(Object.keys(res.body).sort()).toEqual(["id", "name"]);
+      expect(res.body).toEqual({ id: created.body.user.id, name: created.body.user.name, externalId: null });
+      expect(Object.keys(res.body).sort()).toEqual(["externalId", "id", "name"]);
       expect(res.body).not.toHaveProperty("createdAt");
       expect(res.body).not.toHaveProperty("key");
       expect(res.body).not.toHaveProperty("keyHash");

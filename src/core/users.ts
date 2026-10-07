@@ -3,7 +3,7 @@
  * personal space at provisioning — undeletable, unrenamable, unshareable —
  * and an initial access key whose secret is returned exactly once.
  */
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import { generateAccessKey, hashKey } from "../crypto.js";
@@ -15,63 +15,129 @@ import { newId, nowIso } from "./util.js";
 export interface User {
   id: string;
   name: string;
+  /**
+   * Correlation id from whatever system created the user. Opaque to Yap,
+   * unique per instance when set, and never changed after creation.
+   */
+  externalId: string | null;
   createdAt: string;
 }
 
 export interface CurrentUser {
   id: string;
   name: string;
+  externalId: string | null;
 }
 
-export interface CreatedUser {
+/** A user as `createUser` reports one that already existed: no key. */
+export interface ExistingUser {
   user: User;
   personalSpaceId: string;
+}
+
+export interface CreatedUser extends ExistingUser {
   /** Secret access key — shown once, stored only as a hash. */
   initialKey: { id: string; name: string; key: string };
 }
 
-export async function createUser(db: Db, input: { name: string }): Promise<CreatedUser> {
-  const name = input.name?.trim();
-  if (!name) throw invalid("user name is required");
-  const { users, spaces, accessKeys } = db.tables;
-  const now = nowIso();
-  const user: User = { id: newId(), name, createdAt: now };
-  await db.client.insert(users).values(user);
+const EXTERNAL_ID_MAX_LENGTH = 255;
 
-  const personalSpaceId = newId();
-  await db.client.insert(spaces).values({
-    id: personalSpaceId,
-    ownerId: user.id,
-    name: "Personal",
-    description: `Personal space of ${name}`,
-    keywords: "personal",
-    context: "",
-    personal: 1,
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  const key = generateAccessKey();
-  const keyId = newId();
-  await db.client.insert(accessKeys).values({
-    id: keyId,
-    userId: user.id,
-    name: "default",
-    keyHash: hashKey(key),
-    createdAt: now,
-    revokedAt: null,
-  });
-
-  return { user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
+function checkExternalId(externalId: string): string {
+  if (externalId.length === 0) throw invalid("externalId must be a non-empty string");
+  if (externalId.length > EXTERNAL_ID_MAX_LENGTH) {
+    throw invalid(`externalId must be at most ${EXTERNAL_ID_MAX_LENGTH} characters`);
+  }
+  return externalId;
 }
 
-export async function listUsers(db: Db, opts: { cursor?: string; limit?: string | number } = {}): Promise<Page<User>> {
+/**
+ * Creates a user with their personal space and initial key, as one
+ * transaction. With an `externalId` the call is idempotent: if a user already
+ * carries it, nothing is written and that user comes back without a key — the
+ * `name` given on the repeated call is ignored.
+ */
+export async function createUser(db: Db, input: { name: string; externalId?: undefined }): Promise<CreatedUser>;
+export async function createUser(
+  db: Db,
+  input: { name: string; externalId?: string | null },
+): Promise<CreatedUser | ExistingUser>;
+export async function createUser(
+  db: Db,
+  input: { name: string; externalId?: string | null },
+): Promise<CreatedUser | ExistingUser> {
+  const name = input.name?.trim();
+  if (!name) throw invalid("user name is required");
+  const externalId = input.externalId == null ? null : checkExternalId(input.externalId);
+  const { users, spaces, accessKeys } = db.tables;
+
+  return db.transaction(function* (tx) {
+    // The unique index decides races: a concurrent create with the same
+    // externalId either waits for this transaction or inserts nothing. The
+    // loop covers the user it lost to being deleted before it could be read.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const now = nowIso();
+      const user: User = { id: newId(), name, externalId, createdAt: now };
+      const inserted: User[] = yield tx
+        .insert(users)
+        .values(user)
+        .onConflictDoNothing({ target: users.externalId })
+        .returning();
+
+      if (inserted.length === 0) {
+        const existing: { user: User; personalSpaceId: string | null }[] = yield tx
+          .select({ user: users, personalSpaceId: spaces.id })
+          .from(users)
+          .leftJoin(spaces, and(eq(spaces.ownerId, users.id), eq(spaces.personal, 1)))
+          .where(eq(users.externalId, externalId!));
+        const found = existing[0];
+        if (!found) continue;
+        // Only a row written around this function (a raw insert) lacks one.
+        if (!found.personalSpaceId) throw new Error(`user ${found.user.id} has no personal space`);
+        return { user: found.user, personalSpaceId: found.personalSpaceId };
+      }
+
+      const personalSpaceId = newId();
+      yield tx.insert(spaces).values({
+        id: personalSpaceId,
+        ownerId: user.id,
+        name: "Personal",
+        description: `Personal space of ${name}`,
+        keywords: "personal",
+        context: "",
+        personal: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const key = generateAccessKey();
+      const keyId = newId();
+      yield tx.insert(accessKeys).values({
+        id: keyId,
+        userId: user.id,
+        name: "default",
+        keyHash: hashKey(key),
+        createdAt: now,
+        revokedAt: null,
+      });
+
+      return { user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
+    }
+    throw new Error(`could not create or find the user with externalId ${externalId}`);
+  });
+}
+
+/** Lists users, oldest first; `externalId` narrows it to the one match (or none). */
+export async function listUsers(
+  db: Db,
+  opts: { cursor?: string; limit?: string | number; externalId?: string } = {},
+): Promise<Page<User>> {
   const { users } = db.tables;
   const limit = clampLimit(opts.limit);
   const offset = decodeCursor(opts.cursor);
   const rows = await db.client
     .select()
     .from(users)
+    .where(opts.externalId === undefined ? undefined : eq(users.externalId, checkExternalId(opts.externalId)))
     .orderBy(asc(users.createdAt), asc(users.id))
     .limit(limit + 1)
     .offset(offset);
@@ -87,7 +153,7 @@ export async function getUser(db: Db, userId: string): Promise<User> {
 
 export async function whoami(db: Db, userId: string): Promise<CurrentUser> {
   const user = await getUser(db, userId);
-  return { id: user.id, name: user.name };
+  return { id: user.id, name: user.name, externalId: user.externalId };
 }
 
 /**
