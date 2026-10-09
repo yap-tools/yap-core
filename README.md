@@ -107,6 +107,7 @@ yap connections list            # connected OAuth apps; revoke <grantId>
 yap api GET /v1/spaces          # raw passthrough — the entire /v1 surface
 yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
+yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
 ```
 
 The manage commands also work against an instance running elsewhere — pass
@@ -166,7 +167,7 @@ local dev.
 | Variable | Default | Purpose |
 |---|---|---|
 | `YAP_ENV_FILE` | — | Explicit env-file path (beats the instance directory's `./.env`) |
-| `YAP_SYSADMIN_KEY` | *(required)* | Environment credential for user provisioning over REST |
+| `YAP_SYSADMIN_KEY` | *(required)* | Operator credential: user provisioning and any user's access keys over REST |
 | `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: service-config encryption + link/token signing |
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
 | `YAP_DB` | `sqlite` | `sqlite` or `postgres` |

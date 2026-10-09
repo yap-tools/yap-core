@@ -6,6 +6,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { describeEachAdapter } from "../helpers/adapters.js";
@@ -471,6 +472,46 @@ describeEachAdapter("oauth", (adapter) => {
       expect((await apiClient(app.baseUrl, access_token).get("/v1/spaces")).status).toBe(401);
       // The rotated key itself still works — only the delegations died.
       expect((await apiClient(app.baseUrl, rotated.body.key).get("/v1/spaces")).status).toBe(200);
+    });
+
+    it("revoking the authorizing key also voids an authorization code not yet exchanged", async () => {
+      const created = await sysadmin.post("/v1/users", { name: "Carol" });
+      const client = await registerClient(app.baseUrl);
+      const { verifier, challenge } = pkce();
+      const authz = await postAuthorize(app.baseUrl, {
+        clientId: client.body.client_id,
+        key: created.body.initialKey.key,
+        challenge,
+        scope: "role:admin",
+      });
+      const code = new URL(authz.headers.get("location")!).searchParams.get("code")!;
+      expect(code).toBeTruthy();
+
+      // The operator cuts the key off while the code is still pending.
+      const revoked = await sysadmin.delete(`/v1/users/${created.body.user.id}/keys/${created.body.initialKey.id}`);
+      expect(revoked.status).toBe(200);
+
+      const token = await tokenRequest(app.baseUrl, {
+        grant_type: "authorization_code",
+        client_id: client.body.client_id,
+        code,
+        code_verifier: verifier,
+        redirect_uri: REDIRECT_URI,
+      });
+      expect(token.status).toBe(400);
+      expect(token.body.error).toBe("invalid_grant");
+      const { oauthGrants } = app.db.tables;
+      expect(await app.db.client.select().from(oauthGrants).where(eq(oauthGrants.userId, created.body.user.id))).toEqual([]);
+    });
+
+    it("no token reaches the sysadmin key lane, not even a full delegation", async () => {
+      const { access_token } = await connectApp(app.baseUrl, aliceKey, "role:admin");
+      const api = apiClient(app.baseUrl, access_token);
+      expect((await api.get(`/v1/users/${aliceId}/keys`)).status).toBe(401);
+      expect((await api.post(`/v1/users/${aliceId}/keys`, { name: "escalation" })).status).toBe(401);
+      const own = await api.get("/v1/keys");
+      expect((await api.delete(`/v1/users/${aliceId}/keys/${own.body.data[0].id}`)).status).toBe(401);
+      expect((await alice.get("/v1/whoami")).status).toBe(200);
     });
   });
 

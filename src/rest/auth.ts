@@ -3,8 +3,8 @@
  * route wrapper resolves the bearer once per request (core/credential.ts)
  * and hands the outcome to every handler; the helpers here apply the REST
  * lane policies — requireUser for content endpoints (user and token lanes),
- * requireSysadmin for the provisioning endpoints (sysadmin lane only) — with
- * REST's wording.
+ * requireSysadmin for the operator endpoints, users and their keys (sysadmin
+ * lane only) — with REST's wording.
  */
 import type { Context } from "hono";
 

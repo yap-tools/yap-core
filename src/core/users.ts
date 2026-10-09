@@ -115,6 +115,7 @@ export async function createUser(
         id: keyId,
         userId: user.id,
         name: "default",
+        issuer: "sysadmin",
         keyHash: hashKey(key),
         createdAt: now,
         revokedAt: null,

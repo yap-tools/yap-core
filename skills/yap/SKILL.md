@@ -85,7 +85,7 @@ All commands resolve the instance from the current directory — run them inside
 | Trap | Reality |
 |---|---|
 | Inventing endpoints (`/v1/notes`, `/v1/todos`) | Only the tree resources exist — see reference.md |
-| Using the sysadmin key as a user credential | Rejected. It only provisions users (`yap user create`, `--sysadmin`) |
+| Using the sysadmin key as a user credential | Rejected. It is the operator credential: it provisions users and manages their access keys (`yap user create`, `--sysadmin`), and never reads or writes content |
 | Showing `item://<id>` / `file://<id>` values to users | Opaque references — resolve them first (get items / `GET /v1/files/<id>/link`); driver-internal file reads use `ctx.reader.readFile` only when the driver declares `reads.files`; driver item reads use `ctx.reader.getItems` only when it declares `reads.items`; driver item write-backs use `ctx.writer.createItems` / `ctx.writer.updateItems` only when it declares `writes.items`; driver file write-backs use `ctx.writer.writeFile` only when it declares `writes.files` |
 | Defining a service's driver/config via MCP or as an agent | Service authoring is deliberately REST-only; agents may only run services (`run_service`, or the deprecated `fire_hook` alias) |
 | Expecting open access | Default deny. Grants resolve most-specific-wins: bundle beats space, deny beats allow |

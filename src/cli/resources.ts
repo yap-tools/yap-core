@@ -115,7 +115,7 @@ export async function cmdResource(target: Target, group: string, argv: string[])
       return console.log("deleted");
 
     case "keys list":
-      return out(await call(target, "GET", "/v1/keys", target.userKey()), ["id", "name", "createdAt", "lastUsedAt"]);
+      return out(await call(target, "GET", "/v1/keys", target.userKey()), ["id", "name", "issuer", "createdAt"]);
     case "keys create":
       return printJson(await call(target, "POST", "/v1/keys", target.userKey(), { name: need(args[0], "key name") }));
     case "keys rotate":

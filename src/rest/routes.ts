@@ -218,6 +218,36 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  // ---- A user's keys (sysadmin key) ------------------------------------------
+
+  const createKeySchema = z.object({ name: z.string().optional() });
+
+  app.post(
+    "/v1/users/:id/keys",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      const body = parseBody(createKeySchema, await optionalJsonBody(c));
+      return c.json(await keysCore.issueKeyForUser(db, param(c, "id"), body.name ?? ""), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/users/:id/keys",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      return c.json({ data: await keysCore.listKeysForUser(db, param(c, "id")) });
+    }),
+  );
+
+  app.delete(
+    "/v1/users/:id/keys/:keyId",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      await keysCore.revokeKeyForUser(db, param(c, "id"), param(c, "keyId"));
+      return c.json({ deleted: true });
+    }),
+  );
+
   // ---- Keys (self) ----------------------------------------------------------
 
   app.get(
@@ -227,8 +257,6 @@ export function registerRestRoutes(server: YapServer): void {
       return c.json(await usersCore.whoami(db, userId));
     }),
   );
-
-  const createKeySchema = z.object({ name: z.string().optional() });
 
   app.post(
     "/v1/keys",
