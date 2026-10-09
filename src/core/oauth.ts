@@ -400,8 +400,13 @@ export async function revokeUserGrant(db: Db, userId: string, grantId: string): 
   await db.client.delete(oauthGrants).where(eq(oauthGrants.id, grantId));
 }
 
-/** Key revocation cascade: every delegation authorized with the key dies. */
+/**
+ * Key revocation cascade: every delegation authorized with the key dies —
+ * including an authorization code not yet exchanged, which would otherwise
+ * become a grant on a key that no longer exists to be revoked.
+ */
 export async function revokeGrantsForKey(db: Db, keyId: string): Promise<void> {
-  const { oauthGrants } = db.tables;
+  const { oauthCodes, oauthGrants } = db.tables;
+  await db.client.delete(oauthCodes).where(eq(oauthCodes.keyId, keyId));
   await db.client.delete(oauthGrants).where(eq(oauthGrants.keyId, keyId));
 }

@@ -167,7 +167,7 @@ local dev.
 | Variable | Default | Purpose |
 |---|---|---|
 | `YAP_ENV_FILE` | — | Explicit env-file path (beats the instance directory's `./.env`) |
-| `YAP_SYSADMIN_KEY` | *(required)* | Environment credential for user provisioning over REST |
+| `YAP_SYSADMIN_KEY` | *(required)* | Operator credential: user provisioning and any user's access keys over REST |
 | `YAP_MASTER_KEY` | *(required)* | Base64 32 bytes: service-config encryption + link/token signing |
 | `YAP_PORT` / `YAP_HOST` / `YAP_BASE_URL` | `8787` / `0.0.0.0` / `http://localhost:8787` | Listener + minted-link base |
 | `YAP_DB` | `sqlite` | `sqlite` or `postgres` |

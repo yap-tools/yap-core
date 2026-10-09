@@ -51,7 +51,7 @@ async function insertKey(db: Db, userId: string, name: string, issuer: KeyIssuer
 
 async function selectKeys(db: Db, userId: string): Promise<AccessKeyInfo[]> {
   const { accessKeys } = db.tables;
-  const rows = await db.client
+  return db.client
     .select({
       id: accessKeys.id,
       name: accessKeys.name,
@@ -61,7 +61,6 @@ async function selectKeys(db: Db, userId: string): Promise<AccessKeyInfo[]> {
     .from(accessKeys)
     .where(and(eq(accessKeys.userId, userId), isNull(accessKeys.revokedAt)))
     .orderBy(asc(accessKeys.createdAt), asc(accessKeys.id));
-  return rows.map((row) => ({ ...row, issuer: row.issuer as KeyIssuer }));
 }
 
 /** Revokes the user's active key and the OAuth grants it authorized; returns its name. */
@@ -98,7 +97,8 @@ export async function listKeys(db: Db, userId: string): Promise<AccessKeyInfo[]>
  */
 export async function rotateKey(db: Db, userId: string, keyId: string): Promise<CreatedKey> {
   assertCanManageCredentials();
-  return insertKey(db, userId, await revokeKey(db, userId, keyId), "user");
+  const name = await revokeKey(db, userId, keyId);
+  return insertKey(db, userId, name, "user");
 }
 
 export async function deleteKey(db: Db, userId: string, keyId: string): Promise<void> {
