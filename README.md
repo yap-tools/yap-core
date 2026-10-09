@@ -107,6 +107,7 @@ yap connections list            # connected OAuth apps; revoke <grantId>
 yap api GET /v1/spaces          # raw passthrough — the entire /v1 surface
 yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
+yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
 ```
 
 The manage commands also work against an instance running elsewhere — pass

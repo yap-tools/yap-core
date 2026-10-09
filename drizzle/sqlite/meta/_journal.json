@@ -64,6 +64,13 @@
       "when": 1791045957786,
       "tag": "0008_user_external_id",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791547367004,
+      "tag": "0009_key_issuer",
+      "breakpoints": true
     }
   ]
 }

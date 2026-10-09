@@ -32,6 +32,10 @@ export const accessKeys = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     name: text("name").notNull().default(""),
+    // Who issued the key: "user" (minted or rotated by the user themself) or
+    // "sysadmin" (the initial key, or one issued over the sysadmin key lane).
+    // A fact about the key's origin — it carries no authority of its own.
+    issuer: text("issuer").notNull().default("user"),
     keyHash: text("key_hash").notNull(),
     createdAt: text("created_at").notNull(),
     revokedAt: text("revoked_at"),

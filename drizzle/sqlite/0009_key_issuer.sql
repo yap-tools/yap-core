@@ -1,0 +1,2 @@
+ALTER TABLE `access_keys` ADD `issuer` text DEFAULT 'user' NOT NULL;--> statement-breakpoint
+UPDATE `access_keys` SET `issuer` = 'sysadmin' WHERE `name` = 'default' AND `created_at` = (SELECT `created_at` FROM `users` WHERE `users`.`id` = `access_keys`.`user_id`);
