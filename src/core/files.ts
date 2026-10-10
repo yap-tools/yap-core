@@ -378,8 +378,9 @@ async function sideloadFetch(
   let url = start;
   for (let hops = 0; ; hops++) {
     const response = await sideloadGet(egress, url, budget, logger);
+    // A redirect status with nowhere to go is just the upstream's answer.
     const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
-    if (location === null) return { response, url };
+    if (!location) return { response, url };
     void response.body?.cancel().catch(() => {});
     if (hops === MAX_SIDELOAD_REDIRECTS) {
       throw badGateway(`the URL redirected more than ${MAX_SIDELOAD_REDIRECTS} times`);
@@ -409,6 +410,7 @@ function derivedFileName(raw: string | undefined): string | undefined {
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
     .slice(0, 255)
+    .replace(/[\uD800-\uDBFF]$/, "") // the cut must not leave half a surrogate pair
     .trim();
   return name || undefined;
 }
@@ -420,6 +422,18 @@ function urlFileName(url: URL): string {
   } catch {
     return segment;
   }
+}
+
+/** A media type without its parameters, as it is stored: `Text/Plain; charset=utf-8` → `text/plain`. */
+function bareMediaType(raw: string | null | undefined): string {
+  return (raw ?? "").split(";")[0]!.trim().toLowerCase();
+}
+
+/** An optional text parameter: absent when null or undefined, refused when anything but a string. */
+function optionalText(value: unknown, param: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw invalid(`${param} must be a string`);
+  return value;
 }
 
 /** The response body as a stream the file writer can bound. Each read races
@@ -463,12 +477,15 @@ export async function sideloadFile(
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_files", ctx);
 
-  const start = sideloadUrl(input.url);
+  // Both transports land here, and MCP params arrive untyped.
+  const start = typeof input.url === "string" ? sideloadUrl(input.url) : null;
   if (!start) throw invalid("url must be an absolute http(s) URL without embedded credentials");
-  const givenName = input.name !== undefined ? cleanFileName(input.name) : undefined;
+  const rawName = optionalText(input.name, "name");
+  const givenName = rawName !== undefined ? cleanFileName(rawName) : undefined;
+  const givenMime = bareMediaType(optionalText(input.mime_type, "mime_type"));
   const disallowed = (mimeType: string) =>
     unsupportedMediaType(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
-  if (input.mime_type && !mimeAllowed(config, input.mime_type)) throw disallowed(input.mime_type);
+  if (givenMime && !mimeAllowed(config, givenMime)) throw disallowed(givenMime);
 
   const egress = createEgress(config, env.resolver, env.fetchImpl);
   const budget = new AbortController();
@@ -480,11 +497,10 @@ export async function sideloadFile(
     if (response.status < 200 || response.status >= 300) {
       throw badGateway(`the URL answered with HTTP ${response.status}`);
     }
-    const mimeType =
-      input.mime_type || (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    const mimeType = givenMime || bareMediaType(response.headers.get("content-type"));
     if (mimeType && !mimeAllowed(config, mimeType)) throw disallowed(mimeType);
-    const declaredSize = Number(response.headers.get("content-length") ?? NaN);
-    if (declaredSize > config.maxFileSizeBytes) {
+    const declaredSize = response.headers.get("content-length") ?? "";
+    if (/^\d+$/.test(declaredSize) && Number(declaredSize) > config.maxFileSizeBytes) {
       throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
     }
     const name =

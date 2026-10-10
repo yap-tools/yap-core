@@ -196,6 +196,15 @@ describeEachAdapter("sideload (core)", (adapter) => {
       url: `https://files.example/${"n".repeat(400)}.bin`,
     });
     expect(long.name).toHaveLength(255);
+
+    // Cutting to length must not leave half an emoji behind.
+    const emoji = await sideloadFile(
+      envWith(() => new Response("x", { headers: { "content-disposition": `attachment; filename*=UTF-8''${"%F0%9F%98%80".repeat(200)}` } })),
+      aliceId,
+      bundleId,
+      { url: "https://files.example/x" },
+    );
+    expect(emoji.name).toBe("😀".repeat(127));
   });
 
   it("lets the caller's name and mime_type win, and validates the name strictly", async () => {
@@ -217,6 +226,64 @@ describeEachAdapter("sideload (core)", (adapter) => {
     );
     expect(err.code).toBe("invalid_request");
     expect(requests).toHaveLength(0);
+  });
+
+  it("normalises the caller's mime_type the way it normalises the response's", async () => {
+    const env = envWith(() => new Response("x", { headers: { "content-type": "text/html" } }), { mimeAllowlist: ["text/plain"] });
+    const file = await sideloadFile(env, aliceId, bundleId, {
+      url: "https://files.example/x",
+      mime_type: "Text/Plain; charset=utf-8",
+    });
+    expect(file.mimeType).toBe("text/plain");
+    // Nothing that could split a header on download survives.
+    const odd = await sideloadFile(envWith(() => new Response("x")), aliceId, bundleId, {
+      url: "https://files.example/x",
+      mime_type: "image/png; x=\r\ny",
+    });
+    expect(odd.mimeType).toBe("image/png");
+  });
+
+  it("refuses params of the wrong type instead of failing internally", async () => {
+    const env = envWith(() => new Response("x"));
+    for (const input of [
+      { url: 5 },
+      { url: "https://files.example/x", name: 5 },
+      { url: "https://files.example/x", mime_type: { a: 1 } },
+    ]) {
+      const err = await failure(sideloadFile(env, aliceId, bundleId, input as never));
+      expect(err.code).toBe("invalid_request");
+    }
+    expect(requests).toHaveLength(0);
+    // An explicit null is "not given": the name and type are derived.
+    const file = await sideloadFile(env, aliceId, bundleId, {
+      url: "https://files.example/derived.txt",
+      name: null,
+      mime_type: null,
+    } as never);
+    expect(file.name).toBe("derived.txt");
+  });
+
+  it("treats a redirect without a Location as the upstream's answer", async () => {
+    for (const headers of [{}, { location: "" }]) {
+      requests = [];
+      const env = envWith(() => new Response(null, { status: 302, headers }));
+      const err = await failure(sideloadFile(env, aliceId, bundleId, { url: "https://files.example/x" }));
+      expect(err.code).toBe("bad_gateway");
+      expect(err.message).toContain("302");
+      expect(requests).toHaveLength(1);
+    }
+  });
+
+  it("ignores a Content-Length that is not a plain number", async () => {
+    for (const length of ["0x100000", "Infinity", "-1", "12, 12"]) {
+      const env = envWith(() => {
+        const res = new Response("small");
+        // Response normalises the header on construction, so plant it afterwards.
+        Object.defineProperty(res, "headers", { value: new Headers({ "content-length": length }) });
+        return res;
+      });
+      expect((await sideloadFile(env, aliceId, bundleId, { url: "https://files.example/x" })).size).toBe(5);
+    }
   });
 
   it("stores no MIME type when the response declares none", async () => {

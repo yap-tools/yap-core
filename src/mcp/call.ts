@@ -371,7 +371,8 @@ export const secondTier: Record<string, SecondTierTool> = {
     offered: (config) => config.sideloadEnabled,
     handler: async (env, params) => ({
       result: await filesCore.sideloadFile(env, env.userId, env.bundleId, {
-        url: String(params.url),
+        // Passed through untyped: the core says what is wrong with each.
+        url: params.url as string,
         name: params.name as string | undefined,
         mime_type: params.mime_type as string | undefined,
       }),
