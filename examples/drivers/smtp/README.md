@@ -91,7 +91,8 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
   that wants to create or update items declares `writes: { items: true }` and gets bundle-scoped
   `ctx.writer.createItems(itemTypeName, values)` and `ctx.writer.updateItems([{id, set?, edits?}])`. A driver
   that wants to write finalized files declares `writes: { files: true }` and gets
-  `ctx.writer.writeFile({name, mimeType?, bytes})`, which returns a `file://` ref.
+  `ctx.writer.writeFile({name, mimeType?, bytes})`, which returns a `file://` ref
+  (pass `stream` in place of `bytes` to store a large file without buffering it).
 - **Reads.** It declares no bundle reads, so `ctx.reader` is `null`. A driver that needs stored file
   bytes declares `reads: { files: true }` and gets `ctx.reader.readFile(refOrId)`, scoped to finalized files
   in the service run's bundle. Prefer `file.stream()` for large files; `file.bytes()` and `file.text()`

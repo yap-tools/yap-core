@@ -104,7 +104,9 @@ export interface BundleWriter {
   updateItems(
     updates: Array<{ id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }>,
   ): Promise<Array<{ id: string; itemType: string; createdAt: string; updatedAt: string; values: Record<string, unknown> }>>;
-  writeFile(input: { name: string; mimeType?: string; bytes: Uint8Array | string }): Promise<{
+  /** Exactly one of `bytes` and `stream`; a stream is stored without being
+   * buffered whole, which is the one to use for large files. */
+  writeFile(input: { name: string; mimeType?: string; bytes?: Uint8Array | string; stream?: Readable }): Promise<{
     id: string;
     ref: string;
     name: string;

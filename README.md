@@ -439,7 +439,9 @@ be the instance's externally reachable origin (https except on loopback).
   REST/MCP item update APIs: an array of `{id, set?, edits?}`. A driver that
   declares `writes: { files: true }` receives `ctx.writer.writeFile({ name,
   mimeType?, bytes })`, which writes a finalized file into the run bundle and
-  returns its `file://` ref. Undeclared read/write surfaces are `null` on the
+  returns its `file://` ref. Pass `stream` (a Node `Readable`) in place of
+  `bytes` for a large file: it is stored as it is read, never held whole in
+  memory, and the maximum file size is enforced as it goes. Undeclared read/write surfaces are `null` on the
   run context unless another write surface caused `ctx.writer` to exist, in
   which case undeclared writer methods reject the call.
   [`examples/drivers/smtp`](examples/drivers/smtp) is the minimal reference

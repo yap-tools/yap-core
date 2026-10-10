@@ -18,7 +18,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import type { Readable } from "node:stream";
+import { readdirSync } from "node:fs";
+import { Readable } from "node:stream";
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -335,6 +336,30 @@ const writingDriver: DriverDefinition = {
       ],
       timeoutMs: 5_000,
     },
+    stream_file: {
+      description: "Writes a file from a stream of repeated chunks.",
+      params: [
+        { name: "name", required: true },
+        { name: "chunk", required: true },
+        { name: "chunks", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
+    broken_stream: {
+      description: "Attempts to write a file from a stream that fails part-way.",
+      params: [{ name: "name", required: true }],
+      timeoutMs: 5_000,
+    },
+    bytes_and_stream: {
+      description: "Attempts to write a file with both bytes and a stream.",
+      params: [{ name: "name", required: true }],
+      timeoutMs: 5_000,
+    },
+    bad_stream: {
+      description: "Attempts to write a file with an invalid stream input.",
+      params: [{ name: "name", required: true }],
+      timeoutMs: 5_000,
+    },
     bad_bytes: {
       description: "Attempts to write a file with invalid bytes input.",
       params: [{ name: "name", required: true }],
@@ -395,6 +420,30 @@ const writingDriver: DriverDefinition = {
       const file = await writer.writeFile({ name: ctx.params.name!, mimeType: "text/plain", bytes: ctx.params.body! });
       const [item] = await writer.updateItems([{ id: ctx.params.id!, set: { source: file.ref } }]);
       return { file, item: { id: item!.id, values: item!.values } };
+    }
+    if (ctx.action === "stream_file") {
+      // Many small chunks: a stream that is only ever read a piece at a time.
+      const chunks = Array.from({ length: Number(ctx.params.chunks) }, () => Buffer.from(ctx.params.chunk!));
+      return await writer.writeFile({
+        name: ctx.params.name!,
+        mimeType: "text/plain",
+        stream: Readable.from(chunks, { objectMode: false }),
+      });
+    }
+    if (ctx.action === "broken_stream") {
+      const stream = new Readable({
+        read() {
+          this.push("partial");
+          this.destroy(new Error("source went away"));
+        },
+      });
+      return await writer.writeFile({ name: ctx.params.name!, stream });
+    }
+    if (ctx.action === "bytes_and_stream") {
+      return await writer.writeFile({ name: ctx.params.name!, bytes: "x", stream: Readable.from(["y"]) });
+    }
+    if (ctx.action === "bad_stream") {
+      return await writer.writeFile({ name: ctx.params.name!, stream: ["not a stream"] as unknown as Readable });
     }
     if (ctx.action === "bad_bytes") {
       return await writer.writeFile({
@@ -1629,6 +1678,56 @@ describeEachAdapter("services core", (adapter) => {
       expect(badBytes.error).toMatch(/file bytes must be a string or Uint8Array/);
       expect(badBytes.writes).toEqual([]);
       expect(await listFilesUnchecked(app.db, bundleId)).toEqual(before);
+    });
+
+    it("stores a streamed file with the size it actually read", async () => {
+      await createService(env, aliceId, bundleId, { name: "stream-output", driver: "writer", config: {} });
+      const run = await runService(env, aliceId, bundleId, {
+        service: "stream-output",
+        action: "stream_file",
+        params: { name: "streamed.txt", chunk: "abcd", chunks: "10" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("succeeded");
+      const file = run.result as { id: string; ref: string; size: number; status: string };
+      expect(file).toMatchObject({ ref: `file://${file.id}`, size: 40, status: "finalized" });
+      expect(run.writes).toEqual([{ type: "file", id: file.id, name: "streamed.txt", size: 40 }]);
+      const [row] = (await listFilesUnchecked(app.db, bundleId)).filter((f) => f.id === file.id);
+      expect(row).toMatchObject({ name: "streamed.txt", size: 40, status: "finalized" });
+      const opened = await openDownloadStream({ db: app.db, blob: app.blob, config: app.config }, file.id);
+      expect(await streamToText(opened.stream)).toBe("abcd".repeat(10));
+    });
+
+    it("rejects a bad stream and leaves no record or blob behind", async () => {
+      await createService(env, aliceId, bundleId, { name: "strict-stream-output", driver: "writer", config: {} });
+      // Files on disk under the blob root: a failed write must not strand one.
+      const blobCount = () =>
+        readdirSync((app.config.blob as { root: string }).root, { recursive: true, withFileTypes: true }).filter((e) =>
+          e.isFile(),
+        ).length;
+      const blobsBefore = blobCount();
+
+      for (const [label, action, params, pattern] of [
+        // 17 chunks of 4 bytes against the 64-byte cap: over the limit only mid-stream.
+        ["too-large", "stream_file", { name: "large.txt", chunk: "abcd", chunks: "17" }, /maximum size of 64 bytes/],
+        ["broken", "broken_stream", { name: "broken.txt" }, /./],
+        ["both", "bytes_and_stream", { name: "both.txt" }, /bytes or a stream, not both/],
+        ["not-a-stream", "bad_stream", { name: "bad.txt" }, /file stream must be a Readable/],
+      ] as const) {
+        const before = await listFilesUnchecked(app.db, bundleId);
+        const run = await runService(env, aliceId, bundleId, {
+          service: "strict-stream-output",
+          action,
+          params,
+          waitMs: 5_000,
+        });
+        expect(run.status, label).toBe("failed");
+        expect(run.error, label).toMatch(pattern);
+        expect(run.writes, label).toEqual([]);
+        expect(await listFilesUnchecked(app.db, bundleId), label).toEqual(before);
+        expect(blobCount(), label).toBe(blobsBefore);
+      }
     });
 
     it("hands a driver that declared no writes a null writer", async () => {

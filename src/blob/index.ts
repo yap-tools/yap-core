@@ -33,6 +33,8 @@ export interface DownloadUrlOpts {
 export interface BlobStore {
   driver: "fs" | "s3";
   put(key: string, bytes: Uint8Array): Promise<void>;
+  /** Store a stream without holding it in memory; the caller bounds its size. */
+  putStream(key: string, stream: Readable): Promise<void>;
   getStream(key: string): Promise<Readable>;
   delete(key: string): Promise<void>;
   /** null when no bytes exist at the key. */
@@ -43,10 +45,13 @@ export interface BlobStore {
   downloadUrl(key: string, ttlSeconds: number, opts: DownloadUrlOpts): Promise<string>;
 }
 
-function diskBacked(disk: Disk): Pick<BlobStore, "put" | "getStream" | "delete" | "stat"> {
+function diskBacked(disk: Disk): Pick<BlobStore, "put" | "putStream" | "getStream" | "delete" | "stat"> {
   return {
     put: async (key, bytes) => {
       await disk.put(key, bytes);
+    },
+    putStream: async (key, stream) => {
+      await disk.putStream(key, stream);
     },
     getStream: (key) => disk.getStream(key),
     delete: async (key) => {
