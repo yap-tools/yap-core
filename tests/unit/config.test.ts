@@ -70,6 +70,16 @@ describe("loadConfig", () => {
     expect(config.downloadTtlSeconds).toBe(60);
   });
 
+  it("sideloading is on by default, with a 60 s budget, and both are operator-tunable", () => {
+    const defaults = loadConfig(base);
+    expect(defaults.sideloadEnabled).toBe(true);
+    expect(defaults.sideloadTimeoutMs).toBe(60_000);
+    const tuned = loadConfig({ ...base, YAP_SIDELOAD_ENABLED: "false", YAP_SIDELOAD_TIMEOUT_MS: "5000" });
+    expect(tuned.sideloadEnabled).toBe(false);
+    expect(tuned.sideloadTimeoutMs).toBe(5000);
+    expect(() => loadConfig({ ...base, YAP_SIDELOAD_TIMEOUT_MS: "0" })).toThrow(ConfigError);
+  });
+
   it("rejects malformed numbers", () => {
     expect(() => loadConfig({ ...base, YAP_PORT: "nope" })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, YAP_PORT: "-1" })).toThrow(ConfigError);

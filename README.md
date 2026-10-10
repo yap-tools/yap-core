@@ -177,10 +177,12 @@ local dev.
 | `YAP_BLOB_FS_ROOT` | `./data/blobs` | Local blob root |
 | `YAP_S3_BUCKET` / `YAP_S3_REGION` / `YAP_S3_ENDPOINT` / `YAP_S3_ACCESS_KEY_ID` / `YAP_S3_SECRET_ACCESS_KEY` / `YAP_S3_FORCE_PATH_STYLE` | — | S3-compatible storage (R2/GCS-interop/MinIO via endpoint) |
 | `YAP_DRIVERS_DIR` | `./drivers` | Installed service drivers, one package folder each; loaded at startup |
-| `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | Upload size cap |
+| `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | File size cap (uploads and sideloads) |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` | 600 / 14400 / 600 | Link/token lifetimes |
 | `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
+| `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
+| `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
 | `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
 | `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal service targets; keeps its pre-services name — it IS the knob |
 | `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
@@ -252,7 +254,8 @@ metadata and descending only into the relevant branch:
   succeeding/failing independently. Data & content: `query_items`, `get_items`,
   `create_items`, `update_items`, `delete_items`, `get_doc`, `read_docs`,
   `create_doc`, `update_doc`, `patch_doc`, `delete_doc`,
-  `list_files`, `show_file`, `upload_request`, `upload_complete`, `delete_file`,
+  `list_files`, `show_file`, `upload_request`, `upload_complete`, `sideload_file`,
+  `delete_file`,
   `run_service`, `get_run`, `list_runs`, and the deprecated `fire_hook` alias
   (kept until 1.0). Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
@@ -360,6 +363,22 @@ be the instance's externally reachable origin (https except on loopback).
   expiring links. With S3 the bytes never touch the API layer; on local disk
   Yap serves them behind its own signed-token endpoints. Deleting a file
   deletes the blob immediately.
+
+  An agent holding a URL can skip the three phases: **sideloading**
+  (`sideload_file`, or `POST /v1/bundles/:id/files/sideload` with
+  `{ url, name?, mime_type? }`) has the server download the file and return
+  it finalized in one synchronous call. It is a plain GET of an http(s) URL —
+  the caller cannot supply credentials or headers — sent through the same
+  guarded egress as service drivers, so private and link-local destinations
+  are refused (`YAP_HOOK_ALLOW_HOSTS` to allowlist) and each of at most five
+  redirects is checked again. The size cap and MIME allowlist apply, one time
+  budget covers the whole download (`YAP_SIDELOAD_TIMEOUT_MS`), a failed
+  sideload leaves nothing behind, and the source URL is not stored. The name
+  defaults to the response's `Content-Disposition` filename, then the URL's
+  last path segment; the type to the response's `Content-Type`. An upstream
+  error answers 502, a timeout 504. `YAP_SIDELOAD_ENABLED=false` turns it off
+  for the whole instance: the endpoint refuses and the tool is no longer
+  offered to agents.
 - **Services** are the bundle-owned, named capabilities agents can run — what
   hooks used to be, generalized. A service is a **driver** (an in-process
   module — the built-in `http` and `mail` drivers, or one an operator adds)

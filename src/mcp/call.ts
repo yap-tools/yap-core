@@ -56,6 +56,10 @@ export interface SecondTierTool {
   params?: Record<string, { required?: boolean }>;
   /** Which target(s) this tool operates on. Defaults to ["bundle"]. */
   targets?: TargetKind[];
+  /** When present and false for this instance, the tool is left out of
+   * everything that advertises the catalog. It stays callable, so a caller who
+   * names it anyway gets the core's own refusal rather than "unknown tool". */
+  offered?: (config: YapConfig) => boolean;
   handler: (env: CallEnv, params: Record<string, unknown>) => Promise<SecondTierResult>;
 }
 
@@ -359,6 +363,21 @@ export const secondTier: Record<string, SecondTierTool> = {
       }),
     }),
   },
+  sideload_file: {
+    description:
+      "Store a file from a remote URL in one call: the server downloads it and returns the finalized file, so no upload step is needed and no bytes pass through you. Pass a direct link to the file itself, not a share or preview page — a page link stores the page's HTML. http(s) only, fetched with a plain GET: no credentials or headers can be supplied, and private or internal addresses are refused. The call blocks until the file is stored, within the instance's time, size and MIME limits. Params: url (required), name? (default: taken from the response, else from the URL), mime_type? (default: the response's Content-Type). The result has the same shape as upload_complete's; its mimeType and size show what was actually stored — check them.",
+    capability: "edit_files",
+    params: { url: { required: true }, name: {}, mime_type: {} },
+    offered: (config) => config.sideloadEnabled,
+    handler: async (env, params) => ({
+      result: await filesCore.sideloadFile(env, env.userId, env.bundleId, {
+        // Passed through untyped: the core says what is wrong with each.
+        url: params.url as string,
+        name: params.name as string | undefined,
+        mime_type: params.mime_type as string | undefined,
+      }),
+    }),
+  },
   delete_file: {
     description: "Delete a file record and its stored bytes immediately. Params: id (the file id).",
     capability: "edit_files",
@@ -616,6 +635,11 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
 };
 
+/** The catalog as this instance advertises it: every tool it currently offers. */
+export function offeredSecondTier(config: YapConfig): Record<string, SecondTierTool> {
+  return Object.fromEntries(Object.entries(secondTier).filter(([, tool]) => tool.offered?.(config) ?? true));
+}
+
 export interface PerCallResult {
   bundle_id: string | null;
   tool: string;
@@ -644,7 +668,7 @@ export async function executeCall(
     if (!tool) {
       throw new YapError(
         "invalid_request",
-        `unknown tool "${call.tool}" (available: ${Object.keys(secondTier).join(", ")})`,
+        `unknown tool "${call.tool}" (available: ${Object.keys(offeredSecondTier(env.config)).join(", ")})`,
       );
     }
     const targets = tool.targets ?? ["bundle"];

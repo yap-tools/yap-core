@@ -33,7 +33,7 @@ import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
-import { executeCall, secondTier, type PerCallResult } from "./call.js";
+import { executeCall, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
@@ -75,35 +75,10 @@ async function drainPages<T>(
   return { items, truncated: false };
 }
 
-const secondTierNames = Object.keys(secondTier);
-
 function summaryFromDescription(description: string): string {
   const sentenceEnd = description.indexOf(". ");
   return sentenceEnd === -1 ? description : description.slice(0, sentenceEnd + 1);
 }
-
-const SECOND_TIER_FULL_SPECS = Object.fromEntries(
-  Object.entries(secondTier).map(([name, tool]) => [
-    name,
-    {
-      description: tool.description,
-      capability: tool.capability,
-      targets: tool.targets ?? ["bundle"],
-      params: tool.params ?? {},
-    },
-  ]),
-);
-
-const SECOND_TIER_MANIFEST = Object.fromEntries(
-  Object.entries(secondTier).map(([name, tool]) => [
-    name,
-    {
-      summary: summaryFromDescription(tool.description),
-      capability: tool.capability,
-      targets: tool.targets ?? ["bundle"],
-    },
-  ]),
-);
 
 /** The origin a presigned S3 (or compatible) link is served from. */
 function blobOrigin(blob: Extract<YapConfig["blob"], { driver: "s3" }>): string | null {
@@ -167,6 +142,32 @@ export function registerMcpTools(server: YapServer): void {
         return tokenAuth ? runWithTokenAuth(tokenAuth, run) : run();
       },
     });
+
+  // The second-tier catalog as this instance offers it (a tool switched off by
+  // configuration is not advertised), in the three shapes discovery serves.
+  const offered = offeredSecondTier(config);
+  const secondTierNames = Object.keys(offered);
+  const SECOND_TIER_FULL_SPECS = Object.fromEntries(
+    Object.entries(offered).map(([name, tool]) => [
+      name,
+      {
+        description: tool.description,
+        capability: tool.capability,
+        targets: tool.targets ?? ["bundle"],
+        params: tool.params ?? {},
+      },
+    ]),
+  );
+  const SECOND_TIER_MANIFEST = Object.fromEntries(
+    Object.entries(offered).map(([name, tool]) => [
+      name,
+      {
+        summary: summaryFromDescription(tool.description),
+        capability: tool.capability,
+        targets: tool.targets ?? ["bundle"],
+      },
+    ]),
+  );
 
   // ---- The widget registry: every widget is a ui:// resource -------------------
 
@@ -409,7 +410,7 @@ export function registerMcpTools(server: YapServer): void {
           return asJson({ second_tier: SECOND_TIER_MANIFEST });
         }
 
-        const unknown = args.names.filter((name) => !Object.hasOwn(secondTier, name));
+        const unknown = args.names.filter((name) => !Object.hasOwn(offered, name));
         if (unknown.length > 0) {
           throw new YapError(
             "invalid_request",

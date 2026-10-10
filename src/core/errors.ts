@@ -12,7 +12,9 @@ export type ErrorCode =
   | "conflict"
   | "payload_too_large"
   | "unsupported_media_type"
-  | "internal";
+  | "internal"
+  | "bad_gateway"
+  | "gateway_timeout";
 
 const HTTP_STATUS: Record<ErrorCode, number> = {
   unauthorized: 401,
@@ -23,6 +25,8 @@ const HTTP_STATUS: Record<ErrorCode, number> = {
   payload_too_large: 413,
   unsupported_media_type: 415,
   internal: 500,
+  bad_gateway: 502,
+  gateway_timeout: 504,
 };
 
 export class YapError extends Error {
@@ -66,6 +70,16 @@ export function tooLarge(message: string, details?: unknown): YapError {
 /** A MIME type outside the configured allowlist — HTTP 415. */
 export function unsupportedMediaType(message: string, details?: unknown): YapError {
   return new YapError("unsupported_media_type", message, details);
+}
+
+/** A remote server Yap fetched from failed or answered badly — HTTP 502. */
+export function badGateway(message: string, details?: unknown): YapError {
+  return new YapError("bad_gateway", message, details);
+}
+
+/** A remote server Yap fetched from did not finish in time — HTTP 504. */
+export function gatewayTimeout(message: string, details?: unknown): YapError {
+  return new YapError("gateway_timeout", message, details);
 }
 
 export function forbidden(message: string, details?: unknown): YapError {
