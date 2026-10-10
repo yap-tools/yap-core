@@ -19,6 +19,7 @@ import { once } from "node:events";
 import { PassThrough, Readable } from "node:stream";
 
 import { and, asc, eq, lt } from "drizzle-orm";
+import libmime from "libmime";
 
 import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
@@ -26,7 +27,7 @@ import { signToken } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
-import { createEgress, type Egress, type EgressResponse } from "./drivers/egress.js";
+import { createEgress, isEgressRefusal, type Egress, type EgressResponse } from "./drivers/egress.js";
 import {
   YapError,
   badGateway,
@@ -37,7 +38,7 @@ import {
   tooLarge,
   unsupportedMediaType,
 } from "./errors.js";
-import { SSRF_PIN_ERROR_CODE, type Resolver } from "./ssrf.js";
+import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
 export interface FileInfo {
@@ -356,11 +357,9 @@ async function sideloadGet(egress: Egress, url: URL, budget: AbortSignal, logger
   try {
     return await withinBudget(egress.fetch(url.href, { method: "GET", signal: budget, redirect: "manual" }), budget);
   } catch (err) {
-    if (err instanceof SideloadTimeout || budget.aborted) throw new SideloadTimeout();
-    const cause = (err as { cause?: { code?: string } }).cause;
-    const pinBlocked = cause?.code === SSRF_PIN_ERROR_CODE || (err as { code?: string }).code === SSRF_PIN_ERROR_CODE;
-    // A YapError here can only be the egress pre-flight refusing the destination.
-    if (pinBlocked || err instanceof YapError) {
+    if (budget.aborted) throw new SideloadTimeout();
+    const cause = (err as { cause?: unknown }).cause;
+    if (isEgressRefusal(err)) {
       logger?.warn(`sideload from ${url.host} refused: ${String(err)}`);
       throw forbidden("the URL cannot be fetched: its host does not resolve or is blocked by this instance's network policy");
     }
@@ -394,17 +393,11 @@ async function sideloadFetch(
 /** The file name a Content-Disposition header proposes, if it proposes one. */
 function dispositionFileName(header: string | null): string | undefined {
   if (!header) return undefined;
-  const extended = /(?:^|;)\s*filename\*\s*=\s*([^';\s]*)'[^';]*'([^;]*)/i.exec(header);
-  if (extended && /^utf-?8$/i.test(extended[1]!)) {
-    try {
-      return decodeURIComponent(extended[2]!.trim());
-    } catch {
-      // malformed encoding: fall through to the plain parameter
-    }
+  try {
+    return libmime.parseHeaderValue(header).params.filename;
+  } catch {
+    return undefined;
   }
-  const plain = /(?:^|;)\s*filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]*))/i.exec(header);
-  if (!plain) return undefined;
-  return plain[1] !== undefined ? plain[1].replace(/\\(.)/g, "$1") : plain[2]!.trim();
 }
 
 /** Bends a name the remote end proposed into one `cleanFileName` accepts, or
@@ -420,7 +413,7 @@ function derivedFileName(raw: string | undefined): string | undefined {
   return name || undefined;
 }
 
-function urlFileName(url: URL): string | undefined {
+function urlFileName(url: URL): string {
   const segment = url.pathname.split("/").pop() ?? "";
   try {
     return decodeURIComponent(segment);
@@ -443,7 +436,7 @@ function sideloadBody(body: ReadableStream<Uint8Array> | null, budget: AbortSign
           yield value;
         }
       } catch (err) {
-        throw err instanceof SideloadTimeout || budget.aborted ? new SideloadTimeout() : new SideloadTransferFailed();
+        throw budget.aborted ? new SideloadTimeout() : new SideloadTransferFailed();
       } finally {
         void reader.cancel().catch(() => {});
       }
@@ -481,7 +474,6 @@ export async function sideloadFile(
   const budget = new AbortController();
   const timer = setTimeout(() => budget.abort(), config.sideloadTimeoutMs);
   let response: EgressResponse | undefined;
-  let stream: Readable | undefined;
   try {
     const fetched = await sideloadFetch(egress, start, budget.signal, env.logger);
     response = fetched.response;
@@ -501,7 +493,7 @@ export async function sideloadFile(
       derivedFileName(urlFileName(fetched.url)) ??
       "download";
 
-    stream = sideloadBody(response.body, budget.signal);
+    const stream = sideloadBody(response.body, budget.signal);
     const { ref: _ref, ...file } = await writeFileUnchecked(env, userId, bundleId, { name, mimeType, stream });
     return file;
   } catch (err) {
@@ -512,8 +504,8 @@ export async function sideloadFile(
     throw err;
   } finally {
     clearTimeout(timer);
-    // An unread body (a refusal, or a write that never started) must not hold its connection.
-    stream?.destroy();
+    // An unread body (a refusal, or a write that never started) must not hold
+    // its connection; one the writer took over is already locked and released.
     void response?.body?.cancel().catch(() => {});
     await egress.dispose().catch(() => {});
   }

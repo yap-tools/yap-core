@@ -23,7 +23,7 @@ import { z } from "zod";
 
 import type { YapConfig } from "../../config.js";
 import { invalid, YapError } from "../errors.js";
-import { SSRF_PIN_ERROR_CODE } from "../ssrf.js";
+import { isEgressRefusal } from "./egress.js";
 import { DRIVER_API, type DriverDefinition, type Egress, type RunContext } from "./types.js";
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -182,14 +182,8 @@ export function createHttpDriver(config: YapConfig): DriverDefinition {
         return { status: response.status, body: await response.text() };
       } catch (err) {
         if ((err as Error).name === "AbortError") throw err;
-        const cause = (err as { cause?: { code?: string } }).cause;
-        const pinBlocked =
-          cause?.code === SSRF_PIN_ERROR_CODE || (err as { code?: string }).code === SSRF_PIN_ERROR_CODE;
-        // A YapError here can only have come from the egress pre-flight
-        // (`assertPublicDestination`) — the underlying transport throws plain
-        // Error/TypeError, never YapError — so treat any YapError as a
-        // pre-flight SSRF rejection too.
-        if (pinBlocked || err instanceof YapError) {
+        const cause = (err as { cause?: unknown }).cause;
+        if (isEgressRefusal(err)) {
           // Both collapses below throw away the only description of what
           // actually went wrong, on purpose — the message can name the hidden
           // host. The log ring is where it survives: in memory for the run,

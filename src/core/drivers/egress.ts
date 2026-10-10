@@ -49,7 +49,7 @@ import tls from "node:tls";
 import { Agent, fetch as undiciFetch } from "undici";
 
 import type { YapConfig } from "../../config.js";
-import { invalid } from "../errors.js";
+import { invalid, YapError } from "../errors.js";
 import {
   assertPublicDestination,
   blockedAddresses,
@@ -98,6 +98,21 @@ export interface Egress {
    * Sockets already returned by `connect()` are not touched — those belong to
    * the driver that asked for them. */
   dispose(): Promise<void>;
+}
+
+/**
+ * Whether a rejected `fetch` was the guard refusing the destination rather
+ * than the network failing. The pre-flight throws a `YapError` (the transport
+ * underneath never does — it throws plain Error/TypeError), and the
+ * connect-time pinning lookup throws, or is wrapped in, an error coded
+ * `SSRF_PIN_ERROR_CODE`. Callers that collapse failures for an agent ask here,
+ * so what a refusal looks like is known in one place.
+ */
+export function isEgressRefusal(err: unknown): boolean {
+  if (err instanceof YapError) return true;
+  const code = (err as { code?: string } | null)?.code;
+  const causeCode = (err as { cause?: { code?: string } } | null)?.cause?.code;
+  return code === SSRF_PIN_ERROR_CODE || causeCode === SSRF_PIN_ERROR_CODE;
 }
 
 /** Default wall-clock budget for establishing one connection. */
