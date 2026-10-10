@@ -11,6 +11,9 @@
  * fresh expiring link. Deleting a file record deletes the blob immediately.
  * An orphan sweep removes reserved placeholders whose upload never completed.
  */
+import { once } from "node:events";
+import { PassThrough, Readable } from "node:stream";
+
 import { and, asc, eq, lt } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
@@ -92,13 +95,67 @@ export interface UploadRequestResult {
   status: "reserved";
 }
 
+/** Exactly one of `bytes` and `stream`. A stream is stored as it is read, so
+ * a large file never sits whole in the server's memory. */
 export interface FileWriteInput {
   name: string;
   mimeType?: string;
-  bytes: Uint8Array | string;
+  bytes?: Uint8Array | string;
+  stream?: Readable;
 }
 
 export type WrittenFileInfo = FileInfo & { ref: string };
+
+class StreamTooLarge extends Error {}
+
+/**
+ * Stream into the blob store, counting as it goes; the size of a stream is
+ * only known once it has been read, so the cap is enforced mid-flight. The
+ * caller removes the partial blob on any rejection.
+ *
+ * The store is never handed an erroring stream. A store adapter may reject the
+ * moment its input errors while its own write is still in flight, and a delete
+ * issued then races a write that recreates the blob. So a failed or oversized
+ * source simply ends the store's input early: the store finishes a truncated
+ * write, and only then is the failure reported.
+ */
+async function putBounded(blob: BlobStore, key: string, source: Readable, maxBytes: number): Promise<number> {
+  let size = 0;
+  let failure: unknown = null;
+  const sink = new PassThrough();
+  const storing = blob.putStream(key, sink);
+  // A store that gives up stops draining the sink; nothing must wait on it then.
+  const storeDone = new AbortController();
+  void storing.then(
+    () => storeDone.abort(),
+    () => storeDone.abort(),
+  );
+
+  const feeding = (async () => {
+    try {
+      for await (const chunk of source) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array);
+        size += bytes.byteLength;
+        if (size > maxBytes) {
+          failure = new StreamTooLarge();
+          return;
+        }
+        if (storeDone.signal.aborted || sink.destroyed) return;
+        if (!sink.write(bytes)) await once(sink, "drain", { signal: storeDone.signal });
+      }
+    } catch (err) {
+      if (!storeDone.signal.aborted) failure = err ?? new Error("the file stream failed");
+    } finally {
+      source.destroy();
+      sink.end();
+    }
+  })();
+
+  const [stored] = await Promise.allSettled([storing, feeding]);
+  if (failure) throw failure;
+  if (stored.status === "rejected") throw stored.reason;
+  return size;
+}
 
 /**
  * Internal: write a finalized file without the edit_files capability check.
@@ -118,18 +175,34 @@ export async function writeFileUnchecked(
   if (mimeType && !mimeAllowed(config, mimeType)) {
     throw unsupportedMediaType(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
   }
-  if (typeof input.bytes !== "string" && !(input.bytes instanceof Uint8Array)) {
+  if (input.stream !== undefined && input.bytes !== undefined) {
+    throw invalid("pass file bytes or a stream, not both");
+  }
+  if (input.stream !== undefined && !(input.stream instanceof Readable)) {
+    throw invalid("file stream must be a Readable");
+  }
+  if (input.stream === undefined && typeof input.bytes !== "string" && !(input.bytes instanceof Uint8Array)) {
     throw invalid("file bytes must be a string or Uint8Array");
   }
-  const bytes = typeof input.bytes === "string" ? Buffer.from(input.bytes) : input.bytes;
-  if (bytes.byteLength > config.maxFileSizeBytes) {
-    throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
-  }
+  const tooBig = () => tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
 
   const { files } = db.tables;
   const fileId = newId();
   const storageKey = `${ctx.space.id}/${bundleId}/${fileId}`;
-  await blob.put(storageKey, bytes);
+  let size: number;
+  if (input.stream) {
+    try {
+      size = await putBounded(blob, storageKey, input.stream, config.maxFileSizeBytes);
+    } catch (err) {
+      await blob.delete(storageKey).catch(() => {});
+      throw err instanceof StreamTooLarge ? tooBig() : err;
+    }
+  } else {
+    const bytes = typeof input.bytes === "string" ? Buffer.from(input.bytes) : input.bytes!;
+    if (bytes.byteLength > config.maxFileSizeBytes) throw tooBig();
+    await blob.put(storageKey, bytes);
+    size = bytes.byteLength;
+  }
   try {
     const now = nowIso();
     await db.client.insert(files).values({
@@ -140,7 +213,7 @@ export async function writeFileUnchecked(
       status: "finalized",
       name,
       mimeType,
-      size: bytes.byteLength,
+      size,
       storageKey,
       uploadConsumed: 1,
       createdAt: now,
@@ -156,7 +229,7 @@ export async function writeFileUnchecked(
     ref: `file://${fileId}`,
     name,
     mimeType,
-    size: bytes.byteLength,
+    size,
     status: "finalized",
     createdAt: (await getFileRow(db, fileId)).createdAt,
   };
