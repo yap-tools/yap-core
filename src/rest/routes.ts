@@ -148,7 +148,7 @@ function sendDirect404(c: Context, body: unknown): Response | null {
 export function registerRestRoutes(server: YapServer): void {
   const app = server.mcp.getApp();
   const { db, config, logger, blob, registry } = server;
-  const fileEnv: filesCore.FileEnv = { db, blob, config };
+  const fileEnv: filesCore.FileEnv = { db, blob, config, logger };
   // `logger` rides along for the runs layer: a failed run's detail belongs in
   // the server log, since the row an agent reads keeps only the flat message.
   const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, blob, config, registry, logger };
@@ -781,6 +781,18 @@ export function registerRestRoutes(server: YapServer): void {
         await jsonBody(c),
       );
       return c.json(await filesCore.requestUpload(fileEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.post(
+    "/v1/bundles/:id/files/sideload",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({ url: z.string(), name: z.string().optional(), mime_type: z.string().optional() }),
+        await jsonBody(c),
+      );
+      return c.json(await filesCore.sideloadFile(fileEnv, userId, param(c, "id"), body), 201);
     }),
   );
 

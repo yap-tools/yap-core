@@ -4,7 +4,7 @@ import net from "node:net";
 import { describe, expect, it } from "vitest";
 
 import { loadConfig, type YapConfig } from "../../src/config.js";
-import { createEgress } from "../../src/core/drivers/egress.js";
+import { createEgress, type EgressResponse } from "../../src/core/drivers/egress.js";
 import { createHttpDriver } from "../../src/core/drivers/http.js";
 import type { Egress, RunContext } from "../../src/core/drivers/types.js";
 import { YapError } from "../../src/core/errors.js";
@@ -37,7 +37,8 @@ function makeContext(
   const egress: Egress = {
     async fetch(url, init) {
       calls.push({ url, init: init as RecordedFetch["init"] });
-      return fetchImpl(url, init as RecordedFetch["init"]);
+      // The driver reads only status and text(); the fakes stay that bare.
+      return (await fetchImpl(url, init as RecordedFetch["init"])) as EgressResponse;
     },
     async connect() {
       throw new Error("not used in these tests");

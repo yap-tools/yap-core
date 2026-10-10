@@ -59,8 +59,13 @@ import {
   type Resolver,
 } from "../ssrf.js";
 
+/** The subset of a fetch `Response` that callers may rely on. `text()` and
+ * `body` consume the same bytes: use one or the other. */
 export interface EgressResponse {
   status: number;
+  headers: { get(name: string): string | null };
+  /** The body as a one-shot byte stream; null when the response has none. */
+  body: ReadableStream<Uint8Array> | null;
   text(): Promise<string>;
 }
 

@@ -75,7 +75,8 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    bundle_id) or the space (omit bundle_id). Full second-tier specs come from
    get_tools; load exposes only the manifest. Second-tier tools:
    items (query/get/create/update/delete), docs (get/read/create/update/patch/delete),
-   files (list_files, show_file, upload_request, upload_complete, delete_file),
+   files (list_files, show_file, upload_request, upload_complete, sideload_file — store
+   a file straight from a URL, where the instance allows it — and delete_file),
    services (run_service, get_run, list_runs — fire_hook is a deprecated alias
    for run_service, kept until 1.0), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles

@@ -89,6 +89,12 @@ export interface YapConfig {
   maxFileSizeBytes: number;
   /** "*" allows all MIME types. */
   mimeAllowlist: string[] | "*";
+  /** Instance-wide kill switch for sideloading (the server fetching a
+   *  caller-supplied URL into a bundle). On unless explicitly turned off. */
+  sideloadEnabled: boolean;
+  /** One wall-clock budget for a whole sideload: DNS, every redirect hop and
+   *  the body. */
+  sideloadTimeoutMs: number;
   hookTimeoutMs: number;
   /** Hostnames allowed to resolve to private ranges (SSRF override). Applies
    *  to all driver egress, not just the http driver's — the env var keeps its
@@ -279,6 +285,8 @@ export function loadConfig(env: Env = process.env): YapConfig {
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
+    sideloadEnabled: env.YAP_SIDELOAD_ENABLED !== "false",
+    sideloadTimeoutMs: intEnv(env, "YAP_SIDELOAD_TIMEOUT_MS", 60_000, MAX_TIMER_MS),
     // The settings that become timer delays are bounded by MAX_TIMER_MS: above
     // it a value wraps and fires immediately instead of waiting. hookTimeoutMs
     // is bounded 500ms tighter because the legacy fire paths wait

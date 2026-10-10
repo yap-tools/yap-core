@@ -7,6 +7,10 @@
  *   upload   → bytes to the link (human via widget, or headless)
  *   complete → finalize with size read authoritatively from storage
  *
+ * Sideloading is the one-call alternative for an agent holding a URL: the
+ * server fetches the bytes itself, through the guarded egress layer, and writes
+ * the file finalized — no placeholder, nothing left behind on failure.
+ *
  * Download is mint-on-demand: every fetch re-checks read_files and mints a
  * fresh expiring link. Deleting a file record deletes the blob immediately.
  * An orphan sweep removes reserved placeholders whose upload never completed.
@@ -20,8 +24,20 @@ import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import { signToken } from "../crypto.js";
 import type { Db } from "../db/index.js";
+import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
-import { YapError, invalid, notFound, tooLarge, unsupportedMediaType } from "./errors.js";
+import { createEgress, type Egress, type EgressResponse } from "./drivers/egress.js";
+import {
+  YapError,
+  badGateway,
+  forbidden,
+  gatewayTimeout,
+  invalid,
+  notFound,
+  tooLarge,
+  unsupportedMediaType,
+} from "./errors.js";
+import { SSRF_PIN_ERROR_CODE, type Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
 export interface FileInfo {
@@ -37,6 +53,11 @@ export interface FileEnv {
   db: Db;
   blob: BlobStore;
   config: YapConfig;
+  /** Operator-side sink for the detail a sideload failure hides from the caller. */
+  logger?: YapLogger;
+  /** Injectable for tests, as on RunEnv: what a sideload's egress resolves and fetches with. */
+  resolver?: Resolver;
+  fetchImpl?: typeof fetch;
 }
 
 /** Finalized files in a bundle (reserved placeholders are internal). */
@@ -287,6 +308,215 @@ export async function requestUpload(
     origin_upload_url: `${config.baseUrl}/w/upload-dropzone?token=${originToken}`,
     status: "reserved",
   };
+}
+
+/** How many redirects a sideload follows before giving up. */
+export const MAX_SIDELOAD_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+class SideloadTimeout extends Error {}
+class SideloadTransferFailed extends Error {}
+
+/** Settles with `work`, or rejects the moment the budget runs out — whatever
+ * `work` is waiting on (a resolver, a transport that ignores its signal). */
+function withinBudget<T>(work: Promise<T>, budget: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const expire = (): void => reject(new SideloadTimeout());
+    if (budget.aborted) {
+      work.catch(() => {});
+      return expire();
+    }
+    budget.addEventListener("abort", expire, { once: true });
+    work.then(resolve, reject).finally(() => budget.removeEventListener("abort", expire));
+  });
+}
+
+/** A sideload URL: http(s) only, and nothing but a location — credentials in
+ * the URL would be a header the caller is not allowed to send. */
+function sideloadUrl(raw: string, base?: URL): URL | null {
+  let url: URL;
+  try {
+    url = new URL(raw, base);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.username || url.password) return null;
+  return url;
+}
+
+/**
+ * One guarded GET. Whatever goes wrong below the HTTP status is collapsed
+ * before it reaches the caller, as the http driver does: a guard rejection and
+ * a transport failure each become one generic message, so the tool cannot be
+ * used to map an instance's internal network. The detail goes to the server
+ * log, with the host only — a URL's path and query can carry signed tokens.
+ */
+async function sideloadGet(egress: Egress, url: URL, budget: AbortSignal, logger?: YapLogger): Promise<EgressResponse> {
+  try {
+    return await withinBudget(egress.fetch(url.href, { method: "GET", signal: budget, redirect: "manual" }), budget);
+  } catch (err) {
+    if (err instanceof SideloadTimeout || budget.aborted) throw new SideloadTimeout();
+    const cause = (err as { cause?: { code?: string } }).cause;
+    const pinBlocked = cause?.code === SSRF_PIN_ERROR_CODE || (err as { code?: string }).code === SSRF_PIN_ERROR_CODE;
+    // A YapError here can only be the egress pre-flight refusing the destination.
+    if (pinBlocked || err instanceof YapError) {
+      logger?.warn(`sideload from ${url.host} refused: ${String(err)}`);
+      throw forbidden("the URL cannot be fetched: its host does not resolve or is blocked by this instance's network policy");
+    }
+    logger?.warn(`sideload from ${url.host} failed: ${String(err)}${cause !== undefined ? ` (cause: ${String(cause)})` : ""}`);
+    throw badGateway("the URL could not be reached");
+  }
+}
+
+/** Follows redirects by hand so every hop goes back through the guard. */
+async function sideloadFetch(
+  egress: Egress,
+  start: URL,
+  budget: AbortSignal,
+  logger?: YapLogger,
+): Promise<{ response: EgressResponse; url: URL }> {
+  let url = start;
+  for (let hops = 0; ; hops++) {
+    const response = await sideloadGet(egress, url, budget, logger);
+    const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
+    if (location === null) return { response, url };
+    void response.body?.cancel().catch(() => {});
+    if (hops === MAX_SIDELOAD_REDIRECTS) {
+      throw badGateway(`the URL redirected more than ${MAX_SIDELOAD_REDIRECTS} times`);
+    }
+    const next = sideloadUrl(location, url);
+    if (!next) throw badGateway("the URL redirected to a location that is not a plain http(s) URL");
+    url = next;
+  }
+}
+
+/** The file name a Content-Disposition header proposes, if it proposes one. */
+function dispositionFileName(header: string | null): string | undefined {
+  if (!header) return undefined;
+  const extended = /(?:^|;)\s*filename\*\s*=\s*([^';\s]*)'[^';]*'([^;]*)/i.exec(header);
+  if (extended && /^utf-?8$/i.test(extended[1]!)) {
+    try {
+      return decodeURIComponent(extended[2]!.trim());
+    } catch {
+      // malformed encoding: fall through to the plain parameter
+    }
+  }
+  const plain = /(?:^|;)\s*filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]*))/i.exec(header);
+  if (!plain) return undefined;
+  return plain[1] !== undefined ? plain[1].replace(/\\(.)/g, "$1") : plain[2]!.trim();
+}
+
+/** Bends a name the remote end proposed into one `cleanFileName` accepts, or
+ * gives up on it. Only the last path segment counts, as in a browser. */
+function derivedFileName(raw: string | undefined): string | undefined {
+  const name = (raw ?? "")
+    .split(/[/\\]/)
+    .pop()!
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 255)
+    .trim();
+  return name || undefined;
+}
+
+function urlFileName(url: URL): string | undefined {
+  const segment = url.pathname.split("/").pop() ?? "";
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** The response body as a stream the file writer can bound. Each read races
+ * the budget, so a body that stalls fails the write instead of holding it. */
+function sideloadBody(body: ReadableStream<Uint8Array> | null, budget: AbortSignal): Readable {
+  if (!body) return Readable.from([]);
+  return Readable.from(
+    (async function* () {
+      const reader = body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await withinBudget(reader.read(), budget);
+          if (done) return;
+          yield value;
+        }
+      } catch (err) {
+        throw err instanceof SideloadTimeout || budget.aborted ? new SideloadTimeout() : new SideloadTransferFailed();
+      } finally {
+        void reader.cancel().catch(() => {});
+      }
+    })(),
+    { objectMode: false },
+  );
+}
+
+/**
+ * Sideload: fetch a caller-supplied URL server-side and store it as a
+ * finalized file, in one synchronous call. The caller supplies a location and
+ * nothing else — it is a GET with no credentials and no headers of theirs —
+ * and every request, redirect hops included, goes through the guarded egress.
+ * The source URL is not kept anywhere.
+ */
+export async function sideloadFile(
+  env: FileEnv,
+  userId: string,
+  bundleId: string,
+  input: { url: string; name?: string; mime_type?: string },
+): Promise<FileInfo> {
+  const { db, config } = env;
+  if (!config.sideloadEnabled) throw forbidden("sideloading is disabled on this instance");
+  const ctx = await getBundleContext(db, bundleId);
+  await requireBundleCapability(db, userId, "edit_files", ctx);
+
+  const start = sideloadUrl(input.url);
+  if (!start) throw invalid("url must be an absolute http(s) URL without embedded credentials");
+  const givenName = input.name !== undefined ? cleanFileName(input.name) : undefined;
+  const disallowed = (mimeType: string) =>
+    unsupportedMediaType(`MIME type ${mimeType} is not allowed`, { allowed: config.mimeAllowlist });
+  if (input.mime_type && !mimeAllowed(config, input.mime_type)) throw disallowed(input.mime_type);
+
+  const egress = createEgress(config, env.resolver, env.fetchImpl);
+  const budget = new AbortController();
+  const timer = setTimeout(() => budget.abort(), config.sideloadTimeoutMs);
+  let response: EgressResponse | undefined;
+  let stream: Readable | undefined;
+  try {
+    const fetched = await sideloadFetch(egress, start, budget.signal, env.logger);
+    response = fetched.response;
+    if (response.status < 200 || response.status >= 300) {
+      throw badGateway(`the URL answered with HTTP ${response.status}`);
+    }
+    const mimeType =
+      input.mime_type || (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    if (mimeType && !mimeAllowed(config, mimeType)) throw disallowed(mimeType);
+    const declaredSize = Number(response.headers.get("content-length") ?? NaN);
+    if (declaredSize > config.maxFileSizeBytes) {
+      throw tooLarge(`file exceeds the maximum size of ${config.maxFileSizeBytes} bytes`);
+    }
+    const name =
+      givenName ??
+      derivedFileName(dispositionFileName(response.headers.get("content-disposition"))) ??
+      derivedFileName(urlFileName(fetched.url)) ??
+      "download";
+
+    stream = sideloadBody(response.body, budget.signal);
+    const { ref: _ref, ...file } = await writeFileUnchecked(env, userId, bundleId, { name, mimeType, stream });
+    return file;
+  } catch (err) {
+    if (err instanceof SideloadTimeout) {
+      throw gatewayTimeout(`the URL did not finish downloading within ${config.sideloadTimeoutMs} ms`);
+    }
+    if (err instanceof SideloadTransferFailed) throw badGateway("the download broke off before it completed");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    // An unread body (a refusal, or a write that never started) must not hold its connection.
+    stream?.destroy();
+    void response?.body?.cancel().catch(() => {});
+    await egress.dispose().catch(() => {});
+  }
 }
 
 async function getFileRow(db: Db, fileId: string) {
