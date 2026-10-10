@@ -108,6 +108,7 @@ yap api GET /v1/spaces          # raw passthrough — the entire /v1 surface
 yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
 yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
+yap api --sysadmin PATCH /v1/users/<id> '{"deniedCapabilities": ["manage_keys"]}'  # restrict an account
 ```
 
 The manage commands also work against an instance running elsewhere — pass
@@ -331,6 +332,35 @@ bundles as a baseline; a bundle grant overrides per capability — so a user can
 run services in one bundle and not its sibling, with the deciding row
 auditable either way. Personal spaces accept no grants; their owner
 implicitly holds all capabilities.
+
+### Account-level restrictions
+
+Two things a user can do belong to their account rather than to any space:
+managing their own credentials, and creating spaces. Every user may do both
+unless the operator says otherwise. The sysadmin can deny a user either or
+both — `deniedCapabilities` on `POST /v1/users` and `PATCH /v1/users/:id`:
+
+- **`manage_keys`** — all of the user's own credential management, as one
+  switch: creating, listing, rotating and revoking access keys, and listing
+  and disconnecting connected apps. A user denied it leaves credentials to the
+  operator, who still issues, lists and revokes their keys over
+  `/v1/users/:id/keys`. That includes cutting off a compromised key or app:
+  the user cannot do it themself. Two things stay outside it, because neither
+  is the user managing credentials: authorizing a new app on the consent
+  screen (the token it gets is bound by the same denials), and an app giving
+  up its own token at `/oauth/revoke`.
+- **`create_spaces`** — creating new spaces. Spaces the user already owns or
+  has been granted access to are untouched.
+
+Nothing is denied by default. A denial is enforced in core, so it holds over
+REST and MCP alike and for every credential — access keys and OAuth tokens,
+`role:admin` included — and it applies from the user's next request: existing
+keys, tokens and open MCP sessions are bound by it without being reissued or
+reconnected. It revokes nothing and deletes nothing, and clearing it gives
+back only what the credential in use was otherwise allowed. The user's
+current denials are in `GET /v1/whoami` and the MCP `whoami` tool, so a
+client can hide what would be refused; a refused call is a `403` naming the
+capability.
 
 ## OAuth (connecting apps)
 

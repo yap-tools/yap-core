@@ -106,8 +106,11 @@ describeEachAdapter("MCP surface", (adapter) => {
 
   it("whoami returns the current user identity and the server version as a top-level tool", async () => {
     const result = await alice.call("whoami");
-    expect(result).toEqual({ id: aliceId, name: "Alice", externalId: null, version: pkgVersion });
-    expect(Object.keys(result).sort()).toEqual(["externalId", "id", "name", "version"]);
+    expect(result).toEqual({ id: aliceId, name: "Alice", externalId: null,
+      deniedCapabilities: [],
+      version: pkgVersion,
+    });
+    expect(Object.keys(result).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name", "version"]);
   });
 
   describe("the discovery chain", () => {

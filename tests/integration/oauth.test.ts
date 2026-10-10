@@ -4,7 +4,6 @@
  * both REST and MCP, refresh rotation with reuse detection, and every
  * revocation lever (RFC 7009, connected-app disconnect, key revocation).
  */
-import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -13,79 +12,9 @@ import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp } from "../helpers/mcp.js";
-
-const REDIRECT_URI = "https://app.example/callback";
+import { connectApp, pkce, postAuthorize, REDIRECT_URI, registerClient, tokenRequest } from "../helpers/oauth.js";
 
 const pkgVersion = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
-
-function pkce() {
-  const verifier = randomBytes(32).toString("base64url");
-  const challenge = createHash("sha256").update(verifier).digest("base64url");
-  return { verifier, challenge };
-}
-
-async function registerClient(baseUrl: string, name = "Test App", redirectUris = [REDIRECT_URI]) {
-  const res = await fetch(`${baseUrl}/oauth/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ client_name: name, redirect_uris: redirectUris }),
-  });
-  return { status: res.status, body: (await res.json()) as any };
-}
-
-interface AuthorizeInput {
-  clientId: string;
-  key: string;
-  challenge: string;
-  scope?: string;
-  redirectUri?: string;
-  decision?: string;
-  state?: string;
-  /** The consent screen's role picker; omitted = whatever the request preselected. */
-  role?: string;
-}
-
-async function postAuthorize(baseUrl: string, input: AuthorizeInput): Promise<Response> {
-  const form = new URLSearchParams({
-    response_type: "code",
-    client_id: input.clientId,
-    redirect_uri: input.redirectUri ?? REDIRECT_URI,
-    scope: input.scope ?? "",
-    state: input.state ?? "st4te",
-    code_challenge: input.challenge,
-    code_challenge_method: "S256",
-    access_key: input.key,
-    decision: input.decision ?? "approve",
-    ...(input.role !== undefined ? { role: input.role } : {}),
-  });
-  return fetch(`${baseUrl}/oauth/authorize`, { method: "POST", body: form, redirect: "manual" });
-}
-
-async function tokenRequest(baseUrl: string, params: Record<string, string>) {
-  const res = await fetch(`${baseUrl}/oauth/token`, { method: "POST", body: new URLSearchParams(params) });
-  return { status: res.status, body: (await res.json()) as any };
-}
-
-/** Runs the whole code+PKCE flow and returns the first token pair. */
-async function connectApp(baseUrl: string, key: string, scope = "") {
-  const client = await registerClient(baseUrl);
-  const { verifier, challenge } = pkce();
-  const authz = await postAuthorize(baseUrl, { clientId: client.body.client_id, key, challenge, scope });
-  expect(authz.status).toBe(302);
-  const redirect = new URL(authz.headers.get("location")!);
-  const code = redirect.searchParams.get("code")!;
-  expect(code).toBeTruthy();
-  const token = await tokenRequest(baseUrl, {
-    grant_type: "authorization_code",
-    client_id: client.body.client_id,
-    code,
-    code_verifier: verifier,
-    redirect_uri: REDIRECT_URI,
-  });
-  expect(token.status).toBe(200);
-  const body = token.body as { access_token: string; refresh_token: string; scope: string };
-  return { clientId: client.body.client_id as string, ...body };
-}
 
 describeEachAdapter("oauth", (adapter) => {
   let app: TestApp;
@@ -314,8 +243,8 @@ describeEachAdapter("oauth", (adapter) => {
       const res = await apiClient(app.baseUrl, access_token).get("/v1/whoami");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ id: aliceId, name: "Alice", externalId: null });
-      expect(Object.keys(res.body).sort()).toEqual(["externalId", "id", "name"]);
+      expect(res.body).toEqual({ id: aliceId, name: "Alice", externalId: null, deniedCapabilities: [] });
+      expect(Object.keys(res.body).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name"]);
     });
 
     it("rejects a wrong PKCE verifier and burns the code on first use", async () => {
@@ -561,8 +490,14 @@ describeEachAdapter("oauth", (adapter) => {
     const mcp = await connectMcp(app.baseUrl, access_token);
     try {
       const identity = await mcp.call("whoami");
-      expect(identity).toEqual({ id: aliceId, name: "Alice", externalId: null, version: pkgVersion });
-      expect(Object.keys(identity).sort()).toEqual(["externalId", "id", "name", "version"]);
+      expect(identity).toEqual({
+        id: aliceId,
+        name: "Alice",
+        externalId: null,
+        deniedCapabilities: [],
+        version: pkgVersion,
+      });
+      expect(Object.keys(identity).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name", "version"]);
 
       const result = await mcp.call("load");
       expect(result.spaces.some((s: any) => s.id === personalSpaceId)).toBe(true);

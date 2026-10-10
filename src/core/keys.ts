@@ -7,6 +7,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 
 import { generateAccessKey, hashKey } from "../crypto.js";
 import type { Db } from "../db/index.js";
+import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertCanManageCredentials } from "./authScope.js";
 import { notFound } from "./errors.js";
 import { revokeGrantsForKey } from "./oauth.js";
@@ -79,14 +80,18 @@ async function revokeKey(db: Db, userId: string, keyId: string): Promise<string>
 }
 
 // ---- The user's own keys ----------------------------------------------------
+// Self-service, so each is gated twice: by the token role (a non-admin token
+// may not manage credentials) and by the operator's `manage_keys` denial.
 
 export async function createKey(db: Db, userId: string, name = ""): Promise<CreatedKey> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   return insertKey(db, userId, name, "user");
 }
 
 export async function listKeys(db: Db, userId: string): Promise<AccessKeyInfo[]> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   return selectKeys(db, userId);
 }
 
@@ -97,17 +102,21 @@ export async function listKeys(db: Db, userId: string): Promise<AccessKeyInfo[]>
  */
 export async function rotateKey(db: Db, userId: string, keyId: string): Promise<CreatedKey> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   const name = await revokeKey(db, userId, keyId);
   return insertKey(db, userId, name, "user");
 }
 
 export async function deleteKey(db: Db, userId: string, keyId: string): Promise<void> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   await revokeKey(db, userId, keyId);
 }
 
 // ---- The sysadmin key lane: any user's keys ----------------------------------
-// Operator operations, reached only with the sysadmin key. Each names the user
+// Operator operations, reached only with the sysadmin key, and independent of
+// what the user may do for themself: a `manage_keys` denial does not apply
+// here. Each names the user
 // explicitly and 404s when there is no such user; a key id resolves only under
 // the user who holds it.
 

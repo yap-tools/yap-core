@@ -17,7 +17,7 @@ describeEachAdapter("db adapter", (adapter) => {
     const now = new Date().toISOString();
     await db.client.insert(users).values({ id: "u1", name: "Troels", createdAt: now });
     const rows = await db.client.select().from(users).where(eq(users.id, "u1"));
-    expect(rows).toEqual([{ id: "u1", name: "Troels", externalId: null, createdAt: now }]);
+    expect(rows).toEqual([{ id: "u1", name: "Troels", externalId: null, deniedCapabilities: "[]", createdAt: now }]);
   });
 
   it("enforces cascade deletes through foreign keys", async () => {

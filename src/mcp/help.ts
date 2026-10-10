@@ -105,6 +105,13 @@ bundles) decide what you may do. A space grant is the baseline; bundle-level
 grants override per capability. Checks are per-capability (read_items,
 edit_items, edit_docs, read_files, edit_files, run_services, ...).
 
+The instance operator may also deny a user account-level capabilities —
+manage_keys (managing their own access keys, listing and disconnecting
+connected apps) and
+create_spaces. whoami lists them as deniedCapabilities; a denied call fails
+with "account capability ... is denied for this user", and only the operator
+can change that.
+
 Sessions may also be authenticated by an OAuth token — a delegation of an
 access key, possibly narrowed to a role (admin | member | read-only) and/or
 specific spaces or bundles. A narrowed session sees correspondingly smaller

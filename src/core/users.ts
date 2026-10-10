@@ -8,6 +8,12 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import type { BlobStore } from "../blob/index.js";
 import { generateAccessKey, hashKey } from "../crypto.js";
 import type { Db } from "../db/index.js";
+import {
+  checkDeniedCapabilities,
+  parseDeniedCapabilities,
+  serializeDeniedCapabilities,
+  type AccountCapability,
+} from "./accountCapabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
@@ -20,6 +26,11 @@ export interface User {
    * unique per instance when set, and never changed after creation.
    */
   externalId: string | null;
+  /**
+   * Account-level capabilities the operator has denied this user. Empty
+   * unless the sysadmin set it; see accountCapabilities.ts.
+   */
+  deniedCapabilities: AccountCapability[];
   createdAt: string;
 }
 
@@ -27,6 +38,19 @@ export interface CurrentUser {
   id: string;
   name: string;
   externalId: string | null;
+  deniedCapabilities: AccountCapability[];
+}
+
+type UserRow = Db["tables"]["users"]["$inferSelect"];
+
+function toUser(row: UserRow): User {
+  return {
+    id: row.id,
+    name: row.name,
+    externalId: row.externalId,
+    deniedCapabilities: parseDeniedCapabilities(row.deniedCapabilities),
+    createdAt: row.createdAt,
+  };
 }
 
 /** A user as `createUser` reports one that already existed: no key. */
@@ -54,20 +78,25 @@ function checkExternalId(externalId: string): string {
  * Creates a user with their personal space and initial key, as one
  * transaction. With an `externalId` the call is idempotent: if a user already
  * carries it, nothing is written and that user comes back without a key — the
- * `name` given on the repeated call is ignored.
+ * `name` and `deniedCapabilities` given on the repeated call are ignored.
  */
-export async function createUser(db: Db, input: { name: string; externalId?: undefined }): Promise<CreatedUser>;
 export async function createUser(
   db: Db,
-  input: { name: string; externalId?: string | null },
+  input: { name: string; externalId?: undefined; deniedCapabilities?: unknown },
+): Promise<CreatedUser>;
+export async function createUser(
+  db: Db,
+  input: { name: string; externalId?: string | null; deniedCapabilities?: unknown },
 ): Promise<CreatedUser | ExistingUser>;
 export async function createUser(
   db: Db,
-  input: { name: string; externalId?: string | null },
+  input: { name: string; externalId?: string | null; deniedCapabilities?: unknown },
 ): Promise<CreatedUser | ExistingUser> {
   const name = input.name?.trim();
   if (!name) throw invalid("user name is required");
   const externalId = input.externalId == null ? null : checkExternalId(input.externalId);
+  const deniedCapabilities =
+    input.deniedCapabilities === undefined ? [] : checkDeniedCapabilities(input.deniedCapabilities);
   const { users, spaces, accessKeys } = db.tables;
 
   return db.transaction(function* (tx) {
@@ -76,15 +105,15 @@ export async function createUser(
     // loop covers the user it lost to being deleted before it could be read.
     for (let attempt = 0; attempt < 3; attempt++) {
       const now = nowIso();
-      const user: User = { id: newId(), name, externalId, createdAt: now };
-      const inserted: User[] = yield tx
+      const user: User = { id: newId(), name, externalId, deniedCapabilities, createdAt: now };
+      const inserted: UserRow[] = yield tx
         .insert(users)
-        .values(user)
+        .values({ ...user, deniedCapabilities: serializeDeniedCapabilities(deniedCapabilities) })
         .onConflictDoNothing({ target: users.externalId })
         .returning();
 
       if (inserted.length === 0) {
-        const existing: { user: User; personalSpaceId: string | null }[] = yield tx
+        const existing: { user: UserRow; personalSpaceId: string | null }[] = yield tx
           .select({ user: users, personalSpaceId: spaces.id })
           .from(users)
           .leftJoin(spaces, and(eq(spaces.ownerId, users.id), eq(spaces.personal, 1)))
@@ -93,7 +122,7 @@ export async function createUser(
         if (!found) continue;
         // Only a row written around this function (a raw insert) lacks one.
         if (!found.personalSpaceId) throw new Error(`user ${found.user.id} has no personal space`);
-        return { user: found.user, personalSpaceId: found.personalSpaceId };
+        return { user: toUser(found.user), personalSpaceId: found.personalSpaceId };
       }
 
       const personalSpaceId = newId();
@@ -142,19 +171,43 @@ export async function listUsers(
     .orderBy(asc(users.createdAt), asc(users.id))
     .limit(limit + 1)
     .offset(offset);
-  return toPage(rows, offset, limit);
+  return toPage(rows.map(toUser), offset, limit);
 }
 
 export async function getUser(db: Db, userId: string): Promise<User> {
   const { users } = db.tables;
   const rows = await db.client.select().from(users).where(eq(users.id, userId));
   if (rows.length === 0) throw notFound("user", userId);
-  return rows[0]!;
+  return toUser(rows[0]!);
+}
+
+/**
+ * Sets what the sysadmin may change about a user: the deny list of
+ * account-level capabilities, replaced whole (an empty list clears it). It
+ * binds the user's very next operation. Validation runs before the write, so
+ * a rejected list leaves the stored one untouched.
+ */
+export async function updateUser(db: Db, userId: string, patch: { deniedCapabilities?: unknown }): Promise<User> {
+  if (patch.deniedCapabilities === undefined) throw invalid("nothing to update: deniedCapabilities is required");
+  const deniedCapabilities = checkDeniedCapabilities(patch.deniedCapabilities);
+  const { users } = db.tables;
+  const updated = await db.client
+    .update(users)
+    .set({ deniedCapabilities: serializeDeniedCapabilities(deniedCapabilities) })
+    .where(eq(users.id, userId))
+    .returning();
+  if (updated.length === 0) throw notFound("user", userId);
+  return toUser(updated[0]!);
 }
 
 export async function whoami(db: Db, userId: string): Promise<CurrentUser> {
   const user = await getUser(db, userId);
-  return { id: user.id, name: user.name, externalId: user.externalId };
+  return {
+    id: user.id,
+    name: user.name,
+    externalId: user.externalId,
+    deniedCapabilities: user.deniedCapabilities,
+  };
 }
 
 /**
