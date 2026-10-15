@@ -180,7 +180,15 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Users (sysadmin key) -------------------------------------------------
 
-  const createUserSchema = z.object({ name: z.string(), externalId: z.string().nullish() });
+  // deniedCapabilities passes through as given: core owns the capability
+  // names, and its rejection lists the unknown ones and the allowed set.
+  const createUserSchema = z.object({
+    name: z.string(),
+    externalId: z.string().nullish(),
+    deniedCapabilities: z.unknown().optional(),
+  });
+
+  const userPatchSchema = z.strictObject({ deniedCapabilities: z.unknown().optional() });
 
   app.post(
     "/v1/users",
@@ -206,6 +214,15 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       requireSysadmin(auth);
       return c.json(await usersCore.getUser(db, param(c, "id")));
+    }),
+  );
+
+  app.patch(
+    "/v1/users/:id",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      const body = parseBody(userPatchSchema, await jsonBody(c));
+      return c.json(await usersCore.updateUser(db, param(c, "id"), body));
     }),
   );
 

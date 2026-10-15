@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `denied_capabilities` text DEFAULT '[]' NOT NULL;

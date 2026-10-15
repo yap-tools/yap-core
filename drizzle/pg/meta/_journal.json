@@ -71,6 +71,13 @@
       "when": 1791547367661,
       "tag": "0009_key_issuer",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791551951513,
+      "tag": "0010_user_denied_capabilities",
+      "breakpoints": true
     }
   ]
 }

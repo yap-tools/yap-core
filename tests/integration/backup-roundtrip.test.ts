@@ -32,10 +32,18 @@ const tmp = (): string => {
   return d;
 };
 
+const USER_ROW = {
+  id: "u1",
+  name: "ada",
+  external_id: "ext-ada",
+  denied_capabilities: '["manage_keys"]',
+  created_at: "2026-01-01T00:00:00Z",
+};
+
 /** users + space + bundle + doc + one finalized file row; blob bytes "hello" at k/f1. */
 async function seed(db: Db, blobRoot: string): Promise<void> {
   const blob = await createBlobStore(blobConfig(blobRoot));
-  await db.insertRows("users", [{ id: "u1", name: "ada", external_id: "ext-ada", created_at: "2026-01-01T00:00:00Z" }]);
+  await db.insertRows("users", [USER_ROW]);
   await db.insertRows("spaces", [
     {
       id: "s1",
@@ -154,7 +162,7 @@ describeEachAdapter("backup import", (adapter: Adapter) => {
     expect(result.tables.users).toBe(1);
 
     const users = await db2.snapshotRead(async (read) => read("users"));
-    expect(users).toEqual([{ id: "u1", name: "ada", external_id: "ext-ada", created_at: "2026-01-01T00:00:00Z" }]);
+    expect(users).toEqual([USER_ROW]);
     const files = await db2.snapshotRead(async (read) => read("files"));
     expect(files).toHaveLength(1);
     const docs = await db2.snapshotRead(async (read) => read("bundle_docs"));
@@ -313,7 +321,7 @@ it.runIf(PG_URL)("cross-dialect: sqlite export restores into pg and back", async
   const blob2 = await createBlobStore(blobConfig(join(work, "blobs2")));
   await importArchive({ db: pgDb, blob: blob2, archivePath: out });
   const users = await pgDb.snapshotRead(async (read) => read("users"));
-  expect(users).toEqual([{ id: "u1", name: "ada", external_id: "ext-ada", created_at: "2026-01-01T00:00:00Z" }]);
+  expect(users).toEqual([USER_ROW]);
 
   // and back: pg → sqlite
   const back = join(work, "back.tar.gz");

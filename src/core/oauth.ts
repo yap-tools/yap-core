@@ -21,6 +21,7 @@ import {
   verifyPkceS256,
 } from "../crypto.js";
 import type { Db } from "../db/index.js";
+import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertCanManageCredentials, TOKEN_ROLES, type TokenAuth, type TokenScope } from "./authScope.js";
 import { notFound } from "./errors.js";
 import { newId, nowIso } from "./util.js";
@@ -365,6 +366,7 @@ export interface GrantInfo {
 
 export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[]> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   const { oauthGrants, oauthClients } = db.tables;
   const rows = await db.client
     .select({
@@ -391,6 +393,7 @@ export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[
  * key and other clients are untouched. */
 export async function revokeUserGrant(db: Db, userId: string, grantId: string): Promise<void> {
   assertCanManageCredentials();
+  await requireAccountCapability(db, userId, "manage_keys");
   const { oauthGrants } = db.tables;
   const rows = await db.client
     .select({ id: oauthGrants.id })

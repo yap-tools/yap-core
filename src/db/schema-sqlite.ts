@@ -19,6 +19,9 @@ export const users = sqliteTable(
     // Correlation id supplied by whatever system created the user. Opaque to
     // Yap; unique when set, and any number of users may leave it null.
     externalId: text("external_id"),
+    // Account-level capabilities the operator has denied this user, as a JSON
+    // array of names (see core/accountCapabilities.ts). Empty: unrestricted.
+    deniedCapabilities: text("denied_capabilities").notNull().default("[]"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [uniqueIndex("users_external_id_idx").on(t.externalId)],

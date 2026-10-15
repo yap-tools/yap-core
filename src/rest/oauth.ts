@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { constantTimeEqual } from "../crypto.js";
+import { requireAccountCapability } from "../core/accountCapabilities.js";
 import { YapError } from "../core/errors.js";
 import { authenticateKeyRow } from "../core/keys.js";
 import * as oauth from "../core/oauth.js";
@@ -501,6 +502,23 @@ export function registerOAuthRoutes(server: YapServer): void {
 
   const BAD_KEY = "That access key is invalid or revoked (the sysadmin key has no connections).";
 
+  /** A user the operator has denied `manage_keys` gets the key prompt back
+   * with the reason instead of their connections; null when the page may go on. */
+  async function refusedPage(c: Context, userId: string): Promise<Response | null> {
+    try {
+      await requireAccountCapability(db, userId, "manage_keys");
+      return null;
+    } catch (err) {
+      if (!(err instanceof YapError) || err.code !== "forbidden") throw err;
+      return c.html(
+        connectionsPage({
+          error: "Connected apps for this account are managed by the instance operator (manage_keys is denied).",
+        }),
+        403,
+      );
+    }
+  }
+
   app.get(
     "/oauth/connections",
     handle(async (c) => c.html(connectionsPage({}))),
@@ -512,6 +530,8 @@ export function registerOAuthRoutes(server: YapServer): void {
       const form = (await c.req.parseBody()) as Record<string, string>;
       const auth = await pageKeyAuth(form);
       if (!auth) return c.html(connectionsPage({ error: BAD_KEY }), 401);
+      const refused = await refusedPage(c, auth.userId);
+      if (refused) return refused;
       return c.html(
         connectionsPage({
           grants: await oauth.listUserGrants(db, auth.userId),
@@ -527,6 +547,8 @@ export function registerOAuthRoutes(server: YapServer): void {
       const form = (await c.req.parseBody()) as Record<string, string>;
       const auth = await pageKeyAuth(form);
       if (!auth) return c.html(connectionsPage({ error: BAD_KEY }), 401);
+      const refused = await refusedPage(c, auth.userId);
+      if (refused) return refused;
       let notice = "App disconnected — its tokens are revoked.";
       try {
         await oauth.revokeUserGrant(db, auth.userId, formValue(form, "grant_id"));

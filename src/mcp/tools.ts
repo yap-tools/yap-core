@@ -284,7 +284,7 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "whoami",
-    description: "Return the currently authenticated user's minimal identity (id, name and externalId) and the running Yap Core version.",
+    description: "Return the currently authenticated user's minimal identity (id, name and externalId), the account-level capabilities the instance operator has denied them (deniedCapabilities — empty when unrestricted; manage_keys and create_spaces are the ones that exist) and the running Yap Core version.",
     annotations: { readOnlyHint: true, title: "Who am I" },
     execute: async (_args, ctx) => {
       try {
@@ -547,7 +547,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "space_create",
     description:
-      "Create a new space owned by you (an account-level right — every user may create spaces). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
+      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces; whoami shows that). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
     parameters: z.object({
       name: z.string(),
       description: z.string().optional(),

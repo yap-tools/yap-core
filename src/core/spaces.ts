@@ -1,7 +1,8 @@
 /**
  * Spaces: the organizational tier below the root. Deliberately flat — spaces
  * do not nest. Space creation is an account-level right, not a granted
- * capability; creating a space seeds explicit allow rows for the creator so
+ * capability — every user has it unless the operator denies them
+ * `create_spaces`; creating a space seeds explicit allow rows for the creator so
  * access stays row-decided and auditable (the personal space is the only
  * implicit-capability place in the system).
  */
@@ -9,6 +10,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
+import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertAccountWrite } from "./authScope.js";
 import { KNOWN_CAPABILITIES, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
@@ -32,9 +34,12 @@ export async function createSpace(
   userId: string,
   input: { name: string; description?: string; keywords?: string; context?: string },
 ): Promise<Space> {
-  // Space creation is account-level (no capability gate), so the token-scope
-  // clamp has to be asserted here rather than in capability resolution.
+  // Space creation is account-level (no granted-capability gate), so the
+  // token-scope clamp has to be asserted here rather than in capability
+  // resolution. The operator's `create_spaces` denial is its own check:
+  // assertAccountWrite also guards user docs, which a denial must not touch.
   assertAccountWrite();
+  await requireAccountCapability(db, userId, "create_spaces");
   const name = input.name?.trim();
   if (!name) throw invalid("space name is required");
   const { spaces, grants } = db.tables;

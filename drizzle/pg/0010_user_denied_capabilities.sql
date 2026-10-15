@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "denied_capabilities" text DEFAULT '[]' NOT NULL;

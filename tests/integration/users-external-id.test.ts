@@ -73,7 +73,12 @@ describeEachAdapter("users: externalId", (adapter) => {
     const user = apiClient(app.baseUrl, first.body.initialKey.key);
     const me = await user.get("/v1/whoami");
     expect(me.status).toBe(200);
-    expect(me.body).toEqual({ id: first.body.user.id, name: "Grace", externalId: "ext-grace" });
+    expect(me.body).toEqual({
+      id: first.body.user.id,
+      name: "Grace",
+      externalId: "ext-grace",
+      deniedCapabilities: [],
+    });
   });
 
   it("looks a user up by externalId, or returns an empty list", async () => {
