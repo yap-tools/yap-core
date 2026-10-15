@@ -152,10 +152,16 @@ export function registerRestRoutes(server: YapServer): void {
   const fileEnv: filesCore.FileEnv = { db, blob, config, logger };
   // `logger` rides along for the runs layer: a failed run's detail belongs in
   // the server log, since the row an agent reads keeps only the flat message.
-  const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, blob, config, registry, logger };
-  // Schedule edits reload the scheduler; when it is not running (YAP_SCHEDULER=off)
-  // the reload is a no-op and authoring works the same.
-  const scheduleEnv: schedulesCore.ScheduleEnv = { db, config, registry, scheduler: server.scheduler };
+  // `scheduler` rides along for schedule edits, which reload it; when it is not
+  // running (YAP_SCHEDULER=off) the reload is a no-op and authoring works the same.
+  const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv & schedulesCore.ScheduleEnv = {
+    db,
+    blob,
+    config,
+    registry,
+    logger,
+    scheduler: server.scheduler,
+  };
 
   const handle =
     (fn: Handler) =>
@@ -906,6 +912,9 @@ export function registerRestRoutes(server: YapServer): void {
   const servicePins = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]));
   // Shape only; the names are checked against the driver in core.
   const serviceActions = z.array(z.string());
+  // A run's (or a schedule's) caller-supplied values; checked against the
+  // action's declared params in core.
+  const runParams = z.record(z.string(), z.unknown());
 
   app.post(
     "/v1/bundles/:id/services",
@@ -975,7 +984,7 @@ export function registerRestRoutes(server: YapServer): void {
       const body = parseBody(
         z.object({
           action: z.string().optional(),
-          params: z.record(z.string(), z.unknown()).optional(),
+          params: runParams.optional(),
           wait_ms: z.number().int().min(0).optional(),
         }),
         await optionalJsonBody(c),
@@ -1018,8 +1027,6 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- Schedules (authoring is REST-only, like the services they run) -------------
 
-  const scheduleParams = z.record(z.string(), z.unknown());
-
   app.post(
     "/v1/bundles/:id/schedules",
     handle(async (c, auth) => {
@@ -1029,14 +1036,14 @@ export function registerRestRoutes(server: YapServer): void {
           // The service's id or name within this bundle.
           service: z.string(),
           action: z.string().optional(),
-          params: scheduleParams.optional(),
+          params: runParams.optional(),
           cron: z.string(),
           timezone: z.string().optional(),
           enabled: z.boolean().optional(),
         }),
         await jsonBody(c),
       );
-      return c.json(await schedulesCore.createSchedule(scheduleEnv, userId, param(c, "id"), body), 201);
+      return c.json(await schedulesCore.createSchedule(serviceEnv, userId, param(c, "id"), body), 201);
     }),
   );
 
@@ -1045,7 +1052,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       return c.json({
-        data: await schedulesCore.listSchedules(scheduleEnv, userId, param(c, "id"), {
+        data: await schedulesCore.listSchedules(serviceEnv, userId, param(c, "id"), {
           service: c.req.query("service"),
         }),
       });
@@ -1056,7 +1063,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/schedules/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      return c.json(await schedulesCore.getSchedule(scheduleEnv, userId, param(c, "id")));
+      return c.json(await schedulesCore.getSchedule(serviceEnv, userId, param(c, "id")));
     }),
   );
 
@@ -1067,14 +1074,14 @@ export function registerRestRoutes(server: YapServer): void {
       const body = parseBody(
         z.object({
           action: z.string().optional(),
-          params: scheduleParams.optional(),
+          params: runParams.optional(),
           cron: z.string().optional(),
           timezone: z.string().optional(),
           enabled: z.boolean().optional(),
         }),
         await jsonBody(c),
       );
-      return c.json(await schedulesCore.updateSchedule(scheduleEnv, userId, param(c, "id"), body));
+      return c.json(await schedulesCore.updateSchedule(serviceEnv, userId, param(c, "id"), body));
     }),
   );
 
@@ -1082,7 +1089,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/schedules/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      await schedulesCore.deleteSchedule(scheduleEnv, userId, param(c, "id"));
+      await schedulesCore.deleteSchedule(serviceEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
     }),
   );

@@ -43,7 +43,7 @@ import type { YapLogger } from "../logger.js";
 import { runOutsideTokenAuth } from "./authScope.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { YapError } from "./errors.js";
-import { runService, type RunEnv } from "./runs.js";
+import { IN_FLIGHT, runService, type RunEnv } from "./runs.js";
 import { cronOptions, type ScheduleReloader, type ScheduleRow } from "./schedules.js";
 import { nowIso } from "./util.js";
 
@@ -58,15 +58,13 @@ export type FireOutcome =
 export interface Scheduler extends ScheduleReloader {
   /** Loads every enabled schedule and arms it. */
   start(): Promise<void>;
-  /** Disarms everything; a reload after this is a no-op. */
+  /** Disarms everything; reloads after this are no-ops until the next start. */
   stop(): void;
   /** Whether `start` has been called (and `stop` has not). */
   readonly started: boolean;
   /** One tick of one schedule, exactly as its job would run it. */
   fire(scheduleId: string): Promise<FireOutcome>;
 }
-
-const IN_FLIGHT = new Set(["queued", "running"]);
 
 interface Armed {
   job: Cron;
@@ -80,35 +78,38 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
   const jobs = new Map<string, Armed>();
   const firing = new Set<string>();
   let started = false;
-  // Reloads are serialized, and a burst of them collapses into one more pass:
-  // each reload reads the whole table, so the last one always sees every edit.
-  let reloading: Promise<void> | null = null;
-  let reloadAgain = false;
+  // Reloads run one at a time, in the order they were asked for: each re-reads
+  // the row it is about, so the last one for a schedule always wins.
+  let queue: Promise<void> = Promise.resolve();
 
   const setRow = (id: string, values: Partial<ScheduleRow>) =>
     db.client.update(schedules).set(values).where(eq(schedules.id, id));
 
-  function disarm(id: string): void {
-    jobs.get(id)?.job.stop();
+  /** Stops the schedule's job — only `job` if given, so a stale tick cannot
+   *  stop the job a newer reload armed in its place. */
+  function disarm(id: string, job?: Cron): void {
+    const armed = jobs.get(id);
+    if (!armed || (job && armed.job !== job)) return;
+    armed.job.stop();
     jobs.delete(id);
   }
 
-  async function fireOnce(id: string): Promise<FireOutcome> {
+  async function fireOnce(id: string, job?: Cron): Promise<FireOutcome> {
     const rows = await db.client.select().from(schedules).where(eq(schedules.id, id));
     const row = rows[0];
     if (!row) {
-      disarm(id);
+      disarm(id, job);
       return { kind: "gone" };
     }
     if (row.enabled !== 1) {
-      disarm(id);
+      disarm(id, job);
       return { kind: "disabled" };
     }
 
     const now = nowIso();
     if (row.lastRunId) {
       const last = await db.client.select({ status: runs.status }).from(runs).where(eq(runs.id, row.lastRunId));
-      if (last[0] && IN_FLIGHT.has(last[0].status)) {
+      if (last[0] && IN_FLIGHT.includes(last[0].status as (typeof IN_FLIGHT)[number])) {
         await setRow(id, { lastSkippedAt: now });
         return { kind: "skipped" };
       }
@@ -121,7 +122,7 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
       if (err instanceof YapError && (err.code === "forbidden" || err.code === "not_found")) {
         const reason = `disabled ${now}: the owner no longer holds run_services on this bundle`;
         await setRow(id, { enabled: 0, lastError: reason });
-        disarm(id);
+        disarm(id, job);
         env.logger?.warn(`schedule ${id} ${reason}`);
         return { kind: "capability_lost", reason };
       }
@@ -144,12 +145,12 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
       // be, so the row gets a flat line and the detail goes to the server log.
       const error = err instanceof YapError ? err.message : "run could not be started";
       await setRow(id, { lastFiredAt: now, lastError: error });
-      env.logger?.warn(`schedule ${id} did not start a run: ${String((err as Error | undefined)?.message ?? err)}`);
+      env.logger?.warn(`schedule ${id} did not start a run`, err);
       return { kind: "error", error };
     }
   }
 
-  function fire(id: string): Promise<FireOutcome> {
+  function fire(id: string, job?: Cron): Promise<FireOutcome> {
     return runOutsideTokenAuth(async () => {
       if (firing.has(id)) {
         await setRow(id, { lastSkippedAt: nowIso() });
@@ -157,7 +158,7 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
       }
       firing.add(id);
       try {
-        return await fireOnce(id);
+        return await fireOnce(id, job);
       } finally {
         firing.delete(id);
       }
@@ -171,25 +172,28 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
     // from "now" and could drop a tick that was due during the reload.
     if (armed?.key === key) return;
     armed?.job.stop();
-    const job = runOutsideTokenAuth(
-      () =>
-        new Cron(row.cron, { ...cronOptions(row.timezone), protect: true, unref: true }, async () => {
-          try {
-            await fire(row.id);
-          } catch (err) {
-            // A tick never takes the server down.
-            env.logger?.error(`schedule ${row.id} tick failed`, err);
-          }
-        }),
-    );
+    const job: Cron = new Cron(row.cron, { ...cronOptions(row.timezone), protect: true, unref: true }, async () => {
+      try {
+        await fire(row.id, job);
+      } catch (err) {
+        // A tick never takes the server down.
+        env.logger?.error(`schedule ${row.id} tick failed`, err);
+      }
+    });
     jobs.set(row.id, { job, key });
   }
 
-  async function reloadOnce(): Promise<void> {
-    const rows = await db.client.select().from(schedules).where(eq(schedules.enabled, 1));
-    const enabled = new Set(rows.map((r) => r.id));
-    for (const id of [...jobs.keys()]) if (!enabled.has(id)) disarm(id);
+  /** Brings the jobs in line with the table: one row, or (at start) all of them. */
+  async function sync(id?: string): Promise<void> {
+    const rows = await db.client
+      .select()
+      .from(schedules)
+      .where(id === undefined ? eq(schedules.enabled, 1) : eq(schedules.id, id));
+    // A stop that landed while the read was in flight wins: nothing is re-armed.
+    if (!started) return;
+    if (id !== undefined && rows[0]?.enabled !== 1) disarm(id);
     for (const row of rows) {
+      if (row.enabled !== 1) continue;
       try {
         arm(row);
       } catch (err) {
@@ -200,25 +204,16 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
     }
   }
 
-  async function reload(): Promise<void> {
-    if (!started) return;
-    if (reloading) {
-      reloadAgain = true;
-      return reloading;
-    }
-    reloading = (async () => {
+  function enqueue(id?: string): Promise<void> {
+    queue = queue.then(async () => {
+      if (!started) return;
       try {
-        do {
-          reloadAgain = false;
-          await reloadOnce();
-        } while (reloadAgain && started);
+        await sync(id);
       } catch (err) {
-        env.logger?.error("schedule reload failed", err);
-      } finally {
-        reloading = null;
+        env.logger?.error(`schedule reload failed${id ? ` for ${id}` : ""}`, err);
       }
-    })();
-    return reloading;
+    });
+    return queue;
   }
 
   return {
@@ -227,13 +222,13 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
     },
     async start() {
       started = true;
-      await reload();
+      await enqueue();
     },
     stop() {
       started = false;
       for (const id of [...jobs.keys()]) disarm(id);
     },
-    reload,
-    fire,
+    reload: (scheduleId: string) => enqueue(scheduleId),
+    fire: (scheduleId: string) => fire(scheduleId),
   };
 }

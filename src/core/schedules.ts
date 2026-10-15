@@ -21,6 +21,8 @@
  *   are authored over REST only); `run_services` because a schedule is a
  *   standing order to run, and nobody should be able to leave behind an order
  *   they could not carry out themselves.
+ * - **From an OAuth token, setting one up needs the admin role** (see
+ *   `assertStandingOrder`): a schedule outlives the token that wrote it.
  * - **Reading needs `run_services`**, the same gate as the run records: a
  *   schedule carries the params its runs will get and points at its last run.
  * - **Its action and params are validated at write time by the very
@@ -43,8 +45,9 @@ import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import type { DriverRegistry } from "./drivers/registry.js";
+import { currentTokenAuth } from "./authScope.js";
 import { forbidden, invalid, notFound, YapError } from "./errors.js";
-import { prepareRun, resolveServiceRow } from "./runs.js";
+import { prepareRun, requireRunServicesOn, resolveServiceRow } from "./runs.js";
 import { newId, nowIso } from "./util.js";
 
 export interface ScheduleInfo {
@@ -72,9 +75,10 @@ export interface ScheduleInfo {
   updatedAt: string;
 }
 
-/** What the scheduler exposes to authoring: re-read the table. Never throws. */
+/** What the scheduler exposes to authoring: re-read one schedule and arm or
+ *  disarm it to match. Never throws. */
 export interface ScheduleReloader {
-  reload(): Promise<void>;
+  reload(scheduleId: string): Promise<void>;
 }
 
 export interface ScheduleEnv {
@@ -161,9 +165,6 @@ async function validateTarget(
   action: string | undefined,
   params: Record<string, unknown>,
 ): Promise<{ serviceId: string; action: string; params: Record<string, string> }> {
-  if (typeof params !== "object" || params === null || Array.isArray(params)) {
-    throw invalid("schedule params must be an object of declared parameter values");
-  }
   const service = await resolveServiceRow(env.db, bundleId, serviceRef);
   const prepared = prepareRun(env.registry, service, action, params);
   return { serviceId: service.id, action: prepared.action, params: prepared.params };
@@ -178,13 +179,15 @@ async function getRow(db: Db, scheduleId: string): Promise<ScheduleRow> {
   return rows[0]!;
 }
 
-/** Listing without a gate — load_bundle has already checked read access. */
-export async function listSchedulesUnchecked(db: Db, bundleId: string): Promise<ScheduleInfo[]> {
+/** Listing without a gate — load_bundle has already checked `run_services`. */
+export async function listSchedulesUnchecked(db: Db, bundleId: string, serviceId?: string): Promise<ScheduleInfo[]> {
   const { schedules } = db.tables;
+  const conditions = [eq(schedules.bundleId, bundleId)];
+  if (serviceId !== undefined) conditions.push(eq(schedules.serviceId, serviceId));
   const rows = await db.client
     .select()
     .from(schedules)
-    .where(eq(schedules.bundleId, bundleId))
+    .where(and(...conditions))
     .orderBy(asc(schedules.createdAt), asc(schedules.id));
   return rows.map(toScheduleInfo);
 }
@@ -197,15 +200,12 @@ export async function listSchedules(
 ): Promise<ScheduleInfo[]> {
   const ctx = await getBundleContext(env.db, bundleId);
   await requireBundleCapability(env.db, userId, "run_services", ctx);
-  if (opts.service === undefined || opts.service.trim() === "") return listSchedulesUnchecked(env.db, bundleId);
-  const service = await resolveServiceRow(env.db, bundleId, opts.service);
-  const { schedules } = env.db.tables;
-  const rows = await env.db.client
-    .select()
-    .from(schedules)
-    .where(and(eq(schedules.bundleId, bundleId), eq(schedules.serviceId, service.id)))
-    .orderBy(asc(schedules.createdAt), asc(schedules.id));
-  return rows.map(toScheduleInfo);
+  // A blank filter is "no filter", as in listRuns.
+  const service =
+    opts.service !== undefined && opts.service.trim() !== ""
+      ? await resolveServiceRow(env.db, bundleId, opts.service)
+      : undefined;
+  return listSchedulesUnchecked(env.db, bundleId, service?.id);
 }
 
 /**
@@ -216,22 +216,46 @@ export async function listSchedules(
  */
 export async function getSchedule(env: ScheduleEnv, userId: string, scheduleId: string): Promise<ScheduleInfo> {
   const row = await getRow(env.db, scheduleId);
-  try {
-    const ctx = await getBundleContext(env.db, row.bundleId);
-    await requireBundleCapability(env.db, userId, "run_services", ctx);
-  } catch (err) {
-    if (err instanceof YapError && err.code === "not_found") throw notFound("schedule", scheduleId);
-    throw err;
-  }
+  await requireRunServicesOn(env.db, userId, row.bundleId, () => notFound("schedule", scheduleId));
   return toScheduleInfo(row);
 }
 
 // ---- Authoring --------------------------------------------------------------
 
-async function requireAuthoring(db: Db, userId: string, bundleId: string): Promise<void> {
-  const ctx = await getBundleContext(db, bundleId);
-  await requireBundleCapability(db, userId, "edit_services", ctx);
-  await requireBundleCapability(db, userId, "run_services", ctx);
+/**
+ * The authoring gate. Reached by a schedule's own id (update, delete), a
+ * caller who cannot see the bundle gets a 404 naming the schedule, never the
+ * bundle — the same existence rule as getSchedule.
+ */
+async function requireAuthoring(db: Db, userId: string, bundleId: string, scheduleId?: string): Promise<void> {
+  try {
+    const ctx = await getBundleContext(db, bundleId);
+    await requireBundleCapability(db, userId, "edit_services", ctx);
+    await requireBundleCapability(db, userId, "run_services", ctx);
+  } catch (err) {
+    if (scheduleId && err instanceof YapError && err.code === "not_found") throw notFound("schedule", scheduleId);
+    throw err;
+  }
+}
+
+/**
+ * A schedule is a standing order that keeps running as its owner long after
+ * the request that wrote it — and after the credential that sent it is gone.
+ * So, like credential management, setting one up (or changing what it runs,
+ * or turning it back on) from an OAuth token needs the admin role, the
+ * explicit "act fully as me" delegation; a narrower token could otherwise
+ * leave behind authority that outlives its own revocation. Access keys always
+ * may. Switching a schedule off or deleting it takes no such standing and is
+ * open to any token that can author.
+ */
+function assertStandingOrder(): void {
+  const auth = currentTokenAuth();
+  if (auth && auth.scope.role !== "admin") {
+    throw forbidden(
+      "creating, changing or re-enabling a schedule requires an access key or an authorization with admin scope " +
+        "— a schedule keeps running as you after the token is gone",
+    );
+  }
 }
 
 export async function createSchedule(
@@ -249,6 +273,7 @@ export async function createSchedule(
   },
 ): Promise<ScheduleInfo> {
   await requireAuthoring(env.db, userId, bundleId);
+  assertStandingOrder();
   const timezone = validateTimezone(input.timezone);
   const cron = validateCron(input.cron, timezone);
   const target = await validateTarget(env, bundleId, input.service, input.action, input.params ?? {});
@@ -272,7 +297,7 @@ export async function createSchedule(
     updatedAt: now,
   };
   await env.db.client.insert(env.db.tables.schedules).values(row);
-  await env.scheduler?.reload();
+  await env.scheduler?.reload(row.id);
   return toScheduleInfo(row);
 }
 
@@ -284,7 +309,9 @@ export async function createSchedule(
  * may have changed under them since the schedule was written.
  *
  * Re-enabling clears `lastError`: the schedule gets a clean slate, and a
- * disable reason left over from a capability loss no longer applies.
+ * disable reason left over from a capability loss no longer applies. Only the
+ * patched columns are written, so a tick that lands between the read and the
+ * write keeps what it recorded.
  */
 export async function updateSchedule(
   env: ScheduleEnv,
@@ -299,7 +326,7 @@ export async function updateSchedule(
   },
 ): Promise<ScheduleInfo> {
   const row = await getRow(env.db, scheduleId);
-  await requireAuthoring(env.db, userId, row.bundleId);
+  await requireAuthoring(env.db, userId, row.bundleId, scheduleId);
   const onlyDisables =
     patch.enabled !== true &&
     patch.action === undefined &&
@@ -312,12 +339,13 @@ export async function updateSchedule(
         "others may disable or delete it",
     );
   }
+  if (!onlyDisables) assertStandingOrder();
 
-  const timezone = patch.timezone !== undefined ? validateTimezone(patch.timezone) : row.timezone;
-  const cron =
-    patch.cron !== undefined || patch.timezone !== undefined ? validateCron(patch.cron ?? row.cron, timezone) : row.cron;
-  let action = row.action;
-  let params = row.params;
+  const changes: Partial<ScheduleRow> = { updatedAt: nowIso() };
+  if (patch.cron !== undefined || patch.timezone !== undefined) {
+    changes.timezone = patch.timezone !== undefined ? validateTimezone(patch.timezone) : row.timezone;
+    changes.cron = validateCron(patch.cron ?? row.cron, changes.timezone);
+  }
   if (patch.action !== undefined || patch.params !== undefined) {
     const target = await validateTarget(
       env,
@@ -326,43 +354,24 @@ export async function updateSchedule(
       patch.action ?? row.action,
       patch.params ?? (JSON.parse(row.params) as Record<string, unknown>),
     );
-    action = target.action;
-    params = JSON.stringify(target.params);
+    changes.action = target.action;
+    changes.params = JSON.stringify(target.params);
   }
-  const enabled = patch.enabled === undefined ? row.enabled : patch.enabled ? 1 : 0;
-  const reenabled = row.enabled === 0 && enabled === 1;
+  if (patch.enabled !== undefined) {
+    changes.enabled = patch.enabled ? 1 : 0;
+    if (patch.enabled && row.enabled === 0) changes.lastError = null;
+  }
 
-  const updated: ScheduleRow = {
-    ...row,
-    action,
-    params,
-    cron,
-    timezone,
-    enabled,
-    lastError: reenabled ? null : row.lastError,
-    updatedAt: nowIso(),
-  };
   const { schedules } = env.db.tables;
-  await env.db.client
-    .update(schedules)
-    .set({
-      action,
-      params,
-      cron,
-      timezone,
-      enabled,
-      lastError: updated.lastError,
-      updatedAt: updated.updatedAt,
-    })
-    .where(eq(schedules.id, scheduleId));
-  await env.scheduler?.reload();
-  return toScheduleInfo(updated);
+  await env.db.client.update(schedules).set(changes).where(eq(schedules.id, scheduleId));
+  await env.scheduler?.reload(scheduleId);
+  return toScheduleInfo({ ...row, ...changes });
 }
 
 export async function deleteSchedule(env: ScheduleEnv, userId: string, scheduleId: string): Promise<void> {
   const row = await getRow(env.db, scheduleId);
-  await requireAuthoring(env.db, userId, row.bundleId);
+  await requireAuthoring(env.db, userId, row.bundleId, scheduleId);
   const { schedules } = env.db.tables;
   await env.db.client.delete(schedules).where(eq(schedules.id, scheduleId));
-  await env.scheduler?.reload();
+  await env.scheduler?.reload(scheduleId);
 }

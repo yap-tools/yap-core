@@ -76,7 +76,8 @@ export type RunStatus = "queued" | "running" | "succeeded" | "failed";
 export type RunSource = "mcp" | "rest" | "hook" | "schedule";
 
 const TERMINAL: RunStatus[] = ["succeeded", "failed"];
-const INTERRUPTED: RunStatus[] = ["queued", "running"];
+/** "Still going": what boot recovery retires and what a schedule waits out. */
+export const IN_FLIGHT: RunStatus[] = ["queued", "running"];
 
 /** How many driver log lines one run keeps. See `execute` — nothing is persisted. */
 const LOG_RING_SIZE = 200;
@@ -679,16 +680,29 @@ export async function runService(
  * informative "missing capability run_services" rather than a 404.
  */
 export async function getRun(env: RunEnv, userId: string, runId: string): Promise<RunRecord> {
-  const { db } = env;
-  const record = await readRun(db, runId);
+  const record = await readRun(env.db, runId);
+  await requireRunServicesOn(env.db, userId, record.bundleId, () => notFound("run", runId));
+  return record;
+}
+
+/**
+ * The `run_services` gate for a record read by its own id (a run, a
+ * schedule), with that record's existence hiding: a caller who cannot see the
+ * bundle gets `hidden()` — a 404 naming the record, never the bundle — while
+ * one with a foothold there but not the capability gets the informative 403.
+ */
+export async function requireRunServicesOn(
+  db: Db,
+  userId: string,
+  bundleId: string,
+  hidden: () => YapError,
+): Promise<void> {
   try {
-    const bundleCtx = await getBundleContext(db, record.bundleId);
-    await requireBundleCapability(db, userId, "run_services", bundleCtx);
+    await requireBundleCapability(db, userId, "run_services", await getBundleContext(db, bundleId));
   } catch (err) {
-    if (err instanceof YapError && err.code === "not_found") throw notFound("run", runId);
+    if (err instanceof YapError && err.code === "not_found") throw hidden();
     throw err;
   }
-  return record;
 }
 
 export async function listRuns(
@@ -744,7 +758,7 @@ export async function listRuns(
  */
 export async function recoverInterruptedRuns(db: Db): Promise<number> {
   const { runs } = db.tables;
-  const stranded = await db.client.select({ id: runs.id }).from(runs).where(inArray(runs.status, INTERRUPTED));
+  const stranded = await db.client.select({ id: runs.id }).from(runs).where(inArray(runs.status, IN_FLIGHT));
   if (stranded.length === 0) return 0;
   const strandedIds = stranded.map((row) => row.id);
   // `returning()` is portable across both adapters (see files.ts's single-use
@@ -760,7 +774,7 @@ export async function recoverInterruptedRuns(db: Db): Promise<number> {
       errorCode: "internal",
       finishedAt: nowIso(),
     })
-    .where(and(inArray(runs.id, strandedIds), inArray(runs.status, INTERRUPTED)))
+    .where(and(inArray(runs.id, strandedIds), inArray(runs.status, IN_FLIGHT)))
     .returning({ id: runs.id });
   return recovered.length;
 }

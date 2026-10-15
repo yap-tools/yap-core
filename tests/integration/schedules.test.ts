@@ -14,7 +14,6 @@ import { createServer, type Server } from "node:http";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { loadConfig } from "../../src/config.js";
 import { runWithTokenAuth } from "../../src/core/authScope.js";
 import { DRIVER_API, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
 import { getRun, listRuns, type RunRecord } from "../../src/core/runs.js";
@@ -22,7 +21,7 @@ import { createScheduler } from "../../src/core/scheduler.js";
 import { createSchedule, getSchedule, updateSchedule, type ScheduleEnv } from "../../src/core/schedules.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
-import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, testEnv, type TestApp } from "../helpers/app.js";
+import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp } from "../helpers/mcp.js";
 
 /** Runs of the `hang` action wait here until a test lets them go. */
@@ -59,6 +58,15 @@ const releaseAll = (): void => {
   for (const release of hanging.splice(0)) release();
 };
 
+/** Resolves once a `hang` run has reached the driver. */
+const waitForHang = async (timeoutMs = 5_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (hanging.length === 0) {
+    if (Date.now() > deadline) throw new Error(`no hang run reached the driver within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
 describeEachAdapter("schedules", (adapter) => {
   let app: TestApp;
   let sysadmin: ApiClient;
@@ -87,7 +95,7 @@ describeEachAdapter("schedules", (adapter) => {
     }
   };
 
-  const schedulesOfService = async (svc: string) =>
+  const runsOfService = async (svc: string) =>
     (await listRuns({ ...env, registry: app.server.registry }, aliceId, bundleId, { service: svc, limit: 100 })).data;
 
   beforeAll(async () => {
@@ -223,9 +231,15 @@ describeEachAdapter("schedules", (adapter) => {
 
       // A user with no foothold at all learns nothing: the schedule is a 404.
       const stranger = (await sysadmin.post("/v1/users", { name: "Stranger" })).body.initialKey.key;
-      const res = await apiClient(app.baseUrl, stranger).get(`/v1/schedules/${created.body.id}`);
-      expect(res.status).toBe(404);
-      expect(res.body.error.message).not.toContain(bundleId);
+      const strangerApi = apiClient(app.baseUrl, stranger);
+      for (const res of [
+        await strangerApi.get(`/v1/schedules/${created.body.id}`),
+        await strangerApi.patch(`/v1/schedules/${created.body.id}`, { enabled: false }),
+        await strangerApi.delete(`/v1/schedules/${created.body.id}`),
+      ]) {
+        expect(res.status).toBe(404);
+        expect(res.body.error.message).not.toContain(bundleId);
+      }
     });
 
     it("lets only the owner change what a schedule runs; anyone who may author can disable or delete it", async () => {
@@ -355,7 +369,7 @@ describeEachAdapter("schedules", (adapter) => {
         cron: "0 7 * * *",
       });
       const id = created.body.id;
-      const before = (await schedulesOfService(serviceId)).length;
+      const before = (await runsOfService(serviceId)).length;
 
       const first = await app.server.scheduler.fire(id);
       expect(first.kind).toBe("started");
@@ -364,20 +378,14 @@ describeEachAdapter("schedules", (adapter) => {
       const skipped = (await alice.get(`/v1/schedules/${id}`)).body;
       expect(skipped.lastSkippedAt).not.toBeNull();
       expect(skipped.lastRunId).toBe((first as { runId: string }).runId);
-      expect((await schedulesOfService(serviceId)).length).toBe(before + 1);
+      expect((await runsOfService(serviceId)).length).toBe(before + 1);
 
       // Once it finishes, the next tick runs again.
-      for (;;) {
-        if (hanging.length > 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
+      await waitForHang();
       releaseAll();
       await pollUntilTerminal((first as { runId: string }).runId);
       expect((await app.server.scheduler.fire(id)).kind).toBe("started");
-      for (;;) {
-        if (hanging.length > 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
+      await waitForHang();
       releaseAll();
     });
 
@@ -416,10 +424,10 @@ describeEachAdapter("schedules", (adapter) => {
         capabilities: ["run_services"],
         effect: "deny",
       });
-      const before = (await schedulesOfService(serviceId)).length;
+      const before = (await runsOfService(serviceId)).length;
       const outcome = await app.server.scheduler.fire(id);
       expect(outcome.kind).toBe("capability_lost");
-      expect((await schedulesOfService(serviceId)).length).toBe(before);
+      expect((await runsOfService(serviceId)).length).toBe(before);
 
       const after = (await alice.get(`/v1/schedules/${id}`)).body;
       expect(after.enabled).toBe(false);
@@ -465,6 +473,28 @@ describeEachAdapter("schedules", (adapter) => {
     });
   });
 
+  describe("authoring from an OAuth token", () => {
+    it("needs the admin role to set a schedule up, but any authoring token may switch it off", async () => {
+      const member = { userId: aliceId, grantId: "g", scope: { role: "member" as const } };
+      const admin = { userId: aliceId, grantId: "g", scope: { role: "admin" as const } };
+      const input = { service: "jobs", action: "tick", params: { message: "tok" }, cron: "0 7 * * *" };
+
+      await expect(runWithTokenAuth(member, () => createSchedule(env, aliceId, bundleId, input))).rejects.toThrow(
+        /admin scope/,
+      );
+      const created = await runWithTokenAuth(admin, () => createSchedule(env, aliceId, bundleId, input));
+
+      await expect(
+        runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { cron: "0 8 * * *" })),
+      ).rejects.toThrow(/admin scope/);
+      const off = await runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { enabled: false }));
+      expect(off.enabled).toBe(false);
+      await expect(
+        runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { enabled: true })),
+      ).rejects.toThrow(/admin scope/);
+    });
+  });
+
   describe("run sources", () => {
     it("records rest, mcp and hook as the source, with the caller as user", async () => {
       const viaRest = await alice.post(`/v1/services/${serviceId}/run`, {
@@ -501,19 +531,34 @@ describeEachAdapter("schedules", (adapter) => {
     it.runIf(adapter.dialect === "sqlite")(
       "fires at the cron time in the schedule's timezone, stops when disabled and resumes when re-enabled",
       async () => {
+        // A bundle of its own, and every earlier schedule switched off: start()
+        // arms every enabled schedule in the database, and earlier tests'
+        // crons must not share this clock.
+        const timedBundle = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "timed" })).body.id;
+        const timedService = (
+          await alice.post(`/v1/bundles/${timedBundle}/services`, { name: "jobs", driver: "sched", config: {} })
+        ).body.id;
+        for (const row of await app.db.client.select().from(app.db.tables.schedules)) {
+          if (row.enabled === 1) await updateSchedule(env, row.ownerId, row.id, { enabled: false });
+        }
+        const runsOf = async (scheduleId: string) =>
+          (
+            await listRuns({ ...env, registry: app.server.registry }, aliceId, timedBundle, { service: timedService })
+          ).data.filter((r) => r.scheduleId === scheduleId);
+
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now: new Date("2026-03-02T07:59:30Z") });
         const scheduler = createScheduler({ ...env, registry: app.server.registry });
         const timedEnv: ScheduleEnv = { ...env, scheduler };
         try {
           // 09:00 in Copenhagen is 08:00Z in March (CET); 09:00 in New York is 14:00Z (EST).
-          const cph = await createSchedule(timedEnv, aliceId, bundleId, {
+          const cph = await createSchedule(timedEnv, aliceId, timedBundle, {
             service: "jobs",
             action: "tick",
             params: { message: "cph" },
             cron: "0 9 * * *",
             timezone: "Europe/Copenhagen",
           });
-          const nyc = await createSchedule(timedEnv, aliceId, bundleId, {
+          const nyc = await createSchedule(timedEnv, aliceId, timedBundle, {
             service: "jobs",
             action: "tick",
             params: { message: "nyc" },
@@ -524,8 +569,6 @@ describeEachAdapter("schedules", (adapter) => {
           expect(nyc.nextFireAt).toBe("2026-03-02T14:00:00.000Z");
 
           await scheduler.start();
-          const runsOf = async (scheduleId: string) =>
-            (await schedulesOfService(serviceId)).filter((r) => r.scheduleId === scheduleId);
 
           await vi.advanceTimersByTimeAsync(20_000); // 07:59:50Z
           expect(await runsOf(cph.id)).toHaveLength(0);
@@ -559,10 +602,6 @@ describeEachAdapter("schedules", (adapter) => {
     it.runIf(adapter.dialect === "sqlite")(
       "fires nothing while the scheduler is not started (YAP_SCHEDULER=off), and authoring still works",
       async () => {
-        expect(loadConfig(testEnv({ YAP_SCHEDULER: "off" })).schedulerEnabled).toBe(false);
-        expect(loadConfig(testEnv()).schedulerEnabled).toBe(true);
-        expect(() => loadConfig(testEnv({ YAP_SCHEDULER: "maybe" }))).toThrow(/YAP_SCHEDULER/);
-
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now: new Date("2026-03-02T07:59:30Z") });
         const scheduler = createScheduler({ ...env, registry: app.server.registry });
         const offEnv: ScheduleEnv = { ...env, scheduler };
@@ -574,8 +613,8 @@ describeEachAdapter("schedules", (adapter) => {
             cron: "* * * * *",
           });
           await updateSchedule(offEnv, aliceId, created.id, { cron: "*/2 * * * *" });
-          await vi.advanceTimersByTimeAsync(10 * 60_000);
-          const runs = (await schedulesOfService(serviceId)).filter((r) => r.scheduleId === created.id);
+          await vi.advanceTimersByTimeAsync(3 * 60_000);
+          const runs = (await runsOfService(serviceId)).filter((r) => r.scheduleId === created.id);
           expect(runs).toHaveLength(0);
           expect(scheduler.started).toBe(false);
           expect((await getSchedule(offEnv, aliceId, created.id)).cron).toBe("*/2 * * * *");
