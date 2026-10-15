@@ -794,6 +794,7 @@ describeEachAdapter("services core", (adapter) => {
 
       // The declaring action gets the pinned value injected…
       const injected = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: svc.id,
         action: "inspect",
         waitMs: 5_000,
@@ -802,11 +803,12 @@ describeEachAdapter("services core", (adapter) => {
       expect((injected.result as { params: Record<string, string> }).params).toEqual({ note: "fixed" });
       // …and refuses to let the caller name it.
       await expect(
-        runService(env, aliceId, bundleId, { service: svc.id, action: "inspect", params: { note: "mine" } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: svc.id, action: "inspect", params: { note: "mine" } }),
       ).rejects.toThrow(/parameter "note" is fixed by this service configuration/);
 
       // The action that never declared `note` neither receives it…
       const untouched = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: svc.id,
         action: "other",
         params: { shared: "value" },
@@ -817,7 +819,7 @@ describeEachAdapter("services core", (adapter) => {
       // …nor treats it as a parameter of its own: it is simply unknown here,
       // not "fixed by configuration".
       await expect(
-        runService(env, aliceId, bundleId, { service: svc.id, action: "other", params: { note: "mine" } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: svc.id, action: "other", params: { note: "mine" } }),
       ).rejects.toThrow(/unknown parameter "note"/);
     });
   });
@@ -910,6 +912,7 @@ describeEachAdapter("services core", (adapter) => {
       // The driver has two actions, but this service has one — so it is the
       // implicit default, exactly as if the driver declared only it.
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: svc.id,
         params: { shared: "v" },
         waitMs: 5_000,
@@ -919,7 +922,7 @@ describeEachAdapter("services core", (adapter) => {
 
       // The disabled action reads as unknown, and the "available" list never
       // mentions it.
-      await expect(runService(env, aliceId, bundleId, { service: svc.id, action: "inspect" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: svc.id, action: "inspect" })).rejects.toThrow(
         /^unknown action "inspect" for service "only-other" \(available: other\)$/,
       );
     });
@@ -972,16 +975,16 @@ describeEachAdapter("services core", (adapter) => {
       // say) simply drops out; the rest of the allowlist stands.
       await plant("partly-stale", JSON.stringify(["renamed-away", "other"]));
       expect(await names("partly-stale")).toEqual(["other"]);
-      const run = await runService(env, aliceId, bundleId, { service: "partly-stale", params: {}, waitMs: 5_000 });
+      const run = await runService(env, aliceId, bundleId, { source: "rest", service: "partly-stale", params: {}, waitMs: 5_000 });
       expect(run.action).toBe("other");
 
       // Every name stale: nothing to list, nothing to run — with a reason.
       await plant("all-stale", JSON.stringify(["renamed-away"]));
       expect(await names("all-stale")).toEqual([]);
-      await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "inspect" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "all-stale", action: "inspect" })).rejects.toThrow(
         /^service "all-stale" has no runnable actions$/,
       );
-      await expect(runService(env, aliceId, bundleId, { service: "all-stale" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "all-stale" })).rejects.toThrow(
         /^service "all-stale" has no runnable actions$/,
       );
 
@@ -991,7 +994,7 @@ describeEachAdapter("services core", (adapter) => {
       expect(await names("object-allowlist")).toEqual([]);
       await plant("garbage-allowlist", "not json");
       expect(await names("garbage-allowlist")).toEqual([]);
-      await expect(runService(env, aliceId, bundleId, { service: "garbage-allowlist" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "garbage-allowlist" })).rejects.toThrow(
         /^service "garbage-allowlist" has no runnable actions$/,
       );
     });
@@ -1034,6 +1037,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "file-reader", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-reader",
         action: "read",
         params: { ref: `file://${fileId}` },
@@ -1061,6 +1065,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "item-reader", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "item-reader",
         action: "item",
         params: { id: item!.id },
@@ -1080,6 +1085,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "items-only", driver: "item-reader-only", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "items-only",
         action: "item",
         params: { id: item!.id },
@@ -1099,6 +1105,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "multi-item-reader", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "multi-item-reader",
         action: "items",
         params: { ids: `${second!.id},${first!.id},${second!.id}` },
@@ -1120,6 +1127,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "item-only-reader", driver: "item-reader-only", config: {} });
 
       const itemRun = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-only-reader",
         params: { id: item!.id },
         waitMs: 5_000,
@@ -1129,6 +1137,7 @@ describeEachAdapter("services core", (adapter) => {
       expect(itemRun.writes).toEqual([]);
 
       const fileRun = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "item-only-reader",
         action: "file",
         params: { ref: `file://${fileId}` },
@@ -1148,6 +1157,7 @@ describeEachAdapter("services core", (adapter) => {
 
       for (const id of [randomUUID(), crossBundle!.id]) {
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "scoped-item-reader",
           action: "item",
           params: { id },
@@ -1164,6 +1174,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "bare-file-reader", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "bare-file-reader",
         action: "read",
         params: { ref: fileId },
@@ -1179,6 +1190,7 @@ describeEachAdapter("services core", (adapter) => {
 
       for (const ref of ["https://example.com/x.txt", "item://abc", "file://", "not a ref"]) {
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "strict-file-reader",
           action: "read",
           params: { ref },
@@ -1197,6 +1209,7 @@ describeEachAdapter("services core", (adapter) => {
 
       for (const ref of [`file://${reserved}`, `file://${randomUUID()}`, `file://${crossBundle}`]) {
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "scoped-file-reader",
           action: "read",
           params: { ref },
@@ -1211,6 +1224,7 @@ describeEachAdapter("services core", (adapter) => {
     it("hands a driver that declared no reads a null reader", async () => {
       await createService(env, aliceId, bundleId, { name: "readless", driver: "plain", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "readless",
         action: "inspect",
         params: { note: "hi" },
@@ -1226,6 +1240,7 @@ describeEachAdapter("services core", (adapter) => {
 
       for (const action of ["capped", "capped_text"]) {
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "capped-file-reader",
           action,
           params: { ref: `file://${fileId}`, maxBytes: "3" },
@@ -1243,6 +1258,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "mismatched-file-reader", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "mismatched-file-reader",
         action: "capped",
         params: { ref: `file://${fileId}`, maxBytes: "3" },
@@ -1260,6 +1276,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "reader-escapee", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "reader-escapee",
         action: "escape",
         waitMs: 5_000,
@@ -1279,6 +1296,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "stream-escapee", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "stream-escapee",
         action: "stream_escape",
         params: { ref: `file://${fileId}` },
@@ -1305,6 +1323,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "file-escapee", driver: "reader", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-escapee",
         action: "file_escape",
         params: { ref: `file://${fileId}` },
@@ -1335,6 +1354,7 @@ describeEachAdapter("services core", (adapter) => {
     it("writes items into the run's bundle and records them on the run row", async () => {
       const svc = await createService(env, aliceId, bundleId, { name: "recorder", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "recorder",
         action: "record",
         params: { itemType: "Note", title: "written by a driver" },
@@ -1357,6 +1377,7 @@ describeEachAdapter("services core", (adapter) => {
     it("records a multi-item write as one audit entry", async () => {
       await createService(env, aliceId, bundleId, { name: "batcher", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "batcher",
         action: "batch",
         params: { itemType: "Note" },
@@ -1375,6 +1396,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "updater", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "updater",
         action: "update",
         params: { id: item!.id, title: "transcribed" },
@@ -1396,6 +1418,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "editor", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "editor",
         action: "edit",
         params: { id: item!.id, suffix: " ready" },
@@ -1416,6 +1439,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "source-updater", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "source-updater",
         action: "update_file",
         params: { id: item!.id, ref: fileId },
@@ -1430,6 +1454,7 @@ describeEachAdapter("services core", (adapter) => {
     it("cannot reach an item-type that lives in another bundle", async () => {
       await createService(env, aliceId, bundleId, { name: "trespasser", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "trespasser",
         action: "record",
         // "Ledger" exists — but only in the other bundle.
@@ -1451,6 +1476,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "cross-bundle-updater", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "cross-bundle-updater",
         action: "update",
         params: { id: item!.id, title: "leaked" },
@@ -1471,6 +1497,7 @@ describeEachAdapter("services core", (adapter) => {
       // "nonsense" property, so this batch never lands.
       const before = (await titles(bundleId)).length;
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "sloppy",
         action: "bogus",
         params: { itemType: "Note" },
@@ -1485,6 +1512,7 @@ describeEachAdapter("services core", (adapter) => {
     it("keeps a colliding stored value out of the run's error", async () => {
       await createService(env, aliceId, bundleId, { name: "ticketer", driver: "writer", config: {} });
       const first = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "ticketer",
         action: "record",
         params: { itemType: "Ticket", title: "SECRET-SERIAL-42" },
@@ -1493,6 +1521,7 @@ describeEachAdapter("services core", (adapter) => {
       expect(first.status).toBe("succeeded");
 
       const clash = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "ticketer",
         action: "record",
         params: { itemType: "Ticket", title: "SECRET-SERIAL-42" },
@@ -1510,6 +1539,7 @@ describeEachAdapter("services core", (adapter) => {
         items: [{ title: "ordinary" }],
       });
       const updateClash = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "ticketer",
         action: "update",
         params: { id: target!.id, title: "SECRET-SERIAL-42" },
@@ -1524,6 +1554,7 @@ describeEachAdapter("services core", (adapter) => {
     it("audits a write the driver never awaited", async () => {
       await createService(env, aliceId, bundleId, { name: "detacher", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "detacher",
         action: "detached",
         params: { itemType: "Note" },
@@ -1548,6 +1579,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "update-detacher", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "update-detacher",
         action: "detached_update",
         params: { id: item!.id, title: "updated late" },
@@ -1565,6 +1597,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "file-output", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-output",
         action: "file",
         params: { name: "transcript.txt", mimeType: "text/plain", body: "hello transcript" },
@@ -1593,6 +1626,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "file-and-item", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-and-item",
         action: "file_to_item",
         params: { id: item!.id, name: "summary.txt", body: "summary body" },
@@ -1612,6 +1646,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "files-only", driver: "file-writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "files-only",
         params: { name: "only.txt", body: "file only" },
         waitMs: 5_000,
@@ -1633,6 +1668,7 @@ describeEachAdapter("services core", (adapter) => {
       await createService(env, aliceId, bundleId, { name: "file-detacher", driver: "writer", config: {} });
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "file-detacher",
         action: "detached_file",
         params: { name: "late.txt", body: "late bytes" },
@@ -1656,6 +1692,7 @@ describeEachAdapter("services core", (adapter) => {
       ] as const) {
         const before = await listFilesUnchecked(app.db, bundleId);
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "strict-file-output",
           action: "file",
           params,
@@ -1669,6 +1706,7 @@ describeEachAdapter("services core", (adapter) => {
 
       const before = await listFilesUnchecked(app.db, bundleId);
       const badBytes = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "strict-file-output",
         action: "bad_bytes",
         params: { name: "bad.bin" },
@@ -1683,6 +1721,7 @@ describeEachAdapter("services core", (adapter) => {
     it("stores a streamed file with the size it actually read", async () => {
       await createService(env, aliceId, bundleId, { name: "stream-output", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "stream-output",
         action: "stream_file",
         params: { name: "streamed.txt", chunk: "abcd", chunks: "10" },
@@ -1717,6 +1756,7 @@ describeEachAdapter("services core", (adapter) => {
       ] as const) {
         const before = await listFilesUnchecked(app.db, bundleId);
         const run = await runService(env, aliceId, bundleId, {
+          source: "rest",
           service: "strict-stream-output",
           action,
           params,
@@ -1733,6 +1773,7 @@ describeEachAdapter("services core", (adapter) => {
     it("hands a driver that declared no writes a null writer", async () => {
       await createService(env, aliceId, bundleId, { name: "inspector", driver: "plain", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "inspector",
         action: "inspect",
         params: { note: "hi" },
@@ -1747,6 +1788,7 @@ describeEachAdapter("services core", (adapter) => {
       escapedWriter = null;
       await createService(env, aliceId, bundleId, { name: "escapee", driver: "writer", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "escapee",
         action: "escape",
         waitMs: 5_000,

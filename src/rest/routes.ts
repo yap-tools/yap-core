@@ -25,6 +25,7 @@ import * as keysCore from "../core/keys.js";
 import * as legacyHooks from "../core/legacyHooks.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as runsCore from "../core/runs.js";
+import * as schedulesCore from "../core/schedules.js";
 import * as servicesCore from "../core/services.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
@@ -152,6 +153,9 @@ export function registerRestRoutes(server: YapServer): void {
   // `logger` rides along for the runs layer: a failed run's detail belongs in
   // the server log, since the row an agent reads keeps only the flat message.
   const serviceEnv: servicesCore.ServiceEnv & runsCore.RunEnv = { db, blob, config, registry, logger };
+  // Schedule edits reload the scheduler; when it is not running (YAP_SCHEDULER=off)
+  // the reload is a no-op and authoring works the same.
+  const scheduleEnv: schedulesCore.ScheduleEnv = { db, config, registry, scheduler: server.scheduler };
 
   const handle =
     (fn: Handler) =>
@@ -981,6 +985,7 @@ export function registerRestRoutes(server: YapServer): void {
       return c.json(
         await runsCore.runService(serviceEnv, userId, bundleId, {
           service: serviceId,
+          source: "rest",
           action: body.action,
           params: body.params,
           // An absent wait stays absent — that is "don't wait", not "wait 0".
@@ -1008,6 +1013,77 @@ export function registerRestRoutes(server: YapServer): void {
           ...pageOpts(c),
         }),
       );
+    }),
+  );
+
+  // ---- Schedules (authoring is REST-only, like the services they run) -------------
+
+  const scheduleParams = z.record(z.string(), z.unknown());
+
+  app.post(
+    "/v1/bundles/:id/schedules",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({
+          // The service's id or name within this bundle.
+          service: z.string(),
+          action: z.string().optional(),
+          params: scheduleParams.optional(),
+          cron: z.string(),
+          timezone: z.string().optional(),
+          enabled: z.boolean().optional(),
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await schedulesCore.createSchedule(scheduleEnv, userId, param(c, "id"), body), 201);
+    }),
+  );
+
+  app.get(
+    "/v1/bundles/:id/schedules",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json({
+        data: await schedulesCore.listSchedules(scheduleEnv, userId, param(c, "id"), {
+          service: c.req.query("service"),
+        }),
+      });
+    }),
+  );
+
+  app.get(
+    "/v1/schedules/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      return c.json(await schedulesCore.getSchedule(scheduleEnv, userId, param(c, "id")));
+    }),
+  );
+
+  app.patch(
+    "/v1/schedules/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(
+        z.object({
+          action: z.string().optional(),
+          params: scheduleParams.optional(),
+          cron: z.string().optional(),
+          timezone: z.string().optional(),
+          enabled: z.boolean().optional(),
+        }),
+        await jsonBody(c),
+      );
+      return c.json(await schedulesCore.updateSchedule(scheduleEnv, userId, param(c, "id"), body));
+    }),
+  );
+
+  app.delete(
+    "/v1/schedules/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      await schedulesCore.deleteSchedule(scheduleEnv, userId, param(c, "id"));
+      return c.json({ deleted: true });
     }),
   );
 

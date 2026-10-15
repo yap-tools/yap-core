@@ -26,6 +26,7 @@ import { listItemTypesUnchecked } from "../core/itemTypes.js";
 import { LEGACY_DRIVER, toLegacyHookView } from "../core/legacyHooks.js";
 import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
+import { listSchedulesUnchecked } from "../core/schedules.js";
 import { listServicesUnchecked } from "../core/services.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
@@ -332,7 +333,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "load_bundle",
     description:
-      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the services the bundle can run (id, name, description, driver, and each action's declared parameters — never the configuration; start one with the run_service call tool). Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
+      "Step 3 — required before calling anything in a bundle. Returns everything needed to operate it correctly: the docs (autoloaded ones arrive in full — follow them; fetch the rest on demand with the read_docs call tool), the item-type schemas, the available files, and the services the bundle can run (id, name, description, driver, and each action's declared parameters — never the configuration; start one with the run_service call tool), and, if you hold run_services, the schedules that run them on a cron. Item values may hold opaque references — resolve file://{uuid} via show_file and item://{uuid} via get_items before showing them to a user; never surface raw URIs. Params: bundle_ids (array). Do not narrate this call.",
     parameters: z.object({ bundle_ids: z.array(z.string()).min(1) }),
     annotations: { readOnlyHint: true, title: "Load bundles" },
     execute: async (args, ctx) => {
@@ -349,6 +350,7 @@ export function registerMcpTools(server: YapServer): void {
             // no longer installed still lists — with its driver name and an
             // empty action list — rather than taking the bundle down with it.
             const services = await listServicesUnchecked({ db, config, registry }, bundleId);
+            const role = await effectiveCapabilities(db, userId, bundleCapabilityCtx(bundleCtx));
             results.push({
               id: bundleCtx.bundle.id,
               space_id: bundleCtx.space.id,
@@ -360,7 +362,7 @@ export function registerMcpTools(server: YapServer): void {
                   .map((d) => ({ name: d.name, content: d.content })),
                 available: docRows.map((d) => ({ id: d.id, name: d.name, autoload: d.autoload === 1 })),
               },
-              role: await effectiveCapabilities(db, userId, bundleCapabilityCtx(bundleCtx)),
+              role,
               item_types: (await listItemTypesUnchecked(db, bundleId)).map((t) => ({
                 id: t.id,
                 name: t.name,
@@ -378,6 +380,10 @@ export function registerMcpTools(server: YapServer): void {
               })),
               files: await listFilesUnchecked(db, bundleId),
               services,
+              // Gated like the runs they start: a schedule carries its runs'
+              // params and points at the last one. Absent, not empty, for a
+              // caller without run_services, so "none" is never a false claim.
+              ...(role.includes("run_services") ? { schedules: await listSchedulesUnchecked(db, bundleId) } : {}),
               // The legacy hook view — http services in the old four-field
               // shape, for clients written before services existed. Dies at 1.0
               // along with the rest of core/legacyHooks.ts.

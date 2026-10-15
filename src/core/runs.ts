@@ -71,6 +71,10 @@ import { newId, nowIso } from "./util.js";
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed";
 
+/** What started a run: the transport a caller came in on, the legacy hook
+ *  fire path, or a schedule firing as its owner. */
+export type RunSource = "mcp" | "rest" | "hook" | "schedule";
+
 const TERMINAL: RunStatus[] = ["succeeded", "failed"];
 const INTERRUPTED: RunStatus[] = ["queued", "running"];
 
@@ -99,6 +103,13 @@ export interface RunRecord {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** The user the run ran as. Null only on runs recorded before the column. */
+  userId: string | null;
+  /** Null only on runs recorded before the column. */
+  source: RunSource | null;
+  /** The schedule that started it; null for every other source, and once the
+   *  schedule is deleted. */
+  scheduleId: string | null;
 }
 
 export interface RunEnv {
@@ -140,6 +151,9 @@ interface RunRow {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  userId: string | null;
+  source: string | null;
+  scheduleId: string | null;
 }
 
 function toRecord(row: RunRow): RunRecord {
@@ -160,6 +174,9 @@ function toRecord(row: RunRow): RunRecord {
     createdAt: row.createdAt,
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
+    userId: row.userId,
+    source: row.source as RunSource | null,
+    scheduleId: row.scheduleId,
   };
 }
 
@@ -289,6 +306,23 @@ function buildParams(
   const merged = { ...values };
   for (const [name, value] of Object.entries(pinned)) merged[name] = String(value);
   return { params: values, values: merged, pinnedNames: Object.keys(pinned) };
+}
+
+/**
+ * Everything `runService` decides before it writes a row: the action, and the
+ * caller's parameters checked against that action's callable specs. Exported
+ * so a schedule validates its stored action and params at write time by the
+ * very same computation a run does at fire time.
+ */
+export function prepareRun(
+  registry: DriverRegistry,
+  service: ServiceRow,
+  requestedAction: string | undefined,
+  supplied: Record<string, unknown>,
+): { def: DriverDefinition; action: string } & ReturnType<typeof buildParams> {
+  const def = driverFor(registry, service);
+  const action = resolveAction(def, service, requestedAction);
+  return { def, action, ...buildParams(def, service, action, supplied) };
 }
 
 interface Job {
@@ -573,16 +607,23 @@ export async function runService(
   env: RunEnv,
   userId: string,
   bundleId: string,
-  input: { service: string; action?: string; params?: Record<string, unknown>; waitMs?: number },
+  input: {
+    service: string;
+    action?: string;
+    params?: Record<string, unknown>;
+    waitMs?: number;
+    /** Recorded on the row; every caller says where it came from. */
+    source: RunSource;
+    /** Set by the scheduler only. */
+    scheduleId?: string;
+  },
 ): Promise<RunRecord> {
   const { db } = env;
   const bundleCtx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "run_services", bundleCtx);
 
   const service = await resolveServiceRow(db, bundleId, input.service);
-  const def = driverFor(env.registry, service);
-  const action = resolveAction(def, service, input.action);
-  const { params, values, pinnedNames } = buildParams(def, service, action, input.params ?? {});
+  const { def, action, params, values, pinnedNames } = prepareRun(env.registry, service, input.action, input.params ?? {});
 
   const runId = newId();
   const { runs } = db.tables;
@@ -599,6 +640,9 @@ export async function runService(
     params: JSON.stringify(params),
     writes: "[]",
     createdAt: nowIso(),
+    userId,
+    source: input.source,
+    scheduleId: input.scheduleId ?? null,
   });
 
   // Floating on purpose: the wait window must be honoured even for a run that

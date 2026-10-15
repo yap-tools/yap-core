@@ -213,6 +213,42 @@ export const services = sqliteTable(
   (t) => [uniqueIndex("services_bundle_name_idx").on(t.bundleId, t.name)],
 );
 
+/** Service schedules: a cron expression that starts a run of one service
+ * action, as the user who created it. Its own object rather than a field on
+ * the service, so one service can carry several schedules with different
+ * params. Dies with its service (and so with its bundle) and with its owner. */
+export const schedules = sqliteTable(
+  "schedules",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    serviceId: text("service_id")
+      .notNull()
+      .references(() => services.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    params: text("params").notNull().default("{}"), // JSON: the caller half, validated like run_service
+    cron: text("cron").notNull(),
+    timezone: text("timezone").notNull().default("UTC"), // IANA
+    enabled: integer("enabled").notNull().default(1),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    lastFiredAt: text("last_fired_at"),
+    // No FK: runs are pruned by retention, and the pointer is history, not a link.
+    lastRunId: text("last_run_id"),
+    lastError: text("last_error"),
+    lastSkippedAt: text("last_skipped_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    index("schedules_bundle_idx").on(t.bundleId, t.createdAt),
+    index("schedules_service_idx").on(t.serviceId),
+  ],
+);
+
 /** Async service invocations — the audit trail for calls and their write-backs.
  * A run outlives the service it came from (service_id goes null; service_name
  * keeps the label) but dies with its bundle. */
@@ -235,6 +271,12 @@ export const runs = sqliteTable(
     createdAt: text("created_at").notNull(),
     startedAt: text("started_at"),
     finishedAt: text("finished_at"),
+    // Who started the run and through what. Null on runs written before the
+    // columns existed. No FK on user_id: like the service, the run outlives
+    // the user it records.
+    userId: text("user_id"),
+    source: text("source"), // 'mcp' | 'rest' | 'hook' | 'schedule'
+    scheduleId: text("schedule_id").references(() => schedules.id, { onDelete: "set null" }),
   },
   (t) => [
     index("runs_bundle_created_idx").on(t.bundleId, t.createdAt),
@@ -242,6 +284,9 @@ export const runs = sqliteTable(
     // The retention sweep's predicate: terminal runs with a finished_at older
     // than the window. Without it the sweep is a full scan of every run ever.
     index("runs_finished_idx").on(t.status, t.finishedAt),
+    // The scheduler's overlap check reads a run by id, but deleting a schedule
+    // nulls its runs' pointer — without this that is a scan of every run.
+    index("runs_schedule_idx").on(t.scheduleId),
   ],
 );
 

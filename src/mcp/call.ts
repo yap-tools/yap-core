@@ -19,6 +19,7 @@ import * as itemTypesCore from "../core/itemTypes.js";
 import * as itemsCore from "../core/items.js";
 import * as legacyHooks from "../core/legacyHooks.js";
 import * as runsCore from "../core/runs.js";
+import * as schedulesCore from "../core/schedules.js";
 import * as spacesCore from "../core/spaces.js";
 import type { PropertyConfig } from "../core/propertyConfig.js";
 import { YapError } from "../core/errors.js";
@@ -397,6 +398,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     handler: async (env, params) => ({
       result: await runsCore.runService(env, env.userId, env.bundleId, {
         service: String(params.id),
+        source: "mcp",
         action: params.action as string | undefined,
         params: params.params as Record<string, unknown> | undefined,
         waitMs: clampWaitMs(env.config, params.wait_ms),
@@ -425,6 +427,17 @@ export const secondTier: Record<string, SecondTierTool> = {
         service: params.service as string | undefined,
         cursor: params.cursor as string | undefined,
         limit: params.limit as number | undefined,
+      }),
+    }),
+  },
+  list_schedules: {
+    description:
+      "List the targeted bundle's schedules: each runs one service action on a cron (5-field, in its IANA timezone) as its owner, the user who created it. Shows the stored params, whether it is enabled, when it last fired and is next due, its last run id (read it with get_run), the last error or the reason it disabled itself, and the last tick skipped because the previous run was still going. Schedules are authored over REST only. Params: service (name or id — only that service's schedules).",
+    capability: "run_services",
+    params: { service: {} },
+    handler: async (env, params) => ({
+      result: await schedulesCore.listSchedules(env, env.userId, env.bundleId, {
+        service: params.service as string | undefined,
       }),
     }),
   },

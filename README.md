@@ -189,6 +189,7 @@ local dev.
 | `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
 | `YAP_RUN_TIMEOUT_CAP_MS` | *(unset = uncapped)* | Operator ceiling on any driver action's own `timeoutMs` |
 | `YAP_RUN_RETENTION_DAYS` | 7 | Terminal runs (`succeeded`/`failed`) older than this are pruned |
+| `YAP_SCHEDULER` | `on` | Whether this process fires service schedules: `on` or `off`. Turn it on in exactly one process per database (see *Schedules*) |
 | `YAP_ORPHAN_SWEEP_INTERVAL_MS` / `YAP_ORPHAN_MAX_AGE_MS` | 10 min / 60 min | Reserved-placeholder cleanup |
 | `YAP_BACKUP_BEFORE_MIGRATE` | `true` | Snapshot automatically before pending schema migrations |
 | `YAP_BACKUP_SINK` | `fs` | Where archives go: `fs` or `s3` |
@@ -511,7 +512,58 @@ be the instance's externally reachable origin (https except on loopback).
   carries its own time budget, and only the built-in `http` driver's is
   operator-tunable (`YAP_HOOK_TIMEOUT_MS`); the `mail` driver and any
   external driver declare their own budgets, which an operator can bound
-  downward — never upward — with `YAP_RUN_TIMEOUT_CAP_MS`.
+  downward — never upward — with `YAP_RUN_TIMEOUT_CAP_MS`. Every run also
+  records who started it and how: `userId`, `source` (`mcp`, `rest`, `hook`
+  for the legacy fire surfaces, or `schedule`) and, for a scheduled run,
+  `scheduleId`. Runs recorded before these fields existed carry them as null.
+
+- **Schedules** run a service on a cron, inside the server — no outside cron
+  needed. A schedule is its own object in the bundle, not a field on the
+  service, so one service can carry several (different params, different
+  times) and the service's configuration is never touched. It holds the
+  service, the action, the params (validated when the schedule is written,
+  exactly as `run_service` would validate them — pins stay configuration and
+  are merged in at run time), a 5-field cron expression (`"0 7 * * 1-5"`;
+  croner's standard syntax, minute precision), an IANA timezone (default
+  `UTC`), an `enabled` flag, and its owner. Read-only alongside:
+  `lastFiredAt`, `nextFireAt`, `lastRunId`, `lastError`, `lastSkippedAt`.
+
+  ```
+  POST   /v1/bundles/:id/schedules   {service, action?, params?, cron, timezone?, enabled?}
+  GET    /v1/bundles/:id/schedules   [?service=name-or-id]
+  GET    /v1/schedules/:id
+  PATCH  /v1/schedules/:id           {action?, params?, cron?, timezone?, enabled?}
+  DELETE /v1/schedules/:id
+  ```
+
+  A schedule **runs as its owner** — the user who created it — and Core has
+  no other identity to run it as. Authoring needs `edit_services` and
+  `run_services` on the bundle; reading needs `run_services`, the same gate
+  as the runs a schedule starts. Only the owner can change what a schedule
+  runs or when, or turn it back on; anyone else who may author it can
+  disable or delete it. Agents see schedules read-only: in `load_bundle`
+  (for holders of `run_services`) and through the `list_schedules` call tool.
+
+  On each tick the scheduler goes through the same `run_service` path as any
+  other caller, with `source: schedule`. `run_services` is re-checked for the
+  owner every time; if they have lost it, the schedule disables itself,
+  records why in `lastError`, and starts no run. A tick that lands while the
+  schedule's previous run is still `queued` or `running` is skipped and
+  recorded in `lastSkippedAt`, not as a failed run. Any other refusal — the
+  service's params or pins changed under the schedule, its driver was
+  uninstalled — lands in `lastError` and the schedule stays on. Missed ticks
+  (the server was down) are not caught up; the next one fires normally.
+  Deleting a service deletes its schedules; deleting a schedule keeps its
+  runs. Failure notifications and retries are not part of Core: a scheduled
+  run's outcome is its ordinary run record.
+
+  **One scheduler per database.** Every process with `YAP_SCHEDULER=on` (the
+  default) fires every schedule, so an operator running several processes
+  against one database — behind a load balancer, say — sets it `on` in
+  exactly one and `off` in the rest. This is documented, not enforced: Core
+  does no locking or leader election between processes, the same assumption
+  the backup scheduler and boot-time run recovery already make. With it `off`
+  a process still lets schedules be created, listed and edited.
 
   **Trust model:** a driver is trusted code running in the server process.
   Installing one is the same class of decision as installing a plugin — it

@@ -122,6 +122,15 @@ export async function serve(): Promise<void> {
   }, config.orphanSweepIntervalMs);
   runPruner.unref();
 
+  // After recovery on purpose: a stale `queued` run from before a crash would
+  // otherwise read as "still going" and skip its schedule's ticks forever.
+  if (config.schedulerEnabled) {
+    await server.scheduler.start();
+    logger.info("service scheduler active");
+  } else {
+    logger.info("service scheduler off (YAP_SCHEDULER=off): schedules are kept but not fired by this process");
+  }
+
   let stopScheduler: (() => void) | undefined;
   if (config.backup.schedule) {
     const sink = await createBackupSink(config.backup.sink);
@@ -136,6 +145,7 @@ export async function serve(): Promise<void> {
       clearInterval(sweeper);
       clearInterval(runPruner);
       stopScheduler?.();
+      server.scheduler.stop();
       await server.stop();
       await db.close();
       process.exit(0);

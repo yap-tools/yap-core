@@ -23,6 +23,7 @@ const INSERT_ORDER = [
   "item_values",
   "files",
   "services",
+  "schedules",
   "runs",
   "user_docs",
   "oauth_clients",

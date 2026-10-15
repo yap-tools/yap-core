@@ -44,6 +44,17 @@ export function currentTokenAuth(): TokenAuth | undefined {
 }
 
 /**
+ * Runs `fn` with no token in scope, and so does everything it schedules. For
+ * work that outlives the request that started it and acts as someone else: the
+ * service scheduler arms its timers while handling a schedule edit, and a
+ * timer inherits the async context it was created in — without this, every
+ * later fire would be judged against the *editor's* token scope.
+ */
+export function runOutsideTokenAuth<T>(fn: () => T): T {
+  return storage.exit(fn);
+}
+
+/**
  * Credential management (access-key CRUD, connected-app grants) is the
  * privilege-escalation path of the token lane — a minted key would outlive
  * and out-power the token that created it. Keys always may; tokens only at
