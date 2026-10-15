@@ -46,9 +46,9 @@ export function currentTokenAuth(): TokenAuth | undefined {
 /**
  * Runs `fn` with no token in scope, and so does everything it schedules. For
  * work that outlives the request that started it and acts as someone else: the
- * service scheduler arms its timers while handling a schedule edit, and a
- * timer inherits the async context it was created in — without this, every
- * later fire would be judged against the *editor's* token scope.
+ * service scheduler arms a schedule's timer while handling an edit, and a timer
+ * inherits the async context it was created in — so every fire runs through
+ * this, or it would be judged against the *editor's* token scope.
  */
 export function runOutsideTokenAuth<T>(fn: () => T): T {
   return storage.exit(fn);
