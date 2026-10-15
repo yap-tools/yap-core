@@ -258,7 +258,8 @@ metadata and descending only into the relevant branch:
   `create_doc`, `update_doc`, `patch_doc`, `delete_doc`,
   `list_files`, `show_file`, `upload_request`, `upload_complete`, `sideload_file`,
   `delete_file`,
-  `run_service`, `get_run`, `list_runs`, and the deprecated `fire_hook` alias
+  `run_service`, `get_run`, `list_runs`, `create_schedule`, `update_schedule`,
+  `delete_schedule`, `list_schedules`, and the deprecated `fire_hook` alias
   (kept until 1.0). Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
@@ -537,12 +538,17 @@ be the instance's externally reachable origin (https except on loopback).
   ```
 
   A schedule **runs as its owner** — the user who created it — and Core has
-  no other identity to run it as. Authoring needs `edit_services` and
-  `run_services` on the bundle; reading needs `run_services`, the same gate
-  as the runs a schedule starts. Only the owner can change what a schedule
-  runs or when, or turn it back on; anyone else who may author it can
-  disable or delete it. Agents see schedules read-only: in `load_bundle`
-  (for holders of `run_services`) and through the `list_schedules` call tool.
+  no other identity to run it as. Scheduling a service is running it later,
+  so it takes the same capability as running it now: `run_services` on the
+  bundle, for creating, changing, deleting and reading alike — not
+  `edit_services`, and no particular OAuth role (a member-scoped login that
+  can run services can schedule them). Only the owner can change what a
+  schedule runs or when, or turn it back on; anyone else with `run_services`
+  there can disable or delete it. Agents schedule over MCP with the
+  `create_schedule`, `update_schedule`, `delete_schedule` and `list_schedules`
+  call tools, which apply the same validation and rules as REST; `load_bundle`
+  shows schedules next to services to holders of `run_services`. Services
+  themselves are still authored over REST only.
 
   On each tick the scheduler goes through the same `run_service` path as any
   other caller, with `source: schedule`. `run_services` is re-checked for the

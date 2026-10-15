@@ -1,7 +1,9 @@
 /**
- * Schedules: authoring over REST, the MCP read surface, and the scheduler's
- * tick — firing as the owner, skipping on overlap, disabling on capability
- * loss — plus the `user_id`/`source`/`schedule_id` every run now records.
+ * Schedules: authoring over REST and MCP (with `run_services` alone, from a
+ * key or a member-scoped OAuth token), and the scheduler's tick — firing as
+ * the owner, skipping on overlap, disabling on capability loss, several
+ * schedules on one service each with their own params — plus the
+ * `user_id`/`source`/`schedule_id` every run now records.
  *
  * Most firing tests drive `scheduler.fire(id)` directly: one tick, exactly as
  * the cron job runs it, without waiting for a wall-clock minute. The cron
@@ -22,7 +24,8 @@ import { createSchedule, getSchedule, updateSchedule, type ScheduleEnv } from ".
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, getFreePort, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
-import { connectMcp } from "../helpers/mcp.js";
+import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
+import { connectApp } from "../helpers/oauth.js";
 
 /** Runs of the `hang` action wait here until a test lets them go. */
 const hanging: Array<() => void> = [];
@@ -73,8 +76,10 @@ describeEachAdapter("schedules", (adapter) => {
   let alice: ApiClient;
   let aliceId: string;
   let aliceKey: string;
+  /** Holds run_services but not edit_services: a runner, not a service author. */
   let bob: ApiClient;
   let bobId: string;
+  let bobKey: string;
   let viewer: ApiClient;
   let viewerId: string;
   let spaceId: string;
@@ -98,6 +103,58 @@ describeEachAdapter("schedules", (adapter) => {
   const runsOfService = async (svc: string) =>
     (await listRuns({ ...env, registry: app.server.registry }, aliceId, bundleId, { service: svc, limit: 100 })).data;
 
+  /** Create, change, disable, re-enable and delete one's own schedule over REST. */
+  const expectOwnScheduleLifecycleOverRest = async (api: ApiClient, ownerId: string): Promise<void> => {
+    const created = await api.post(`/v1/bundles/${bundleId}/schedules`, {
+      service: "jobs",
+      action: "tick",
+      params: { message: "mine" },
+      cron: "0 7 * * *",
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.ownerId).toBe(ownerId);
+    const id = created.body.id;
+
+    const changed = await api.patch(`/v1/schedules/${id}`, { cron: "0 8 * * *", params: { message: "changed" } });
+    expect(changed.status).toBe(200);
+    expect(changed.body).toMatchObject({ cron: "0 8 * * *", params: { message: "changed" } });
+    expect((await api.patch(`/v1/schedules/${id}`, { enabled: false })).body.enabled).toBe(false);
+    expect((await api.patch(`/v1/schedules/${id}`, { enabled: true })).body.enabled).toBe(true);
+
+    expect((await api.delete(`/v1/schedules/${id}`)).status).toBe(200);
+    expect((await alice.get(`/v1/schedules/${id}`)).status).toBe(404);
+  };
+
+  /** One second-tier call over MCP; a refusal comes back as the call's error. */
+  const mcpOne = async (agent: McpTestClient, tool: string, params: Record<string, unknown>) =>
+    (await agent.call("call", { space_id: spaceId, calls: [{ tool, bundle_id: bundleId, params }] })).results[0];
+
+  /** The same lifecycle through the MCP call tools. */
+  const expectOwnScheduleLifecycleOverMcp = async (agent: McpTestClient, ownerId: string): Promise<void> => {
+    const created = await mcpOne(agent, "create_schedule", {
+      service: "jobs",
+      action: "tick",
+      params: { message: "mine" },
+      cron: "0 7 * * *",
+      timezone: "Europe/Copenhagen",
+    });
+    expect(created.ok, JSON.stringify(created)).toBe(true);
+    expect(created.result).toMatchObject({ ownerId, timezone: "Europe/Copenhagen", enabled: true });
+    const id = created.result.id;
+
+    const changed = await mcpOne(agent, "update_schedule", { id, cron: "0 8 * * *", params: { message: "changed" } });
+    expect(changed.ok, JSON.stringify(changed)).toBe(true);
+    expect(changed.result).toMatchObject({ cron: "0 8 * * *", params: { message: "changed" } });
+    expect((await mcpOne(agent, "update_schedule", { id, enabled: false })).result.enabled).toBe(false);
+    expect((await mcpOne(agent, "update_schedule", { id, enabled: true })).result.enabled).toBe(true);
+
+    const listed = await mcpOne(agent, "list_schedules", {});
+    expect(listed.result.map((s: { id: string }) => s.id)).toContain(id);
+
+    expect((await mcpOne(agent, "delete_schedule", { id })).result).toEqual({ deleted: true });
+    expect((await alice.get(`/v1/schedules/${id}`)).status).toBe(404);
+  };
+
   beforeAll(async () => {
     targetPort = await getFreePort();
     target = createServer((req, res) => {
@@ -117,7 +174,8 @@ describeEachAdapter("schedules", (adapter) => {
     alice = apiClient(app.baseUrl, aliceKey);
     aliceId = a.body.user.id;
     const b = await sysadmin.post("/v1/users", { name: "Bob" });
-    bob = apiClient(app.baseUrl, b.body.initialKey.key);
+    bobKey = b.body.initialKey.key;
+    bob = apiClient(app.baseUrl, bobKey);
     bobId = b.body.user.id;
     const v = await sysadmin.post("/v1/users", { name: "Viewer" });
     viewer = apiClient(app.baseUrl, v.body.initialKey.key);
@@ -127,7 +185,7 @@ describeEachAdapter("schedules", (adapter) => {
     bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "jobs" })).body.id;
     await alice.post(`/v1/bundles/${bundleId}/grants`, {
       userId: bobId,
-      capabilities: ["edit_services", "run_services", "read_items"],
+      capabilities: ["run_services", "read_items"],
       effect: "allow",
     });
     await alice.post(`/v1/bundles/${bundleId}/grants`, {
@@ -221,7 +279,7 @@ describeEachAdapter("schedules", (adapter) => {
       expect(missing.status).toBe(404);
     });
 
-    it("needs edit_services and run_services to author, and run_services to read", async () => {
+    it("needs run_services to author and to read", async () => {
       const body = { service: "jobs", action: "tick", params: { message: "x" }, cron: "0 7 * * *" };
       expect((await viewer.post(`/v1/bundles/${bundleId}/schedules`, body)).status).toBe(403);
       expect((await viewer.get(`/v1/bundles/${bundleId}/schedules`)).status).toBe(403);
@@ -242,7 +300,7 @@ describeEachAdapter("schedules", (adapter) => {
       }
     });
 
-    it("lets only the owner change what a schedule runs; anyone who may author can disable or delete it", async () => {
+    it("lets only the owner change what a schedule runs; anyone with run_services can disable or delete it", async () => {
       const created = await alice.post(`/v1/bundles/${bundleId}/schedules`, {
         service: "jobs",
         action: "tick",
@@ -279,6 +337,14 @@ describeEachAdapter("schedules", (adapter) => {
       expect((await alice.get(`/v1/schedules/${id}`)).status).toBe(404);
     });
 
+    it("lets a run_services holder without edit_services create, change and delete their own schedule", async () => {
+      // Bob runs services but cannot author them: that stays edit_services.
+      expect((await bob.post(`/v1/bundles/${bundleId}/services`, { name: "bobs", driver: "sched", config: {} })).status).toBe(
+        403,
+      );
+      await expectOwnScheduleLifecycleOverRest(bob, bobId);
+    });
+
     it("deletes a service's schedules with the service", async () => {
       const svc = await alice.post(`/v1/bundles/${bundleId}/services`, { name: "doomed", driver: "sched", config: {} });
       const created = await alice.post(`/v1/bundles/${bundleId}/schedules`, {
@@ -292,7 +358,85 @@ describeEachAdapter("schedules", (adapter) => {
     });
   });
 
-  describe("MCP read surface", () => {
+  describe("MCP", () => {
+    it("lets a run_services holder without edit_services create, change and delete their own schedule", async () => {
+      const agent = await connectMcp(app.baseUrl, bobKey);
+      try {
+        await expectOwnScheduleLifecycleOverMcp(agent, bobId);
+      } finally {
+        await agent.close();
+      }
+    });
+
+    it("applies the REST validation and owner rules", async () => {
+      const created = await alice.post(`/v1/bundles/${bundleId}/schedules`, {
+        service: "jobs",
+        action: "tick",
+        params: { message: "alice's" },
+        cron: "0 7 * * *",
+      });
+      const id = created.body.id;
+      const agent = await connectMcp(app.baseUrl, bobKey);
+      try {
+        const base = { service: "jobs", action: "tick", params: { message: "x" }, cron: "0 7 * * *" };
+        const cases: Array<[Record<string, unknown>, RegExp]> = [
+          [{ ...base, cron: "*/5 * * * * *" }, /5-field/],
+          [{ ...base, timezone: "Mars/Olympus" }, /unknown timezone/],
+          [{ ...base, params: {} }, /required parameter "message"/],
+          [{ ...base, params: { message: "x", tag: "mine" } }, /fixed by this service/],
+          // No coercion of what an agent sends: a string "false" is not false.
+          [{ ...base, enabled: "false" }, /enabled must be true or false/],
+          [{ ...base, params: "message=x" }, /params must be an object/],
+          [{ ...base, cron: 7 }, /cron must be a string/],
+        ];
+        for (const [params, message] of cases) {
+          const res = await mcpOne(agent, "create_schedule", params);
+          expect(res.ok, JSON.stringify(params)).toBe(false);
+          expect(res.error.message).toMatch(message);
+        }
+
+        // Alice's schedule runs as Alice: Bob may stop it, not rewrite or resume it.
+        expect((await mcpOne(agent, "update_schedule", { id, cron: "0 8 * * *" })).ok).toBe(false);
+        expect((await mcpOne(agent, "update_schedule", { id, enabled: false })).result.enabled).toBe(false);
+        const resume = await mcpOne(agent, "update_schedule", { id, enabled: true });
+        expect(resume.ok).toBe(false);
+        expect(resume.error.message).toMatch(/only the schedule's owner/);
+        expect((await mcpOne(agent, "delete_schedule", { id })).ok).toBe(true);
+      } finally {
+        await agent.close();
+      }
+
+      // No run_services, no scheduling.
+      const viewerKey = (await sysadmin.post(`/v1/users/${viewerId}/keys`, {})).body.key;
+      const readOnly = await connectMcp(app.baseUrl, viewerKey);
+      try {
+        const denied = await mcpOne(readOnly, "create_schedule", {
+          service: "jobs",
+          action: "tick",
+          params: { message: "x" },
+          cron: "0 7 * * *",
+        });
+        expect(denied.ok).toBe(false);
+      } finally {
+        await readOnly.close();
+      }
+    });
+
+    it("advertises the schedule tools in the manifest with run_services", async () => {
+      const agent = await connectMcp(app.baseUrl, bobKey);
+      try {
+        const loaded = await agent.call("load");
+        const manifest = loaded.tools.call.second_tier;
+        for (const name of ["create_schedule", "update_schedule", "delete_schedule", "list_schedules"]) {
+          expect(manifest[name], name).toMatchObject({ capability: "run_services", targets: ["bundle"] });
+        }
+        const full = await agent.call("get_tools", { names: ["create_schedule"] });
+        expect(JSON.stringify(full)).toContain("cron");
+      } finally {
+        await agent.close();
+      }
+    });
+
     it("lists schedules through list_schedules and load_bundle, for run_services holders only", async () => {
       const created = await alice.post(`/v1/bundles/${bundleId}/schedules`, {
         service: "jobs",
@@ -362,6 +506,41 @@ describeEachAdapter("schedules", (adapter) => {
       expect(viaRest.body).toMatchObject({ source: "schedule", scheduleId: id, userId: bobId });
     });
 
+    it("fires two schedules on the same service and action, each with its own params and runs", async () => {
+      const make = async (message: string, cron: string) =>
+        (await bob.post(`/v1/bundles/${bundleId}/schedules`, { service: "jobs", action: "tick", params: { message }, cron }))
+          .body.id as string;
+      const morning = await make("morning", "0 7 * * *");
+      const evening = await make("evening", "30 18 * * 1-5");
+
+      const first = await app.server.scheduler.fire(morning);
+      const second = await app.server.scheduler.fire(evening);
+      expect(first.kind).toBe("started");
+      expect(second.kind).toBe("started");
+      const runIds = [first, second].map((o) => (o as { runId: string }).runId);
+      expect(runIds[0]).not.toBe(runIds[1]);
+
+      for (const [runId, scheduleId, message] of [
+        [runIds[0]!, morning, "morning"],
+        [runIds[1]!, evening, "evening"],
+      ]) {
+        const run = await pollUntilTerminal(runId!);
+        expect(run).toMatchObject({
+          status: "succeeded",
+          source: "schedule",
+          scheduleId,
+          userId: bobId,
+          params: { message },
+          result: { echoed: { message, tag: "pinned-tag" } },
+        });
+        const schedule = (await alice.get(`/v1/schedules/${scheduleId}`)).body;
+        expect(schedule.lastRunId).toBe(runId);
+        expect(schedule.cron).toBe(scheduleId === morning ? "0 7 * * *" : "30 18 * * 1-5");
+      }
+      const scheduled = (await runsOfService(serviceId)).filter((r) => r.scheduleId === morning || r.scheduleId === evening);
+      expect(scheduled.map((r) => r.scheduleId).sort()).toEqual([morning, evening].sort());
+    });
+
     it("skips a tick while its previous run is still going, and records the skip rather than a failed run", async () => {
       const created = await alice.post(`/v1/bundles/${bundleId}/schedules`, {
         service: "jobs",
@@ -406,7 +585,7 @@ describeEachAdapter("schedules", (adapter) => {
       const carolApi = apiClient(app.baseUrl, carol.body.initialKey.key);
       await alice.post(`/v1/bundles/${bundleId}/grants`, {
         userId: carol.body.user.id,
-        capabilities: ["edit_services", "run_services"],
+        capabilities: ["run_services"],
         effect: "allow",
       });
       const created = await carolApi.post(`/v1/bundles/${bundleId}/schedules`, {
@@ -441,7 +620,7 @@ describeEachAdapter("schedules", (adapter) => {
       const daveApi = apiClient(app.baseUrl, dave.body.initialKey.key);
       const daveGrant = await alice.post(`/v1/bundles/${bundleId}/grants`, {
         userId: dave.body.user.id,
-        capabilities: ["edit_services", "run_services"],
+        capabilities: ["run_services"],
         effect: "allow",
       });
       const daves = await daveApi.post(`/v1/bundles/${bundleId}/schedules`, {
@@ -474,24 +653,33 @@ describeEachAdapter("schedules", (adapter) => {
   });
 
   describe("authoring from an OAuth token", () => {
-    it("needs the admin role to set a schedule up, but any authoring token may switch it off", async () => {
-      const member = { userId: aliceId, grantId: "g", scope: { role: "member" as const } };
-      const admin = { userId: aliceId, grantId: "g", scope: { role: "admin" as const } };
-      const input = { service: "jobs", action: "tick", params: { message: "tok" }, cron: "0 7 * * *" };
+    // A member-scoped login that can run services can schedule them: every
+    // fire re-checks the owner's run_services, so no wider role is needed.
+    it("lets a member-scoped token create, change, re-enable and delete its owner's schedule over REST", async () => {
+      const { access_token, scope } = await connectApp(app.baseUrl, bobKey, "role:member");
+      expect(scope).toBe("role:member");
+      await expectOwnScheduleLifecycleOverRest(apiClient(app.baseUrl, access_token), bobId);
+    });
 
-      await expect(runWithTokenAuth(member, () => createSchedule(env, aliceId, bundleId, input))).rejects.toThrow(
-        /admin scope/,
-      );
-      const created = await runWithTokenAuth(admin, () => createSchedule(env, aliceId, bundleId, input));
+    it("lets a member-scoped token do the same over MCP", async () => {
+      const { access_token } = await connectApp(app.baseUrl, bobKey, "role:member");
+      const agent = await connectMcp(app.baseUrl, access_token);
+      try {
+        await expectOwnScheduleLifecycleOverMcp(agent, bobId);
+      } finally {
+        await agent.close();
+      }
+    });
 
-      await expect(
-        runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { cron: "0 8 * * *" })),
-      ).rejects.toThrow(/admin scope/);
-      const off = await runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { enabled: false }));
-      expect(off.enabled).toBe(false);
-      await expect(
-        runWithTokenAuth(member, () => updateSchedule(env, aliceId, created.id, { enabled: true })),
-      ).rejects.toThrow(/admin scope/);
+    it("still refuses a read-only token, which cannot run services", async () => {
+      const { access_token } = await connectApp(app.baseUrl, bobKey, "role:read-only");
+      const res = await apiClient(app.baseUrl, access_token).post(`/v1/bundles/${bundleId}/schedules`, {
+        service: "jobs",
+        action: "tick",
+        params: { message: "x" },
+        cron: "0 7 * * *",
+      });
+      expect(res.status).toBe(403);
     });
   });
 

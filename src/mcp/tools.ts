@@ -125,10 +125,11 @@ function widgetCspDomains(config: YapConfig): string[] {
 }
 
 export function registerMcpTools(server: YapServer): void {
-  const { mcp, db, config, blob, logger, registry, version } = server;
+  const { mcp, db, config, blob, logger, registry, scheduler, version } = server;
   // `logger` rides along for the runs layer: a failed run's detail belongs in
   // the server log, since the row an agent reads keeps only the flat message.
-  const env = { db, config, blob, logger, registry, baseUrl: config.baseUrl };
+  // `scheduler` for schedule edits, which re-arm it.
+  const env = { db, config, blob, logger, registry, scheduler, baseUrl: config.baseUrl };
 
   // Every tool executes inside the session's token-scope context (if the
   // session authenticated with an OAuth token) so capability resolution deep

@@ -141,7 +141,7 @@ Engage Yap whenever a request involves its spaces, stored items, files, or servi
 4. get_tools(names?) — when full second-tier descriptions or parameter specs are needed, expand the manifest by name; omit names to fetch the manifest directly.
 5. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
 
-A service is a named capability the bundle can run; you supply its declared parameters and never see its configuration. Running is async: run_service starts a run and get_run polls it until status is succeeded or failed (list_runs is the log). A schedule runs a service on a cron, as the user who created it (list_schedules). Services and schedules are authored over REST only.
+A service is a named capability the bundle can run; you supply its declared parameters and never see its configuration. Running is async: run_service starts a run and get_run polls it until status is succeeded or failed (list_runs is the log). A schedule runs a service on a cron, as the user who created it (create_schedule, update_schedule, delete_schedule, list_schedules; needs run_services only). Services are authored over REST only.
 
 If several spaces or bundles could match the user's intent, ask the user rather than guessing. Run the discovery chain silently — do not narrate loading calls.
 

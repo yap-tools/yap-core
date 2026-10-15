@@ -35,6 +35,8 @@ export interface CallEnv {
   registry: DriverRegistry;
   /** Operator-side sink the runs layer writes a failed run's detail to. */
   logger?: YapLogger;
+  /** Re-armed by schedule edits; absent in bare in-process callers. */
+  scheduler?: schedulesCore.ScheduleReloader;
   userId: string;
   /** Always the call's space. */
   spaceId: string;
@@ -432,7 +434,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   list_schedules: {
     description:
-      "List the targeted bundle's schedules: each runs one service action on a cron (5-field, in its IANA timezone) as its owner, the user who created it. Shows the stored params, whether it is enabled, when it last fired and is next due, its last run id (read it with get_run), the last error or the reason it disabled itself, and the last tick skipped because the previous run was still going. Schedules are authored over REST only. Params: service (name or id — only that service's schedules).",
+      "List the targeted bundle's schedules: each runs one service action on a cron (5-field, in its IANA timezone) as its owner, the user who created it. Shows the stored params, whether it is enabled, when it last fired and is next due, its last run id (read it with get_run), the last error or the reason it disabled itself, and the last tick skipped because the previous run was still going. Params: service (name or id — only that service's schedules).",
     capability: "run_services",
     params: { service: {} },
     handler: async (env, params) => ({
@@ -440,6 +442,50 @@ export const secondTier: Record<string, SecondTierTool> = {
         service: params.service as string | undefined,
       }),
     }),
+  },
+  create_schedule: {
+    description:
+      'Schedule one of the bundle\'s services: it will run on a cron, as you, with the params given here — the same declared (allowlisted) parameters run_service takes, checked now exactly as a run checks them. Every fire re-checks that you still hold run_services; if you lose it the schedule disables itself and says why. A tick while this schedule\'s previous run is still going is skipped. Returns the schedule, with when it is next due. Params: "service" — the service\'s name or id; "action" (omit when it has only one); "params" — an object of declared parameter values; "cron" — 5-field (minute hour day-of-month month day-of-week), e.g. "0 7 * * 1-5"; "timezone" — IANA name, default UTC; "enabled" (default true). Example: {service: "notify", params: {message: "standup"}, cron: "0 9 * * 1-5", timezone: "Europe/Copenhagen"}.',
+    capability: "run_services",
+    params: { service: { required: true }, action: {}, params: {}, cron: { required: true }, timezone: {}, enabled: {} },
+    handler: async (env, params) => ({
+      // Passed through untyped: the core says what is wrong with each.
+      result: await schedulesCore.createSchedule(env, env.userId, env.bundleId, {
+        service: params.service as string,
+        action: params.action as string | undefined,
+        params: params.params as Record<string, unknown> | undefined,
+        cron: params.cron as string,
+        timezone: params.timezone as string | undefined,
+        enabled: params.enabled as boolean | undefined,
+      }),
+    }),
+  },
+  update_schedule: {
+    description:
+      "Change a schedule: any of action, params (replaces the stored object), cron, timezone, enabled. The service it runs is fixed — schedule another service with create_schedule. Only the schedule's owner (the user who created it, whom it runs as) may change what or when it runs or turn it back on; anyone else with run_services may only disable it (enabled: false). Re-enabling clears the last error. Params: id (the schedule id), action, params, cron, timezone, enabled.",
+    capability: "run_services",
+    params: { id: { required: true }, action: {}, params: {}, cron: {}, timezone: {}, enabled: {} },
+    // Like get_run, access is decided by the schedule's own bundle; the
+    // bundle_id this call targets only routes it.
+    handler: async (env, params) => ({
+      result: await schedulesCore.updateSchedule(env, env.userId, String(params.id), {
+        action: params.action as string | undefined,
+        params: params.params as Record<string, unknown> | undefined,
+        cron: params.cron as string | undefined,
+        timezone: params.timezone as string | undefined,
+        enabled: params.enabled as boolean | undefined,
+      }),
+    }),
+  },
+  delete_schedule: {
+    description:
+      "Delete a schedule. Its past runs stay in the run log. Anyone with run_services on the bundle may delete any of its schedules. Params: id (the schedule id).",
+    capability: "run_services",
+    params: idParam,
+    handler: async (env, params) => {
+      await schedulesCore.deleteSchedule(env, env.userId, String(params.id));
+      return { result: { deleted: true } };
+    },
   },
   fire_hook: {
     description:

@@ -13,17 +13,16 @@
  * - **It runs as its owner**, the user who created it, and nobody else: Core
  *   has no system identity to run it as, and does not grow one for this. The
  *   owner never changes, so only the owner may change what a schedule runs or
- *   when (or turn it back on). Anyone else who may author it can still switch
- *   it off or delete it: stopping someone's standing order is safe, rewriting
- *   it to run as them is not.
- * - **Authoring needs both `edit_services` and `run_services`** on the bundle.
- *   `edit_services` because a schedule is service configuration (and services
- *   are authored over REST only); `run_services` because a schedule is a
- *   standing order to run, and nobody should be able to leave behind an order
- *   they could not carry out themselves.
- * - **From an OAuth token, setting one up needs the admin role** (see
- *   `assertStandingOrder`): a schedule outlives the token that wrote it.
- * - **Reading needs `run_services`**, the same gate as the run records: a
+ *   when (or turn it back on). Anyone else who holds `run_services` there can
+ *   still switch it off or delete it: stopping someone's standing order is
+ *   safe, rewriting it to run as them is not.
+ * - **Scheduling needs `run_services` on the bundle, and nothing more**, over
+ *   REST and MCP alike: scheduling a service is running it later, so it takes
+ *   the same capability as running it now. Not `edit_services` — a schedule
+ *   leaves the service's configuration untouched — and no particular OAuth
+ *   role: a schedule can only ever run as its owner, and every fire re-checks
+ *   the owner's `run_services`, so it never outlasts the authority behind it.
+ * - **Reading needs `run_services`** too, the same gate as the run records: a
  *   schedule carries the params its runs will get and points at its last run.
  * - **Its action and params are validated at write time by the very
  *   computation a run uses** (`prepareRun`): an unknown action, a pinned or
@@ -45,8 +44,7 @@ import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import type { DriverRegistry } from "./drivers/registry.js";
-import { currentTokenAuth } from "./authScope.js";
-import { forbidden, invalid, notFound, YapError } from "./errors.js";
+import { forbidden, invalid, notFound } from "./errors.js";
 import { prepareRun, requireRunServicesOn, resolveServiceRow } from "./runs.js";
 import { newId, nowIso } from "./util.js";
 
@@ -130,6 +128,23 @@ export function toScheduleInfo(row: ScheduleRow): ScheduleInfo {
 }
 
 // ---- Validation -------------------------------------------------------------
+
+/**
+ * Shape checks for authoring input. REST has already parsed its body against
+ * a schema; MCP passes call params through as the agent sent them, so the
+ * core says what is wrong rather than coercing (a string "false" must not
+ * mean enabled).
+ */
+function checkInputTypes(input: Record<string, unknown>): void {
+  for (const key of ["service", "action", "cron", "timezone"]) {
+    if (input[key] !== undefined && typeof input[key] !== "string") throw invalid(`${key} must be a string`);
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw invalid("enabled must be true or false");
+  const params = input.params;
+  if (params !== undefined && (params === null || typeof params !== "object" || Array.isArray(params))) {
+    throw invalid('params must be an object of declared parameter values, e.g. {message: "…"}');
+  }
+}
 
 /** The canonical IANA name, or a refusal. `Intl` is the authority croner uses. */
 function validateTimezone(raw: string | undefined): string {
@@ -221,42 +236,8 @@ export async function getSchedule(env: ScheduleEnv, userId: string, scheduleId: 
 }
 
 // ---- Authoring --------------------------------------------------------------
-
-/**
- * The authoring gate. Reached by a schedule's own id (update, delete), a
- * caller who cannot see the bundle gets a 404 naming the schedule, never the
- * bundle — the same existence rule as getSchedule.
- */
-async function requireAuthoring(db: Db, userId: string, bundleId: string, scheduleId?: string): Promise<void> {
-  try {
-    const ctx = await getBundleContext(db, bundleId);
-    await requireBundleCapability(db, userId, "edit_services", ctx);
-    await requireBundleCapability(db, userId, "run_services", ctx);
-  } catch (err) {
-    if (scheduleId && err instanceof YapError && err.code === "not_found") throw notFound("schedule", scheduleId);
-    throw err;
-  }
-}
-
-/**
- * A schedule is a standing order that keeps running as its owner long after
- * the request that wrote it — and after the credential that sent it is gone.
- * So, like credential management, setting one up (or changing what it runs,
- * or turning it back on) from an OAuth token needs the admin role, the
- * explicit "act fully as me" delegation; a narrower token could otherwise
- * leave behind authority that outlives its own revocation. Access keys always
- * may. Switching a schedule off or deleting it takes no such standing and is
- * open to any token that can author.
- */
-function assertStandingOrder(): void {
-  const auth = currentTokenAuth();
-  if (auth && auth.scope.role !== "admin") {
-    throw forbidden(
-      "creating, changing or re-enabling a schedule requires an access key or an authorization with admin scope " +
-        "— a schedule keeps running as you after the token is gone",
-    );
-  }
-}
+// Gated exactly like reading: `run_services` on the bundle, with the same
+// existence hiding when reached by a schedule's own id.
 
 export async function createSchedule(
   env: ScheduleEnv,
@@ -272,8 +253,8 @@ export async function createSchedule(
     enabled?: boolean;
   },
 ): Promise<ScheduleInfo> {
-  await requireAuthoring(env.db, userId, bundleId);
-  assertStandingOrder();
+  await requireBundleCapability(env.db, userId, "run_services", await getBundleContext(env.db, bundleId));
+  checkInputTypes(input);
   const timezone = validateTimezone(input.timezone);
   const cron = validateCron(input.cron, timezone);
   const target = await validateTarget(env, bundleId, input.service, input.action, input.params ?? {});
@@ -326,7 +307,8 @@ export async function updateSchedule(
   },
 ): Promise<ScheduleInfo> {
   const row = await getRow(env.db, scheduleId);
-  await requireAuthoring(env.db, userId, row.bundleId, scheduleId);
+  await requireRunServicesOn(env.db, userId, row.bundleId, () => notFound("schedule", scheduleId));
+  checkInputTypes(patch);
   const onlyDisables =
     patch.enabled !== true &&
     patch.action === undefined &&
@@ -339,7 +321,6 @@ export async function updateSchedule(
         "others may disable or delete it",
     );
   }
-  if (!onlyDisables) assertStandingOrder();
 
   const changes: Partial<ScheduleRow> = { updatedAt: nowIso() };
   if (patch.cron !== undefined || patch.timezone !== undefined) {
@@ -370,7 +351,7 @@ export async function updateSchedule(
 
 export async function deleteSchedule(env: ScheduleEnv, userId: string, scheduleId: string): Promise<void> {
   const row = await getRow(env.db, scheduleId);
-  await requireAuthoring(env.db, userId, row.bundleId, scheduleId);
+  await requireRunServicesOn(env.db, userId, row.bundleId, () => notFound("schedule", scheduleId));
   const { schedules } = env.db.tables;
   await env.db.client.delete(schedules).where(eq(schedules.id, scheduleId));
   await env.scheduler?.reload(scheduleId);

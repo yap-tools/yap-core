@@ -1025,7 +1025,7 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  // ---- Schedules (authoring is REST-only, like the services they run) -------------
+  // ---- Schedules (run_services; MCP has the same tools) -----------------------------
 
   app.post(
     "/v1/bundles/:id/schedules",

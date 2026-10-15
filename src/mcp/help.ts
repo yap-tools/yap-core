@@ -52,9 +52,11 @@ A bundle holds docs, item-types (schemas with items), static files, and services
 - **Schedule** — a cron (5-field, in an IANA timezone, UTC by default) that
   runs one service action with fixed params, as its owner: the user who
   created it. It skips a tick while its previous run is still going, and
-  disables itself, saying why, if its owner loses run_services. Schedules are
-  authored over REST only; list_schedules (and load_bundle) show them to
-  holders of run_services.
+  disables itself, saying why, if its owner loses run_services. Scheduling is
+  running later, so it needs run_services and nothing more: create_schedule,
+  update_schedule, delete_schedule and list_schedules (load_bundle shows them
+  too). Only the owner may change what or when a schedule runs, or turn it
+  back on; anyone else with run_services may disable or delete it.
 - **User doc** — account-level guidance attached to you, available across all
   your spaces. Docs flagged autoload are returned by load at session start.
 - **Widget** — an interactive panel some results render inline (file cards,
@@ -85,8 +87,9 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    items (query/get/create/update/delete), docs (get/read/create/update/patch/delete),
    files (list_files, show_file, upload_request, upload_complete, sideload_file — store
    a file straight from a URL, where the instance allows it — and delete_file),
-   services (run_service, get_run, list_runs, list_schedules — fire_hook is a
-   deprecated alias for run_service, kept until 1.0), and management — gated by the matching capability:
+   services (run_service, get_run, list_runs — fire_hook is a deprecated
+   alias for run_service, kept until 1.0), schedules (create_schedule,
+   update_schedule, delete_schedule, list_schedules), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles
    (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
    (update_bundle/delete_bundle, create/update/delete_item_type,
@@ -101,9 +104,8 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    update_items also accepts an edits key alongside set for text properties.
 
 Service *authoring* is the one management action not available over MCP —
-defining a service's driver configuration and secrets, and the schedules that
-run it, is REST-only by design (edit_services); agents only run services
-(run_services).
+defining a service's driver configuration and secrets is REST-only by design
+(edit_services); agents run services and schedule them (run_services).
 
 Run the discovery chain silently — do not narrate loading steps.
 
