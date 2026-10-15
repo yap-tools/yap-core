@@ -40,7 +40,26 @@ const USER_ROW = {
   created_at: "2026-01-01T00:00:00Z",
 };
 
-/** users + space + bundle + doc + one finalized file row; blob bytes "hello" at k/f1. */
+const SCHEDULE_ROW = {
+  id: "sc1",
+  bundle_id: "b1",
+  service_id: "sv1",
+  action: "fire",
+  params: "{}",
+  cron: "0 7 * * *",
+  timezone: "Europe/Copenhagen",
+  enabled: 1,
+  owner_id: "u1",
+  last_fired_at: null,
+  last_run_id: "r1",
+  last_error: null,
+  last_skipped_at: null,
+  created_at: "x",
+  updated_at: "x",
+};
+
+/** users + space + bundle + doc + one finalized file row (blob bytes "hello" at k/f1)
+ *  + a service with a schedule and the run it started. */
 async function seed(db: Db, blobRoot: string): Promise<void> {
   const blob = await createBlobStore(blobConfig(blobRoot));
   await db.insertRows("users", [USER_ROW]);
@@ -80,6 +99,39 @@ async function seed(db: Db, blobRoot: string): Promise<void> {
     },
   ]);
   await blob.put("k/f1", new TextEncoder().encode("hello"));
+  // A service, a schedule on it, and a run that schedule started: the import
+  // has to insert them in that order for the foreign keys to hold.
+  await db.insertRows("services", [
+    {
+      id: "sv1",
+      bundle_id: "b1",
+      name: "notify",
+      description: "",
+      driver: "http",
+      params: "[]",
+      pins: "{}",
+      config_encrypted: "v1.x.y.z",
+      created_at: "x",
+      updated_at: "x",
+    },
+  ]);
+  await db.insertRows("schedules", [SCHEDULE_ROW]);
+  await db.insertRows("runs", [
+    {
+      id: "r1",
+      bundle_id: "b1",
+      service_id: "sv1",
+      service_name: "notify",
+      action: "fire",
+      status: "succeeded",
+      params: "{}",
+      writes: "[]",
+      created_at: "x",
+      user_id: "u1",
+      source: "schedule",
+      schedule_id: "sc1",
+    },
+  ]);
 }
 
 describeEachAdapter("backup export", (adapter: Adapter) => {
@@ -170,6 +222,9 @@ describeEachAdapter("backup import", (adapter: Adapter) => {
       { id: "d1", bundle_id: "b1", name: "instructions", content: "Follow these.", autoload: 1, created_at: "x", updated_at: "x" },
     ]);
     expect(await blob2.stat("k/f1")).toMatchObject({ size: 5 });
+    expect(await db2.snapshotRead(async (read) => read("schedules"))).toEqual([SCHEDULE_ROW]);
+    const runs = await db2.snapshotRead(async (read) => read("runs"));
+    expect(runs[0]).toMatchObject({ id: "r1", user_id: "u1", source: "schedule", schedule_id: "sc1" });
 
     // schema sits at the archive's index; a normal migrate() completes it
     await db2.migrate();

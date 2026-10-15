@@ -310,6 +310,7 @@ describeEachAdapter("runs", (adapter) => {
       received.length = 0;
 
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "notify",
         params: { message: "deploy finished" },
         waitMs: 8_000,
@@ -333,7 +334,7 @@ describeEachAdapter("runs", (adapter) => {
         config: { url: `http://127.0.0.1:${targetPort}/slow`, method: "GET" },
       });
 
-      const queued = await runService(env, aliceId, bundleId, { service: "slowcall", waitMs: 0 });
+      const queued = await runService(env, aliceId, bundleId, { source: "rest", service: "slowcall", waitMs: 0 });
       expect(["queued", "running"]).toContain(queued.status);
       expect(queued.result).toBeNull();
       expect(queued.finishedAt).toBeNull();
@@ -346,6 +347,7 @@ describeEachAdapter("runs", (adapter) => {
     it("fails a run that outlives its action budget", async () => {
       await plantService({ name: "sleeper", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "sleeper",
         action: "sleep",
         waitMs: 5_000,
@@ -362,6 +364,7 @@ describeEachAdapter("runs", (adapter) => {
       // only the runner owning the budget can end this run. If it did not, the
       // wait below would expire with the row still `running`.
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "deaf",
         action: "stuck",
         waitMs: 3_000,
@@ -375,6 +378,7 @@ describeEachAdapter("runs", (adapter) => {
     it("fails a signal-ignoring run that succeeds after the deadline", async () => {
       await plantService({ name: "tardy", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "tardy",
         action: "late",
         waitMs: 3_000,
@@ -394,6 +398,7 @@ describeEachAdapter("runs", (adapter) => {
     it("fails a run whose result cannot be serialized instead of stranding it", async () => {
       await plantService({ name: "knotted", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "knotted",
         action: "circular",
         waitMs: 5_000,
@@ -409,6 +414,7 @@ describeEachAdapter("runs", (adapter) => {
       // The budget here is 5s and never fires; the AbortError is the driver's
       // own, so it must collapse to the generic failure like any other throw.
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "self-aborter",
         action: "abortive",
         waitMs: 5_000,
@@ -448,6 +454,7 @@ describeEachAdapter("runs", (adapter) => {
         });
         // The action declares 5000ms; the operator cap wins.
         const run = await runService(cappedEnv, u.body.user.id, bid, {
+          source: "rest",
           service: "sleeper",
           action: "sleep",
           waitMs: 5_000,
@@ -462,6 +469,7 @@ describeEachAdapter("runs", (adapter) => {
     it("collapses a non-YapError into a generic failure that leaks nothing", async () => {
       await plantService({ name: "exploder", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "exploder",
         action: "boom",
         waitMs: 5_000,
@@ -474,6 +482,7 @@ describeEachAdapter("runs", (adapter) => {
     it("keeps a ctx.fail message and code verbatim on the row", async () => {
       await plantService({ name: "honest-failer", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "honest-failer",
         action: "missing",
         waitMs: 5_000,
@@ -483,6 +492,7 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.errorCode).toBe("not_found");
 
       const overreach = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "honest-failer",
         action: "overreach",
         waitMs: 5_000,
@@ -495,6 +505,7 @@ describeEachAdapter("runs", (adapter) => {
       await plantService({ name: "loud-exploder", driver: "test", config: {} });
       logged.length = 0;
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "loud-exploder",
         action: "boom",
         waitMs: 5_000,
@@ -525,7 +536,7 @@ describeEachAdapter("runs", (adapter) => {
       const deadPort = await getFreePort();
       await plantService({ name: "unreachable", config: { url: `http://127.0.0.1:${deadPort}/x`, method: "GET" } });
       logged.length = 0;
-      const run = await runService(env, aliceId, bundleId, { service: "unreachable", waitMs: 8_000 });
+      const run = await runService(env, aliceId, bundleId, { source: "rest", service: "unreachable", waitMs: 8_000 });
 
       expect(run.status).toBe("failed");
       expect(run.error).toBe("service request failed to reach its destination");
@@ -543,7 +554,7 @@ describeEachAdapter("runs", (adapter) => {
       // Planted private destination: the http driver collapses the guard
       // rejection itself, and the run records that message verbatim.
       await plantService({ name: "rebound", config: { url: "http://192.168.0.1/internal", method: "GET" } });
-      const run = await runService(env, aliceId, bundleId, { service: "rebound", waitMs: 5_000 });
+      const run = await runService(env, aliceId, bundleId, { source: "rest", service: "rebound", waitMs: 5_000 });
       expect(run.status).toBe("failed");
       expect(run.error).toMatch(/blocked by the SSRF guard/);
       expect(JSON.stringify(run)).not.toContain("192.168.0.1");
@@ -563,11 +574,12 @@ describeEachAdapter("runs", (adapter) => {
       });
 
       await expect(
-        runService(env, aliceId, bundleId, { service: "pinned", params: { to: "elsewhere", message: "x" } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: "pinned", params: { to: "elsewhere", message: "x" } }),
       ).rejects.toThrow(/parameter "to" is fixed by this service configuration/);
 
       received.length = 0;
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "pinned",
         params: { message: "hi" },
         waitMs: 8_000,
@@ -584,6 +596,7 @@ describeEachAdapter("runs", (adapter) => {
     it("tells the driver which of its parameters were pinned", async () => {
       await plantService({ name: "pin-aware", driver: "test", pins: { tag: "fixed" }, config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "pin-aware",
         action: "echo",
         params: { message: "hi" },
@@ -594,6 +607,7 @@ describeEachAdapter("runs", (adapter) => {
       // An unpinned service sees an empty list, never undefined.
       await plantService({ name: "pin-free", driver: "test", config: {} });
       const plain = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "pin-free",
         action: "echo",
         params: { message: "hi" },
@@ -604,13 +618,13 @@ describeEachAdapter("runs", (adapter) => {
 
     it("rejects unknown and missing parameters", async () => {
       await expect(
-        runService(env, aliceId, bundleId, { service: "notify", params: { message: "x", url: "http://evil" } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: "notify", params: { message: "x", url: "http://evil" } }),
       ).rejects.toThrow(/unknown parameter "url"/);
-      await expect(runService(env, aliceId, bundleId, { service: "notify", params: {} })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "notify", params: {} })).rejects.toThrow(
         /required parameter "message" is missing/,
       );
       await expect(
-        runService(env, aliceId, bundleId, { service: "notify", params: { message: { a: 1 } } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: "notify", params: { message: { a: 1 } } }),
       ).rejects.toThrow(/must be a scalar/);
     });
 
@@ -622,9 +636,10 @@ describeEachAdapter("runs", (adapter) => {
         config: { some: "config" },
       });
       await expect(
-        runService(env, aliceId, bundleId, { service: "echoer", action: "echo", params: { ignored: "x" } }),
+        runService(env, aliceId, bundleId, { source: "rest", service: "echoer", action: "echo", params: { ignored: "x" } }),
       ).rejects.toThrow(/unknown parameter "ignored"/);
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "echoer",
         action: "echo",
         params: { message: "hello", tag: 7 },
@@ -637,13 +652,13 @@ describeEachAdapter("runs", (adapter) => {
 
   describe("resolution", () => {
     it("names the actions when the driver has more than one and none was given", async () => {
-      await expect(runService(env, aliceId, bundleId, { service: "echoer" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "echoer" })).rejects.toThrow(
         /echo.*sleep|sleep.*echo/s,
       );
     });
 
     it("rejects an unknown action", async () => {
-      await expect(runService(env, aliceId, bundleId, { service: "echoer", action: "nope" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "echoer", action: "nope" })).rejects.toThrow(
         /unknown action "nope"/,
       );
     });
@@ -652,6 +667,7 @@ describeEachAdapter("runs", (adapter) => {
       await plantService({ name: "echo-only", driver: "test", actions: JSON.stringify(["echo"]), config: {} });
       // The driver has seven actions; this service has one, so it is implicit.
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "echo-only",
         params: { message: "hi" },
         waitMs: 5_000,
@@ -659,12 +675,12 @@ describeEachAdapter("runs", (adapter) => {
       expect(run.status).toBe("succeeded");
       expect(run.action).toBe("echo");
       // A disabled action is unknown, and the hint never names it.
-      await expect(runService(env, aliceId, bundleId, { service: "echo-only", action: "sleep" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "echo-only", action: "sleep" })).rejects.toThrow(
         /^unknown action "sleep" for service "echo-only" \(available: echo\)$/,
       );
 
       await plantService({ name: "two-of-seven", driver: "test", actions: JSON.stringify(["echo", "boom"]), config: {} });
-      await expect(runService(env, aliceId, bundleId, { service: "two-of-seven" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "two-of-seven" })).rejects.toThrow(
         /^service "two-of-seven" needs an action — one of: echo, boom$/,
       );
 
@@ -672,13 +688,14 @@ describeEachAdapter("runs", (adapter) => {
       // (allowedActions is the one computation); here it is enough that the
       // runner's "nothing to run" verdict comes out of it.
       await plantService({ name: "all-stale", driver: "test", actions: JSON.stringify(["gone"]), config: {} });
-      await expect(runService(env, aliceId, bundleId, { service: "all-stale", action: "echo" })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "all-stale", action: "echo" })).rejects.toThrow(
         /^service "all-stale" has no runnable actions$/,
       );
     });
 
     it("resolves a service by id as well as by name, and explains an empty ref", async () => {
       const byId = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "svc-notify",
         params: { message: "by id" },
         waitMs: 8_000,
@@ -687,15 +704,16 @@ describeEachAdapter("runs", (adapter) => {
 
       // Shape-explaining, and deliberately free of any tool's own field names:
       // the same message surfaces through run_service, fire_hook, and REST.
-      await expect(runService(env, aliceId, bundleId, { service: "  " })).rejects.toThrow(
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "  " })).rejects.toThrow(
         /no service specified — pass the service name or id/,
       );
-      await expect(runService(env, aliceId, bundleId, { service: "ghost" })).rejects.toThrow(/not found/);
+      await expect(runService(env, aliceId, bundleId, { source: "rest", service: "ghost" })).rejects.toThrow(/not found/);
     });
 
     it("keeps a run after its service is deleted", async () => {
       const serviceId = await plantService({ name: "doomed", driver: "test", config: {} });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "doomed",
         action: "echo",
         params: { message: "last words" },
@@ -721,6 +739,7 @@ describeEachAdapter("runs", (adapter) => {
       await plantService({ name: "l-two", driver: "test", bundle: listBundleId, config: {} });
       for (const service of ["l-one", "l-one", "l-two"]) {
         await runService(env, aliceId, listBundleId, {
+          source: "rest",
           service,
           action: "echo",
           params: { message: service },
@@ -755,11 +774,12 @@ describeEachAdapter("runs", (adapter) => {
 
   describe("capability gates", () => {
     it("a member without run_services gets a 403 naming the capability", async () => {
-      await expect(runService(env, viewerId, bundleId, { service: "notify" })).rejects.toMatchObject({
+      await expect(runService(env, viewerId, bundleId, { source: "rest", service: "notify" })).rejects.toMatchObject({
         code: "forbidden",
         details: { capability: "run_services" },
       });
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "notify",
         params: { message: "x" },
         waitMs: 8_000,
@@ -769,7 +789,7 @@ describeEachAdapter("runs", (adapter) => {
     });
 
     it("an outsider gets a not_found that hides the bundle's existence", async () => {
-      await expect(runService(env, outsiderId, bundleId, { service: "notify" })).rejects.toMatchObject({
+      await expect(runService(env, outsiderId, bundleId, { source: "rest", service: "notify" })).rejects.toMatchObject({
         code: "not_found",
       });
       await expect(listRuns(env, outsiderId, bundleId, {})).rejects.toMatchObject({ code: "not_found" });
@@ -781,6 +801,7 @@ describeEachAdapter("runs", (adapter) => {
 
     it("a run in an invisible bundle 404s as the run, never naming the bundle", async () => {
       const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
         service: "notify",
         params: { message: "private" },
         waitMs: 8_000,

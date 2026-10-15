@@ -115,6 +115,10 @@ export interface YapConfig {
    *  working directory, like the sqlite and blob paths. Missing = no external
    *  drivers. */
   driversDir: string;
+  /** Whether this process fires service schedules. One process per database
+   *  should: every process with it on fires every schedule. Off still lets
+   *  schedules be authored and listed. */
+  schedulerEnabled: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -264,6 +268,11 @@ export function loadConfig(env: Env = process.env): YapConfig {
     keep: env.YAP_BACKUP_KEEP ? intEnv(env, "YAP_BACKUP_KEEP", 0) : undefined,
   };
 
+  const schedulerRaw = env.YAP_SCHEDULER || "on";
+  if (schedulerRaw !== "on" && schedulerRaw !== "off") {
+    throw new ConfigError(`YAP_SCHEDULER must be "on" or "off", got ${JSON.stringify(schedulerRaw)}`);
+  }
+
   const mimeRaw = env.YAP_MIME_ALLOWLIST;
   const mimeAllowlist: YapConfig["mimeAllowlist"] =
     !mimeRaw || mimeRaw === "*" ? "*" : listEnv(env, "YAP_MIME_ALLOWLIST");
@@ -300,5 +309,6 @@ export function loadConfig(env: Env = process.env): YapConfig {
     orphanSweepIntervalMs: intEnv(env, "YAP_ORPHAN_SWEEP_INTERVAL_MS", 10 * 60 * 1000, MAX_TIMER_MS),
     orphanMaxAgeMs: intEnv(env, "YAP_ORPHAN_MAX_AGE_MS", 60 * 60 * 1000),
     driversDir: env.YAP_DRIVERS_DIR || "./drivers",
+    schedulerEnabled: schedulerRaw === "on",
   };
 }

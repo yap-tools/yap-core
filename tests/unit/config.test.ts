@@ -80,6 +80,13 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...base, YAP_SIDELOAD_TIMEOUT_MS: "0" })).toThrow(ConfigError);
   });
 
+  it("fires service schedules unless YAP_SCHEDULER is off, and accepts only on/off", () => {
+    expect(loadConfig(base).schedulerEnabled).toBe(true);
+    expect(loadConfig({ ...base, YAP_SCHEDULER: "on" }).schedulerEnabled).toBe(true);
+    expect(loadConfig({ ...base, YAP_SCHEDULER: "off" }).schedulerEnabled).toBe(false);
+    expect(() => loadConfig({ ...base, YAP_SCHEDULER: "maybe" })).toThrow(/YAP_SCHEDULER/);
+  });
+
   it("rejects malformed numbers", () => {
     expect(() => loadConfig({ ...base, YAP_PORT: "nope" })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, YAP_PORT: "-1" })).toThrow(ConfigError);

@@ -98,6 +98,10 @@ Then: `GET /v1/bundles/:id/files` (list), `GET /v1/files/:id/link` (mint expirin
 | `POST /v1/services/:id/run` | `{"action"?, "params"?, "wait_ms"?}` → a run record; `wait_ms` clamped to `YAP_RUN_WAIT_CAP_MS` (25000 default) |
 | `GET /v1/runs/:id` | one run: status (`queued\|running\|succeeded\|failed`), the caller's params, result/error, bundle I/O trail (file/item reads and item/file writes as metadata) |
 | `GET /v1/bundles/:id/runs` | `?service=` filter, `cursor`, `limit`; newest first |
+| `GET/POST /v1/bundles/:id/schedules` | list (`?service=` filter; needs `run_services`) / create `{service, action?, params?, cron, timezone?, enabled?}` (needs `run_services` only; the creator becomes the owner the schedule runs as) |
+| `GET/PATCH/DELETE /v1/schedules/:id` | needs `run_services`; only the owner may change action/params/cron/timezone or re-enable; anyone else with `run_services` may disable or delete |
+
+A run records `userId`, `source` (`mcp`/`rest`/`hook`/`schedule`) and `scheduleId`. **Schedules** fire a service on a 5-field cron in an IANA timezone (default UTC), as their owner: `run_services` is re-checked on each tick (losing it disables the schedule, reason in `lastError`); a tick while the previous run is still `queued`/`running` is skipped (`lastSkippedAt`); missed ticks are not caught up. MCP has `create_schedule` `{service, action?, params?, cron, timezone?, enabled?}`, `update_schedule` `{id, action?, params?, cron?, timezone?, enabled?}`, `delete_schedule` `{id}` and `list_schedules` `{service?}` — same gate and rules as REST, any OAuth role that can run services; `load_bundle` lists them too. `YAP_SCHEDULER=on|off` (default `on`) — on in exactly one process per database.
 
 Service egress (the `http` driver, or any driver declaring `egress: true`) denies private/link-local destinations unless allowlisted via `YAP_HOOK_ALLOW_HOSTS` (still that name). The `http` driver's own timeout is `YAP_HOOK_TIMEOUT_MS` (30 s default, still that name); no automatic retries.
 
@@ -113,7 +117,7 @@ Service egress (the `http` driver, or any driver declaring `egress: true`) denie
 | `PATCH/DELETE /v1/hooks/:id` | no GET single, same as services |
 | `POST /v1/hooks/:id/fire` | synchronous: waits past the driver's own timeout and returns `{status, body}` or throws — never a run id |
 
-`load_bundle` likewise returns both `services` and a legacy `hooks` projection (http-driver services only). MCP: `run_service`/`get_run`/`list_runs` are current; `fire_hook` is the deprecated alias. A few error strings changed under these compatible surfaces: a missing hook/service 404s as `service <id> not found` (was `hook <id> not found`); the SSRF guard says "service destination…" (was "hook destination…"); an unlisted call parameter says `unknown parameter "…"`.
+`load_bundle` likewise returns both `services` and a legacy `hooks` projection (http-driver services only). MCP: `run_service`/`get_run`/`list_runs` (and the schedule tools) are current; `fire_hook` is the deprecated alias. A few error strings changed under these compatible surfaces: a missing hook/service 404s as `service <id> not found` (was `hook <id> not found`); the SSRF guard says "service destination…" (was "hook destination…"); an unlisted call parameter says `unknown parameter "…"`.
 
 ### Users, keys, OAuth (operator lane)
 | Method & path | Notes |

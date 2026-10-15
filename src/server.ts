@@ -19,6 +19,7 @@ import { bearerToken, resolveCredential } from "./core/credential.js";
 import { createHttpDriver } from "./core/drivers/http.js";
 import { createMailDriver } from "./core/drivers/mail/index.js";
 import { DriverRegistry } from "./core/drivers/registry.js";
+import { createScheduler, type Scheduler } from "./core/scheduler.js";
 import type { Db } from "./db/index.js";
 import { createLogger, type YapLogger } from "./logger.js";
 import { registerMcpTools } from "./mcp/tools.js";
@@ -47,6 +48,10 @@ export interface YapServer {
   /** The installed drivers, threaded to both surfaces alongside db/config/blob. */
   registry: DriverRegistry;
   logger: YapLogger;
+  /** The service scheduler. Built with the server so schedule edits can
+   *  reload it; armed only when someone calls `start` (serve.ts does, unless
+   *  YAP_SCHEDULER=off). */
+  scheduler: Scheduler;
   /** Package version, surfaced in the MCP handshake and whoami. */
   version: string;
   start(): Promise<void>;
@@ -136,7 +141,7 @@ Engage Yap whenever a request involves its spaces, stored items, files, or servi
 4. get_tools(names?) — when full second-tier descriptions or parameter specs are needed, expand the manifest by name; omit names to fetch the manifest directly.
 5. call(space_id, calls) — execute second-tier tools against bundles (or the space itself).
 
-A service is a named capability the bundle can run; you supply its declared parameters and never see its configuration. Running is async: run_service starts a run and get_run polls it until status is succeeded or failed (list_runs is the log). Services are authored over REST only.
+A service is a named capability the bundle can run; you supply its declared parameters and never see its configuration. Running is async: run_service starts a run and get_run polls it until status is succeeded or failed (list_runs is the log). A schedule runs a service on a cron, as the user who created it (create_schedule, update_schedule, delete_schedule, list_schedules; needs run_services only). Services are authored over REST only.
 
 If several spaces or bundles could match the user's intent, ask the user rather than guessing. Run the discovery chain silently — do not narrate loading calls.
 
@@ -157,6 +162,7 @@ Stored references are opaque — resolve before showing them to a user: file://{
     blob,
     registry,
     logger,
+    scheduler: createScheduler({ db, blob, config, registry, logger }),
     version: VERSION,
     start: async () => {
       // fastmcp on loopback; the edge proxy owns the public port.
@@ -179,6 +185,7 @@ Stored references are opaque — resolve before showing them to a user: file://{
       });
     },
     stop: async () => {
+      server.scheduler.stop();
       if (edge) {
         await new Promise<void>((resolve) => edge!.close(() => resolve()));
         edge = undefined;

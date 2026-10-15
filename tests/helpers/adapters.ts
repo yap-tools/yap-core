@@ -27,6 +27,7 @@ const ALL_TABLES = [
   "properties",
   "item_types",
   "runs",
+  "schedules",
   "services",
   "files",
   "user_docs",
