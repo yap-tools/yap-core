@@ -116,7 +116,7 @@ export function createDriverRegistry(config: YapConfig): DriverRegistry {
   const registry = new DriverRegistry();
   // The built-in http driver is what every legacy hook was.
   registry.register(createHttpDriver(config));
-  // The built-in mail driver: one IMAP/SMTP account, seven actions the service allowlists.
+  // The built-in mail driver: one IMAP/SMTP account, eight actions the service allowlists.
   registry.register(createMailDriver());
   return registry;
 }

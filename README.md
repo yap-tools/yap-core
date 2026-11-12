@@ -447,9 +447,12 @@ be the instance's externally reachable origin (https except on loopback).
   formats.
 
   The built-in **`mail` driver** gives an agent one operator-configured
-  IMAP/SMTP account through seven actions — `folders`, `search`, `read`,
-  `mark`, `send`, `draft`, `delete_draft` — and the service's `actions` allowlist decides
-  which of them a given agent gets. Its config is the account: `user` plus
+  IMAP/SMTP account through eight actions — `folders`, `search`, `read`,
+  `attachment`, `mark`, `send`, `draft`, `delete_draft` — and the service's
+  `actions` allowlist decides which of them a given agent gets. `attachment`
+  is the one that writes into Yap: it downloads one attachment `read` listed
+  (by its `part`), up to 25 MiB decoded, and stores it as a finalized file
+  in the service's bundle, where it stays. Its config is the account: `user` plus
   either `pass` (an app password) or an `oauth2` block (XOAUTH2 for Google
   Workspace / Microsoft 365), `from` (and an optional display `name`), and
   one or both of `imap: {host, port, security?}` / `smtp: {host, port,

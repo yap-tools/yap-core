@@ -59,6 +59,7 @@ import {
   type ParsedResponse,
   type Token,
 } from "./imap-parse.js";
+import { MAX_LITERAL_BYTES } from "./net.js";
 import type { LineConnection, MailCtx, ProtocolError, openLine as openLineImpl } from "./net.js";
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -67,6 +68,9 @@ const FETCH_BATCH = 100;
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 export type { MailCtx } from "./net.js";
+
+/** One partial fetch of `fetchSectionWhole`: well under the literal cap. */
+const SECTION_WINDOW_BYTES = Math.min(4 * 1024 * 1024, MAX_LITERAL_BYTES - 64 * 1024);
 
 /** The `ProtocolError` class as the client needs it: constructible with
  * `{step, reply, ...extra}` and carrying those as own properties. */
@@ -538,19 +542,51 @@ export class ImapClient {
   }
 
   /**
-   * Fetch one section (e.g. "1", "2.1", "TEXT", "HEADER") capped at maxBytes.
-   * `truncated` is true when the server returned exactly maxBytes and the
-   * part is known (or assumed) to be larger; pass `size` from the structure
-   * to make that exact.
+   * Fetch one section (e.g. "1", "2.1", "TEXT", "HEADER"): at most maxBytes,
+   * starting `offset` bytes in (default 0). `truncated` is true when the
+   * server returned exactly maxBytes and the section is known (or assumed) to
+   * go on past them; pass `size` from the structure to make that exact.
+   * maxBytes must stay under net.ts's literal cap; for a section that may be
+   * bigger, use `fetchSectionWhole`.
    */
-  async fetchSection(uid: number, section: string, { maxBytes, size }: { maxBytes: number; size?: number | null }): Promise<{ buffer: Buffer; truncated: boolean }> {
+  async fetchSection(
+    uid: number,
+    section: string,
+    { maxBytes, size, offset = 0 }: { maxBytes: number; size?: number | null; offset?: number },
+  ): Promise<{ buffer: Buffer; truncated: boolean }> {
     if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error("fetchSection: maxBytes is required");
-    const [row] = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<0.${maxBytes}>`);
+    if (!Number.isInteger(offset) || offset < 0) throw new Error("fetchSection: offset must be a non-negative integer");
+    const rows = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<${offset}.${maxBytes}>`);
+    // A server may slip in an unrelated FETCH for the same uid (a flag change
+    // from another client): the reply that answers us is the one carrying a
+    // section. Taking the other would read as an empty — finished — section.
+    const row = rows.find((r) => r.sections.length > 0) ?? rows[0];
     if (!row) throw this.fail(`message ${uid} not found`, "UID FETCH", undefined, { agent: "not_found" });
     const buffer = row.sections[0]?.data ?? Buffer.alloc(0);
-    const truncated = buffer.length >= maxBytes && (size == null || size > maxBytes);
-    this.ctx.log(`imap: section ${section} of ${uid}: ${buffer.length} bytes${truncated ? " (truncated)" : ""}`);
+    const truncated = buffer.length >= maxBytes && (size == null || size > offset + maxBytes);
+    this.ctx.log(`imap: section ${section} of ${uid} from ${offset}: ${buffer.length} bytes${truncated ? " (truncated)" : ""}`);
     return { buffer, truncated };
+  }
+
+  /**
+   * Fetch a whole section of any size, in consecutive partial windows so no
+   * one literal reaches net.ts's cap. A window that comes back short is the
+   * end of the section (a window past the end comes back empty, so the loop
+   * always ends). Reading stops once more than `limit` bytes have arrived:
+   * `exceeded` then says the section is bigger than the caller will take,
+   * and `buffer` is not the whole of it.
+   */
+  async fetchSectionWhole(uid: number, section: string, { limit }: { limit: number }): Promise<{ buffer: Buffer; exceeded: boolean }> {
+    const window = SECTION_WINDOW_BYTES;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const { buffer } = await this.fetchSection(uid, section, { offset: total, maxBytes: window });
+      chunks.push(buffer);
+      total += buffer.length;
+      if (total > limit) return { buffer: Buffer.concat(chunks, total), exceeded: true };
+      if (buffer.length < window) return { buffer: Buffer.concat(chunks, total), exceeded: false };
+    }
   }
 
   async store(uid: number, op: "+FLAGS" | "-FLAGS", flags: string[]): Promise<string[]> {

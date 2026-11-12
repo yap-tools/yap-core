@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { normalizeMailConfig } from "../../src/core/drivers/mail/config.js";
 import { createMailDriver } from "../../src/core/drivers/mail/index.js";
+import type { BundleWriter } from "../../src/core/drivers/types.js";
 import { YapError } from "../../src/core/errors.js";
 import { createCtx, createFakeEgress } from "../helpers/mail/egress.js";
 import { simpleMessage, startImapMock, utf7Encode, type ImapMock, type ImapMockOptions, type MockMailboxSeed } from "../helpers/mail/imap-mock.js";
@@ -100,7 +101,13 @@ describe("definition", () => {
     expect(driver.name).toBe("mail");
     expect(driver.api).toBe(1);
     expect(driver.egress).toBe(true);
-    expect(Object.keys(driver.actions).sort()).toEqual(["delete_draft", "draft", "folders", "mark", "read", "search", "send"]);
+    expect(Object.keys(driver.actions).sort()).toEqual(["attachment", "delete_draft", "draft", "folders", "mark", "read", "search", "send"]);
+    expect(driver.writes).toEqual({ files: true });
+    expect(driver.actions["attachment"]!.params!.map((p) => [p.name, p.required])).toEqual([
+      ["uid", true],
+      ["folder", false],
+      ["part", true],
+    ]);
     for (const [name, spec] of Object.entries(driver.actions)) {
       expect(spec.description, name).toBeTypeOf("string");
       expect(Array.isArray(spec.params), name).toBe(true);
@@ -358,7 +365,7 @@ describe("read", () => {
     expect(result.cc).toBe("carol@example.com");
     expect(result.in_reply_to).toBe("<orig@example.com>");
     expect(result.references).toBe("<root@example.com> <orig@example.com>");
-    expect(result.attachments).toEqual([{ filename: "report.pdf", content_type: "application/pdf", size: expect.any(Number) }]);
+    expect(result.attachments).toEqual([{ part: "2", filename: "report.pdf", content_type: "application/pdf", size: expect.any(Number) }]);
     expect(imap.commands.some((c) => /BODY\.PEEK\[1\.1\]/.test(c))).toBe(true);
   });
   it("reports a missing uid as not found and rejects bad uids", async () => {
@@ -366,6 +373,273 @@ describe("read", () => {
     await expect(run(config({ imap }), "read", { uid: "99" })).rejects.toThrow(/not found/);
     await expect(run(config({ imap }), "read", { uid: "abc" })).rejects.toThrow(/uid must be a positive integer/);
     await expect(run(config({ imap }), "read", {})).rejects.toThrow(/uid/);
+  });
+});
+
+type StoredFile = { name: string; mimeType?: string; bytes: Buffer };
+
+/** A bundle writer that keeps what it was handed instead of storing it. */
+function fakeWriter(): { writer: BundleWriter; files: StoredFile[] } {
+  const files: StoredFile[] = [];
+  const writer: BundleWriter = {
+    createItems: async () => {
+      throw new Error("fake writer: no item writes");
+    },
+    updateItems: async () => {
+      throw new Error("fake writer: no item writes");
+    },
+    writeFile: async (input) => {
+      const bytes = Buffer.from(input.bytes ?? "");
+      files.push({ name: input.name, mimeType: input.mimeType, bytes });
+      const id = `file-${files.length}`;
+      return { id, ref: `file://${id}`, name: input.name, mimeType: input.mimeType ?? "", size: bytes.length, status: "finalized", createdAt: "2026-11-12T00:00:00.000Z" };
+    },
+  };
+  return { writer, files };
+}
+
+/** One message: a text body, then each given part, all inside multipart/mixed. */
+function withParts(...parts: string[][]): string {
+  return [
+    "From: Alice <alice@example.com>",
+    "To: troels@example.com",
+    "Subject: Files",
+    "Date: Mon, 3 Mar 2025 10:00:00 +0000",
+    "Message-ID: <files@example.com>",
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/mixed; boundary="B1"',
+    "",
+    "--B1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "see attached",
+    ...parts.flatMap((p) => ["--B1", ...p]),
+    "--B1--",
+    "",
+  ].join("\r\n");
+}
+
+describe("attachment", () => {
+  const PDF = Buffer.from("%PDF-1.4\n\u0000ÿ binary-ish bytes \u0001\u0002", "latin1");
+  const pdfPart = (disposition = 'attachment; filename="report.pdf"'): string[] => [
+    'Content-Type: application/pdf; name="report.pdf"',
+    "Content-Transfer-Encoding: base64",
+    `Content-Disposition: ${disposition}`,
+    "",
+    PDF.toString("base64"),
+  ];
+
+  async function attach(raw: string, params: Record<string, string>, { bodystructure, writeFile }: { bodystructure?: string; writeFile?: BundleWriter["writeFile"] } = {}) {
+    const imap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw, bodystructure }] }] });
+    const { writer: fake, files } = fakeWriter();
+    const writer = writeFile ? { ...fake, writeFile } : fake;
+    const ctx = createCtx(createFakeEgress());
+    ctx.config = config({ imap });
+    ctx.action = "attachment";
+    ctx.params = { uid: "5", ...params };
+    ctx.writer = writer;
+    let result: Result;
+    let error: Error | undefined;
+    try {
+      result = await driver.run(ctx);
+    } catch (e) {
+      error = e as Error;
+    }
+    // No action of this one ever writes to the mailbox.
+    expect(imap.commands.filter((c) => /UID STORE|\bSTORE\b|APPEND|EXPUNGE/.test(c))).toEqual([]);
+    expect(imap.commands.filter((c) => /BODY\[/.test(c) && !/BODY\.PEEK\[/.test(c))).toEqual([]);
+    // Any folder it opened, it opened read-only.
+    expect(imap.commands.filter((c) => /^A\d+ SELECT/.test(c))).toEqual([]);
+    expect(imap.mailbox("INBOX")!.messages.find((m) => m.uid === 5)!.flags).toEqual([]);
+    return { result, error, files, imap };
+  }
+
+  it("downloads a base64 attachment into the bundle, byte for byte", async () => {
+    const { result, error, files, imap } = await attach(withParts(pdfPart()), { part: "2" });
+    expect(error).toBeUndefined();
+    expect(imap.commands.some((c) => /^A\d+ EXAMINE/.test(c))).toBe(true);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.name).toBe("report.pdf");
+    expect(files[0]!.mimeType).toBe("application/pdf");
+    expect(files[0]!.bytes.equals(PDF)).toBe(true);
+    expect(result).toEqual({
+      uid: 5,
+      folder: "INBOX",
+      part: "2",
+      filename: "report.pdf",
+      content_type: "application/pdf",
+      size: PDF.length,
+      file: expect.objectContaining({ id: "file-1", ref: "file://file-1", name: "report.pdf", size: PDF.length }),
+    });
+  });
+
+  it("decodes a quoted-printable attachment", async () => {
+    const part = ['Content-Type: text/csv; charset=utf-8; name="data.csv"', "Content-Transfer-Encoding: quoted-printable", 'Content-Disposition: attachment; filename="data.csv"', "", "navn,by", "Bl=C3=A5b=C3=A6r,K=C3=B8ben=", "havn=  ", ",x"];
+    const { result, files } = await attach(withParts(part), { part: "2" });
+    expect(files[0]!.bytes.toString("utf8")).toBe("navn,by\r\nBlåbær,København,x");
+    expect(result.content_type).toBe("text/csv");
+    expect(files[0]!.mimeType).toBe("text/csv");
+  });
+
+  it("downloads a nested part and lists its part id on read", async () => {
+    const raw = [
+      "From: Alice <alice@example.com>",
+      "To: troels@example.com",
+      "Subject: Nested",
+      "MIME-Version: 1.0",
+      'Content-Type: multipart/mixed; boundary="B1"',
+      "",
+      "--B1",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "body",
+      "--B1",
+      'Content-Type: multipart/related; boundary="B2"',
+      "",
+      "--B2",
+      'Content-Type: image/png; name="logo.png"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from("PNGDATA").toString("base64"),
+      "--B2--",
+      "--B1--",
+      "",
+    ].join("\r\n");
+    const readImap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw }] }] });
+    const listed = (await run(config({ imap: readImap }), "read", { uid: "5" })).result;
+    expect(listed.attachments).toEqual([{ part: "2.1", filename: "logo.png", content_type: "image/png", size: expect.any(Number) }]);
+    const { result, files, imap } = await attach(raw, { part: "2.1" });
+    expect(files[0]!.bytes.toString()).toBe("PNGDATA");
+    expect(result).toMatchObject({ part: "2.1", filename: "logo.png", content_type: "image/png", size: 7 });
+    expect(imap.commands.some((c) => /BODY\.PEEK\[2\.1\]<0\.\d+>/.test(c))).toBe(true);
+  });
+
+  it("strips path separators and control characters from the filename but keeps the extension", async () => {
+    const { result, files } = await attach(withParts(pdfPart('attachment; filename="../../etc/pass\twd\\report.pdf"')), { part: "2" });
+    expect(files[0]!.name).not.toMatch(/[/\\\u0000-\u001f]/);
+    expect(files[0]!.name).toMatch(/report\.pdf$/);
+    expect(result.filename).toBe(files[0]!.name);
+  });
+
+  it("names a nameless attachment after the message, the part, and its type", async () => {
+    const part = ["Content-Type: application/pdf", "Content-Transfer-Encoding: base64", "", PDF.toString("base64")];
+    const { result, files } = await attach(withParts(part), { part: "2" });
+    expect(files[0]!.name).toBe("attachment-5-2.pdf");
+    expect(result.filename).toBe("attachment-5-2.pdf");
+  });
+
+  it("refuses the message's text body", async () => {
+    const { error, files } = await attach(withParts(pdfPart()), { part: "1" });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/part "1"/);
+    expect(error!.message).toMatch(/not an attachment/);
+    expect(files).toEqual([]);
+  });
+
+  it("refuses a part that does not exist, and a section that is not a part number", async () => {
+    for (const part of ["7", "2.9", "HEADER", "TEXT", "1]<0.1> UID", ""]) {
+      const { error, files, imap } = await attach(withParts(pdfPart()), { part });
+      expect(agentSafe(error!), part).toEqual({ agentSafe: true, code: "invalid_request" });
+      expect(files, part).toEqual([]);
+      // Nothing but the structure was fetched: the agent cannot name a section.
+      expect(imap.commands.filter((c) => /BODY\.PEEK\[/.test(c)), part).toEqual([]);
+    }
+  });
+
+  it("refuses an attachment over the cap without fetching or writing it", async () => {
+    const huge = 40 * 1024 * 1024;
+    const bodystructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "ZIP" ("NAME" "big.zip") NIL NIL "BASE64" ${huge} NIL ("ATTACHMENT" ("FILENAME" "big.zip")) NIL NIL) "MIXED" ("BOUNDARY" "B1") NIL NIL NIL)`;
+    const { error, files, imap } = await attach(withParts(pdfPart()), { part: "2" }, { bodystructure });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/over the 25 MiB limit/);
+    expect(files).toEqual([]);
+    expect(imap.commands.filter((c) => /BODY\.PEEK\[2\]/.test(c))).toEqual([]);
+  });
+
+  it("refuses an attachment that only turns out over the cap once decoded, writing nothing", async () => {
+    // binary: the declared size passes the up-front check (no expansion to
+    // allow for), so this is the post-decode check doing the refusing.
+    const part = ['Content-Type: application/octet-stream; name="big.bin"', "Content-Transfer-Encoding: binary", "", "a".repeat(25 * 1024 * 1024 + 1)];
+    const { error, files } = await attach(withParts(part), { part: "2" });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/over the 25 MiB limit \(25\.0 MiB\)/);
+    expect(files).toEqual([]);
+  }, 60_000);
+
+  it("refuses an attachment whose bytes run past what its declared size allowed, writing nothing", async () => {
+    // The structure claims 10 bytes; the server sends far more than any
+    // 25 MiB attachment could take. Reading stops at the ceiling.
+    const bodystructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "OCTET-STREAM" ("NAME" "big.bin") NIL NIL "BINARY" 10 NIL NIL NIL NIL) "MIXED" ("BOUNDARY" "B1") NIL NIL NIL)`;
+    const part = ['Content-Type: application/octet-stream; name="big.bin"', "Content-Transfer-Encoding: binary", "", "a".repeat(26 * 1024 * 1024)];
+    const { error, files } = await attach(withParts(part), { part: "2" }, { bodystructure });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/over the 25 MiB limit \(more than/);
+    expect(files).toEqual([]);
+  }, 60_000);
+
+  it("neutralises bidi overrides and C1 controls, and shortens a long name keeping its extension", async () => {
+    const { files } = await attach(withParts(pdfPart('attachment; filename="invoice\u202efdp.exe\u0085.pdf"')), { part: "2" });
+    expect(files[0]!.name).toBe("invoice_fdp.exe_.pdf");
+    const long = "\u{1F600}".repeat(200) + ".pdf";
+    const { files: longFiles } = await attach(withParts(pdfPart(`attachment; filename="${long}"`)), { part: "2" });
+    const name = longFiles[0]!.name;
+    expect(name.length).toBeLessThanOrEqual(255);
+    expect(name.endsWith(".pdf")).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(name)).toBe(false);
+  });
+
+  it("refuses an encoding it cannot decode", async () => {
+    const part = ['Content-Type: application/octet-stream; name="x.bin"', "Content-Transfer-Encoding: x-uuencode", "", "begin 644 x.bin", "end"];
+    const { error, files } = await attach(withParts(part), { part: "2" });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/x-uuencode/);
+    expect(files).toEqual([]);
+  });
+
+  it("reads a part larger than one fetch window in consecutive partial fetches", async () => {
+    const big = Buffer.alloc(4 * 1024 * 1024 + 12345);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 7919) & 0xff;
+    const wrapped = big.toString("base64").replace(/.{76}/g, "$&\r\n");
+    const part = ['Content-Type: application/zip; name="big.zip"', "Content-Transfer-Encoding: base64", "", wrapped];
+    const { result, files, imap } = await attach(withParts(part), { part: "2" });
+    expect(files[0]!.bytes.equals(big)).toBe(true);
+    expect(result.size).toBe(big.length);
+    const windows = imap.commands.filter((c) => /BODY\.PEEK\[2\]/.test(c)).map((c) => /<(\d+)\.(\d+)>/.exec(c)!.slice(1).map(Number));
+    expect(windows.length).toBeGreaterThan(1);
+    windows.forEach(([offset, count], i) => {
+      expect(count).toBe(4 * 1024 * 1024);
+      expect(offset).toBe(i * 4 * 1024 * 1024);
+    });
+  });
+
+  it("refuses a part the server returns short of its BODYSTRUCTURE size", async () => {
+    const encoded = PDF.toString("base64");
+    const bodystructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "PDF" ("NAME" "report.pdf") NIL NIL "BASE64" ${encoded.length + 500} NIL ("ATTACHMENT" ("FILENAME" "report.pdf")) NIL NIL) "MIXED" ("BOUNDARY" "B1") NIL NIL NIL)`;
+    const { error, files } = await attach(withParts(pdfPart()), { part: "2" }, { bodystructure });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/incomplete/);
+    expect(files).toEqual([]);
+  });
+
+  it("passes the bundle's own refusal (e.g. a MIME type the instance disallows) through to the agent", async () => {
+    const writeFile = async (): Promise<never> => {
+      throw new YapError("unsupported_media_type", "MIME type application/pdf is not allowed");
+    };
+    const { error } = await attach(withParts(pdfPart()), { part: "2" }, { writeFile });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "unsupported_media_type" });
+  });
+
+  it("collapses a run without a writer: that is the host's wiring, not the agent's doing", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes() });
+    const error = await failure(config({ imap }), "attachment", { uid: "1", part: "2" });
+    expect(agentSafe(error)).toEqual({ agentSafe: undefined, code: undefined });
+  });
+
+  it("requires uid and part", async () => {
+    const { error } = await attach(withParts(pdfPart()), { uid: "", part: "2" });
+    expect(error!.message).toMatch(/uid is required/);
+    const { error: noPart } = await attach(withParts(pdfPart()), {});
+    expect(noPart!.message).toMatch(/part is required/);
   });
 });
 
