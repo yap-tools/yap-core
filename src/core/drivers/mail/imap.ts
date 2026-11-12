@@ -556,7 +556,11 @@ export class ImapClient {
   ): Promise<{ buffer: Buffer; truncated: boolean }> {
     if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error("fetchSection: maxBytes is required");
     if (!Number.isInteger(offset) || offset < 0) throw new Error("fetchSection: offset must be a non-negative integer");
-    const [row] = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<${offset}.${maxBytes}>`);
+    const rows = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<${offset}.${maxBytes}>`);
+    // A server may slip in an unrelated FETCH for the same uid (a flag change
+    // from another client): the reply that answers us is the one carrying a
+    // section. Taking the other would read as an empty — finished — section.
+    const row = rows.find((r) => r.sections.length > 0) ?? rows[0];
     if (!row) throw this.fail(`message ${uid} not found`, "UID FETCH", undefined, { agent: "not_found" });
     const buffer = row.sections[0]?.data ?? Buffer.alloc(0);
     const truncated = buffer.length >= maxBytes && (size == null || size > offset + maxBytes);

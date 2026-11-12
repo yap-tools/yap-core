@@ -385,6 +385,20 @@ describe("imapConnect: mailbox commands", () => {
     await client.logout();
   });
 
+  it("fetches a window from an offset, and a whole section up to a limit", async () => {
+    const server = await mock({ mailboxes: seeded() });
+    const { client } = await connect(server);
+    await client.select("INBOX");
+    const tail = await client.fetchSection(5, "1", { offset: 10, maxBytes: 4 });
+    expect(tail.buffer.toString()).toBe("abcd");
+    expect(server.commands).toContainEqual(expect.stringMatching(/UID BODY.PEEK\[1\]<10.4>\)$/));
+    const whole = await client.fetchSectionWhole(5, "1", { limit: 1000 });
+    expect(whole).toEqual({ buffer: Buffer.from("0123456789abcdef\r\n"), exceeded: false });
+    const over = await client.fetchSectionWhole(5, "1", { limit: 5 });
+    expect(over.exceeded).toBe(true);
+    await client.logout();
+  });
+
   it("stores flags and returns the resulting flag list", async () => {
     const server = await mock({ mailboxes: seeded() });
     const { client } = await connect(server);

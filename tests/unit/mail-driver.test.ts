@@ -556,6 +556,38 @@ describe("attachment", () => {
     expect(imap.commands.filter((c) => /BODY\.PEEK\[2\]/.test(c))).toEqual([]);
   });
 
+  it("refuses an attachment that only turns out over the cap once decoded, writing nothing", async () => {
+    // binary: the declared size passes the up-front check (no expansion to
+    // allow for), so this is the post-decode check doing the refusing.
+    const part = ['Content-Type: application/octet-stream; name="big.bin"', "Content-Transfer-Encoding: binary", "", "a".repeat(25 * 1024 * 1024 + 1)];
+    const { error, files } = await attach(withParts(part), { part: "2" });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/over the 25 MiB limit \(25\.0 MiB\)/);
+    expect(files).toEqual([]);
+  }, 60_000);
+
+  it("refuses an attachment whose bytes run past what its declared size allowed, writing nothing", async () => {
+    // The structure claims 10 bytes; the server sends far more than any
+    // 25 MiB attachment could take. Reading stops at the ceiling.
+    const bodystructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "OCTET-STREAM" ("NAME" "big.bin") NIL NIL "BINARY" 10 NIL NIL NIL NIL) "MIXED" ("BOUNDARY" "B1") NIL NIL NIL)`;
+    const part = ['Content-Type: application/octet-stream; name="big.bin"', "Content-Transfer-Encoding: binary", "", "a".repeat(26 * 1024 * 1024)];
+    const { error, files } = await attach(withParts(part), { part: "2" }, { bodystructure });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect(error!.message).toMatch(/over the 25 MiB limit \(more than/);
+    expect(files).toEqual([]);
+  }, 60_000);
+
+  it("neutralises bidi overrides and C1 controls, and shortens a long name keeping its extension", async () => {
+    const { files } = await attach(withParts(pdfPart('attachment; filename="invoice\u202efdp.exe\u0085.pdf"')), { part: "2" });
+    expect(files[0]!.name).toBe("invoice_fdp.exe_.pdf");
+    const long = "\u{1F600}".repeat(200) + ".pdf";
+    const { files: longFiles } = await attach(withParts(pdfPart(`attachment; filename="${long}"`)), { part: "2" });
+    const name = longFiles[0]!.name;
+    expect(name.length).toBeLessThanOrEqual(255);
+    expect(name.endsWith(".pdf")).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(name)).toBe(false);
+  });
+
   it("refuses an encoding it cannot decode", async () => {
     const part = ['Content-Type: application/octet-stream; name="x.bin"', "Content-Transfer-Encoding: x-uuencode", "", "begin 644 x.bin", "end"];
     const { error, files } = await attach(withParts(part), { part: "2" });

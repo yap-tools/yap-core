@@ -717,23 +717,32 @@ async function fetchWhole(client: ImapClient, uid: number, part: BodyPart, ceili
 }
 
 /**
- * An attachment's own name, made safe to store: control characters and path
- * separators become "_", leading dots and spaces go (no hidden or
- * relative-looking names), and an over-long name is shortened from the
- * middle so its extension survives. Null when nothing usable is left.
+ * An attachment's own name, made safe to store: control characters (C0, DEL,
+ * C1), bidirectional overrides (which can make "x\u202Efdp.exe" display as
+ * "xexe.pdf"), and path separators become "_"; leading dots and spaces go (no
+ * hidden or relative-looking names); and an over-long name is shortened from
+ * the middle, by code point, so its extension survives. Null when nothing
+ * usable is left.
  */
 function safeFilename(raw: string | null): string | null {
   if (!raw) return null;
   let name = raw
-    .replace(/[\u0000-\u001f\u007f/\\]+/g, "_")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069/\\]+/g, "_")
     .trim()
     .replace(/^[.\s]+/, "");
   if (!name || /^_+$/.test(name)) return null;
+  // files.ts counts UTF-16 units against 255; cutting whole code points
+  // under that count never leaves half a surrogate pair behind.
   const MAX = 255;
   if (name.length > MAX) {
     const dot = name.lastIndexOf(".");
     const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : "";
-    name = name.slice(0, MAX - ext.length) + ext;
+    let base = "";
+    for (const ch of name.slice(0, dot > 0 && ext ? dot : name.length)) {
+      if (base.length + ch.length + ext.length > MAX) break;
+      base += ch;
+    }
+    name = base + ext;
   }
   return name;
 }
