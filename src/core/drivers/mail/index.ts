@@ -1,8 +1,8 @@
 /**
  * The built-in `mail` driver: read, search, send, draft, and delete drafts through one
- * operator-configured IMAP/SMTP account.
+ * operator-configured IMAP/SMTP account, and download attachments into the bundle.
  *
- * The driver declares seven actions and the *service* decides which of them an
+ * The driver declares eight actions and the *service* decides which of them an
  * agent gets (the service's `actions` allowlist). That is what turns one
  * driver into three very different capabilities:
  *
@@ -12,6 +12,13 @@
  *   proposes replies into the Drafts folder, and can remove stale drafts there;
  * - a **notifier** (`["send"]` with `pins: {to: "ops@…"}`) can send but cannot
  *   aim.
+ *
+ * `attachment` is the odd one out: it is the only action that leaves
+ * something in Yap rather than in the mailbox — one attachment, decoded, as a
+ * finalized file in the service's bundle (hence `writes: { files: true }`).
+ * It fetches only parts `read` lists as attachments, never a section the
+ * agent names, and refuses rather than store anything partial or over the
+ * cap.
  *
  * The last shape is why the three recipient parameters — `to`, `cc`, `bcc` —
  * are treated as one. Pins are per parameter *name*, so a pinned `to` alone
@@ -33,7 +40,8 @@
  * agent cannot refer to what it found.
  *
  * Numbers arrive as strings and are parsed and capped here (summaries ≤ 100,
- * text ≤ 100 000 chars, outbound bodies ≤ 1 MiB, search text ≤ 1000 chars);
+ * text ≤ 100 000 chars, outbound bodies ≤ 1 MiB, search text ≤ 1000 chars,
+ * attachments ≤ 25 MiB decoded);
  * dates are calendar days the way IMAP defines them; every header-bound
  * parameter goes through the injection check in message.ts before it reaches
  * a wire.
@@ -70,6 +78,10 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_SEARCH_TEXT_CHARS = 1000;
 const SUMMARY_FIELD_CHARS = 512;
 const TEXT_SECTION_BYTES = 512 * 1024;
+/** The largest attachment `attachment` stores, counted after transfer decoding. */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+/** One partial fetch of an attachment; well under net.ts's per-literal cap. */
+const ATTACHMENT_CHUNK_BYTES = 4 * 1024 * 1024;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -140,13 +152,23 @@ const actions: Record<string, DriverActionSpec> = {
     timeoutMs: 30_000,
   },
   read: {
-    description: "Read one message: headers, its text (HTML converted), and a list of attachments. Reading does not mark it seen.",
+    description:
+      "Read one message: headers, its text (HTML converted), and a list of attachments, each with the part id the attachment action takes. Reading does not mark it seen.",
     params: [
       uidParam,
       folderParam,
       { name: "max_chars", description: `Truncate the text after this many characters (default ${DEFAULT_MAX_CHARS}, max ${MAX_MAX_CHARS})`, required: false },
     ],
     timeoutMs: 60_000,
+  },
+  attachment: {
+    description: `Download one attachment of a message into this bundle as a file. Take \`part\` from the message's read. Does not mark the message seen. At most ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MiB.`,
+    params: [
+      uidParam,
+      folderParam,
+      { name: "part", description: 'The attachment\'s part id, as listed in read\'s attachments (e.g. "2" or "1.3")', required: true },
+    ],
+    timeoutMs: 120_000,
   },
   mark: {
     description: "Mark a message seen, unseen, flagged, or unflagged.",
@@ -174,8 +196,13 @@ export function createMailDriver(): DriverDefinition {
   return {
     name: "mail",
     api: DRIVER_API,
-    description: "Reads, searches, sends, drafts, and deletes drafts through an IMAP/SMTP account; the service picks which of those an agent may do.",
+    description:
+      "Reads, searches, sends, drafts, and deletes drafts through an IMAP/SMTP account, and downloads attachments into the bundle; the service picks which of those an agent may do.",
     egress: true,
+    // Only `attachment` uses the writer. The runner builds one per run of any
+    // action of a driver that declares writes (runs.ts), but it is a handle,
+    // not a permission: the other handlers never touch it.
+    writes: { files: true },
     configDoc,
 
     validateConfig(config: unknown): void {
@@ -299,11 +326,49 @@ const handlers: Record<string, Handler> = {
         text,
         truncated,
         attachments: attachmentParts(tree).map((part) => ({
+          part: part.part,
           filename: partFilename(part),
           content_type: `${part.type}/${part.subtype}`,
           size: part.size,
         })),
       };
+    });
+  },
+
+  async attachment(ctx, config, params) {
+    requireBlock(config, "imap", "attachment");
+    const folder = folderOf(params);
+    const uid = intParam(params, "uid", { required: true }) as number;
+    const wanted = requireParam(params, "part");
+    if (!ctx.writer) throw new Error("mail: the attachment action ran without a file writer");
+    const writer = ctx.writer;
+    return await withImap(ctx, config, async (client) => {
+      await client.select(folder, { readOnly: true });
+      const tree = await client.fetchStructure(uid);
+      // Only a part `read` would list is fetchable. That is the whole guard
+      // against an agent naming an arbitrary section (the body text,
+      // HEADER, a multipart container): its string never reaches the wire
+      // unless it equals the number of a listed attachment.
+      const part = attachmentParts(tree).find((p) => p.part === wanted);
+      if (!part) throw new AgentError(`part ${JSON.stringify(wanted)} is not an attachment of message ${uid}; take part from read's attachments`);
+      const label = `attachment part ${JSON.stringify(part.part)}`;
+      const encoding = part.encoding ?? "7bit";
+      const ceiling = encodedCeiling(encoding);
+      if (ceiling === null) throw new AgentError(`${label} uses the ${encoding} transfer encoding, which cannot be decoded`);
+      if (part.size != null && part.size > ceiling) {
+        throw new AgentError(`${label} is about ${mib(decodedEstimate(part.size, encoding))} MiB, over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
+      }
+      const encoded = await fetchWhole(client, uid, part, ceiling, label);
+      const bytes = transferDecode(encoded, encoding);
+      if (bytes.length > MAX_ATTACHMENT_BYTES) {
+        throw new AgentError(`${label} is ${mib(bytes.length)} MiB, over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
+      }
+      const contentType = `${part.type}/${part.subtype}`.toLowerCase();
+      const filename = safeFilename(partFilename(part)) ?? `attachment-${uid}-${part.part}.${extensionFor(contentType)}`;
+      // The writer's own refusals (the instance's MIME allowlist, its file
+      // size cap) are YapErrors and reach the agent as they are.
+      const file = await writer.writeFile({ name: filename, mimeType: contentType, bytes });
+      return { uid, folder, part: part.part, filename, content_type: contentType, size: bytes.length, file };
     });
   },
 
@@ -578,21 +643,145 @@ async function bestText(ctx: MailCtx, client: ImapClient, uid: number, tree: Bod
 }
 
 function decodeText(buffer: Buffer, encoding: string | null, charset: string | null | undefined): string {
-  let bytes = buffer;
-  const enc = encoding?.toLowerCase();
-  if (enc === "base64") bytes = Buffer.from(buffer.toString("latin1").replace(/[^A-Za-z0-9+/=]/g, ""), "base64");
-  else if (enc === "quoted-printable") bytes = decodeQuotedPrintable(buffer);
+  const bytes = transferDecode(buffer, encoding);
   const cs = (charset ?? "utf-8").toLowerCase();
   return iconv.encodingExists(cs) ? iconv.decode(bytes, cs) : bytes.toString("utf8");
 }
 
-/** RFC 2045 §6.7: soft line breaks vanish, =XX becomes a byte. */
+/** Undo the Content-Transfer-Encoding; anything but base64 and
+ * quoted-printable is taken as it came (7bit, 8bit, binary). */
+function transferDecode(buffer: Buffer, encoding: string | null): Buffer {
+  const enc = encoding?.toLowerCase();
+  if (enc === "base64") return Buffer.from(buffer.toString("latin1").replace(/[^A-Za-z0-9+/=]/g, ""), "base64");
+  if (enc === "quoted-printable") return decodeQuotedPrintable(buffer);
+  return buffer;
+}
+
+/** RFC 2045 §6.7: soft line breaks vanish (whitespace a transport added
+ * after the "=" included), =XX becomes a byte. */
 function decodeQuotedPrintable(buffer: Buffer): Buffer {
-  const text = buffer.toString("latin1").replace(/=\r?\n/g, "");
+  const text = buffer.toString("latin1").replace(/=[ \t]*\r?\n/g, "");
   return Buffer.from(
     text.replace(/=([0-9A-Fa-f]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))),
     "latin1",
   );
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+
+/**
+ * How many wire bytes an encoding may spend per decoded byte, worst case,
+ * line breaks included: base64 is 4/3 plus a CRLF per line (64-character
+ * lines are the costliest common wrapping, 66/48); quoted-printable is up to
+ * "=XX" per byte with a soft break every 75 characters (78/25); the identity
+ * encodings carry the bytes as they are, with room for CRLF normalisation.
+ * Unknown encodings have no entry and are refused rather than stored raw.
+ */
+const ENCODING_EXPANSION: Record<string, number> = {
+  base64: 1.4,
+  "quoted-printable": 3.2,
+  "7bit": 1.05,
+  "8bit": 1.05,
+  binary: 1,
+};
+
+/** The most encoded bytes an attachment under the cap could take, or null
+ * for an encoding the driver cannot decode. */
+function encodedCeiling(encoding: string): number | null {
+  const ratio = Object.hasOwn(ENCODING_EXPANSION, encoding) ? ENCODING_EXPANSION[encoding] : undefined;
+  return ratio === undefined ? null : Math.ceil(MAX_ATTACHMENT_BYTES * ratio) + 64 * 1024;
+}
+
+/** Roughly what an encoded size decodes to, for a refusal's message only. */
+function decodedEstimate(encodedSize: number, encoding: string): number {
+  if (encoding === "base64") return (encodedSize * 3) / 4;
+  if (encoding === "quoted-printable") return encodedSize / 3;
+  return encodedSize;
+}
+
+function mib(bytes: number): string {
+  const value = bytes / 1024 / 1024;
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+/**
+ * The whole encoded part, read in consecutive partial fetches so no single
+ * literal approaches net.ts's cap. A window that comes back short is the end
+ * of the part. Past `ceiling` the part cannot decode to something under the
+ * cap, so reading stops there; and a part that ends before the size its
+ * BODYSTRUCTURE gave is incomplete. Both are refused: a partial file is
+ * never stored.
+ */
+async function fetchWhole(client: ImapClient, uid: number, part: BodyPart, ceiling: number, label: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { buffer } = await client.fetchSection(uid, part.part, { offset: total, maxBytes: ATTACHMENT_CHUNK_BYTES });
+    chunks.push(buffer);
+    total += buffer.length;
+    if (total > ceiling) throw new AgentError(`${label} is larger than the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
+    if (buffer.length < ATTACHMENT_CHUNK_BYTES) break;
+  }
+  if (part.size != null && total < part.size) {
+    throw new AgentError(`${label} came back incomplete from the server (${total} of ${part.size} bytes); try again`);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * An attachment's own name, made safe to store: control characters and path
+ * separators become "_", leading dots and spaces go (no hidden or
+ * relative-looking names), and an over-long name is shortened from the
+ * middle so its extension survives. Null when nothing usable is left.
+ */
+function safeFilename(raw: string | null): string | null {
+  if (!raw) return null;
+  let name = raw
+    .replace(/[\u0000-\u001f\u007f/\\]+/g, "_")
+    .trim()
+    .replace(/^[.\s]+/, "");
+  if (!name || /^_+$/.test(name)) return null;
+  const MAX = 255;
+  if (name.length > MAX) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : "";
+    name = name.slice(0, MAX - ext.length) + ext;
+  }
+  return name;
+}
+
+const EXTENSIONS: Record<string, string> = {
+  "application/pdf": "pdf",
+  "application/zip": "zip",
+  "application/json": "json",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/vnd.ms-excel": "xls",
+  "application/octet-stream": "bin",
+  "audio/mpeg": "mp3",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/heic": "heic",
+  "image/svg+xml": "svg",
+  "message/rfc822": "eml",
+  "text/calendar": "ics",
+  "text/csv": "csv",
+  "text/html": "html",
+  "text/plain": "txt",
+  "video/mp4": "mp4",
+};
+
+/** A file extension for a nameless attachment: a known one, else a short
+ * plain subtype ("x-foo" is not one), else "bin". */
+function extensionFor(contentType: string): string {
+  if (Object.hasOwn(EXTENSIONS, contentType)) return EXTENSIONS[contentType]!;
+  const subtype = contentType.slice(contentType.indexOf("/") + 1);
+  return /^[a-z0-9]{1,5}$/.test(subtype) ? subtype : "bin";
 }
 
 // ---------------------------------------------------------------------------

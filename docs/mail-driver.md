@@ -1,6 +1,6 @@
 # The built-in `mail` driver
 
-Yap ships a `mail` driver alongside `http`. It lets an agent read, search, flag, send, draft, and delete drafts through one operator-configured IMAP/SMTP account — and the *service* decides which of those a given agent may do. A read-only mailbox, a triage assistant that can only propose replies, and a notifier that can send but not choose recipients are three services on the same driver.
+Yap ships a `mail` driver alongside `http`. It lets an agent read, search, flag, send, draft, and delete drafts through one operator-configured IMAP/SMTP account, and download an attachment into the service's bundle — and the *service* decides which of those a given agent may do. A read-only mailbox, a triage assistant that can only propose replies, and a notifier that can send but not choose recipients are three services on the same driver.
 
 The host, port, and credentials live encrypted in the service record and never reach the agent. Every connection goes through the same guarded egress door the `http` driver uses, so it is subject to the server's SSRF policy (`YAP_HOOK_ALLOW_HOSTS` to allowlist a private mail server); TLS is verified; credentials are never sent in the clear unless an operator explicitly says so for a lab server.
 
@@ -29,7 +29,7 @@ Nothing to install: a service with `"driver": "mail"` works on every instance. (
 | `pass` | Password or app password. Exactly one of `pass` / `oauth2`. |
 | `oauth2` | `{ client_id, client_secret, refresh_token, token_url }` — the driver exchanges the refresh token for an access token (through the egress guard, cached until shortly before expiry) and authenticates with XOAUTH2 on both protocols. `token_url` must be https. |
 | `from` | The address mail is sent as. Required. `name` is the optional display name. |
-| `imap` | `{ host, port, security? }`. Needed by `folders`, `search`, `read`, `mark`, `draft`, `delete_draft`, by replies, and by `save_sent`. |
+| `imap` | `{ host, port, security? }`. Needed by `folders`, `search`, `read`, `attachment`, `mark`, `draft`, `delete_draft`, by replies, and by `save_sent`. |
 | `smtp` | `{ host, port, security? }`. Needed by `send`. At least one of `imap` / `smtp` is required. |
 | `security` | `"tls"` (implicit TLS from the first byte), `"starttls"` (upgrade after the greeting; refused if the server does not offer it), or `"none"`. Defaults by port: 993 and 465 → `tls`, 143 and 587 → `starttls`, anything else → `tls`. `none` is never a default. |
 | `allow_plaintext_auth` | Send credentials over a `security: "none"` connection. Lab servers only. |
@@ -57,7 +57,8 @@ Every parameter is a string; the driver parses numbers and dates.
 |---|---|---|---|
 | `folders` | imap | — | `{ folders: [{ name, special_use?, messages? }] }` — `special_use` is one of `drafts`, `sent`, `trash`, `junk`, `archive`, `all`, `flagged`, `important`; `messages` is absent for folders that cannot be selected. |
 | `search` | imap | `folder?` (INBOX), `query?` (anywhere in the message), `from?`, `to?`, `subject?`, `since?` / `before?` (`YYYY-MM-DD`, calendar days as IMAP defines them), `unseen?` (`"true"`), `limit?` (default 20, max 100) | `{ folder, uidvalidity, total, messages: [{ uid, date, from, to, subject, flags, size }] }` newest first. `total` is the number of matches; `messages` holds at most `limit`. `from`/`to`/`subject` are cut at 512 characters. |
-| `read` | imap | `uid`, `folder?`, `max_chars?` (default 20 000, max 100 000) | `{ uid, folder, uidvalidity, message_id, in_reply_to, references, date, from, to, cc, subject, text, truncated, attachments: [{ filename, content_type, size }] }`. The best text part is fetched (text/plain, else text/html converted to text), capped at 512 KiB on the wire and `max_chars` in the result. Attachments are listed, never downloaded. Reading uses `BODY.PEEK`, so it does not mark the message seen. |
+| `read` | imap | `uid`, `folder?`, `max_chars?` (default 20 000, max 100 000) | `{ uid, folder, uidvalidity, message_id, in_reply_to, references, date, from, to, cc, subject, text, truncated, attachments: [{ part, filename, content_type, size }] }`. The best text part is fetched (text/plain, else text/html converted to text), capped at 512 KiB on the wire and `max_chars` in the result. Attachments are listed, not downloaded: `part` is the attachment's IMAP section number (`"2"`, `"1.3"`), which is what `attachment` takes; `filename` is `null` when the sender gave none, and `size` is the encoded size on the server. Reading uses `BODY.PEEK`, so it does not mark the message seen. |
+| `attachment` | imap | `uid`, `folder?`, `part` (from `read`'s `attachments`) | `{ uid, folder, part, filename, content_type, size, file }`. Downloads that one attachment, transfer-decoded, and stores it as a finalized file in the service's bundle; `file` is the stored file (`id`, `ref`, `name`, `mimeType`, `size`, …), ready for `show_file` or to put on an item. `size` is the decoded byte count. Uses `BODY.PEEK`, so the message is not marked seen. See [Downloading attachments](#downloading-attachments). |
 | `mark` | imap | `uid`, `flag` ∈ `seen` / `unseen` / `flagged` / `unflagged`, `folder?` | `{ uid, flags }` — the message's flags after the change. |
 | `send` | smtp (+imap for `reply_to_uid` and `save_sent`) | `to` (comma-separated; required unless replying), `cc?`, `bcc?` (comma-separated; at most 50 recipients in all), `subject` (required unless replying), `body`, `reply_to_uid?`, `folder?` | `{ accepted: true, message_id }`. `bcc` recipients are on the envelope only, never in a header. If any recipient is refused, nothing is sent. |
 | `draft` | imap | same as `send` | `{ folder, uid }` — `uid` is `null` when the server lacks UIDPLUS. Nothing is delivered; `bcc` is written as a `Bcc:` header, which is how a mail client carries it until the human sends. |
@@ -66,6 +67,28 @@ Every parameter is a string; the driver parses numbers and dates.
 `reply_to_uid` fetches the original's `Message-ID`, `References`, `Subject`, `Reply-To` and `From` and sets `In-Reply-To` and `References` so the reply threads in every client; when `subject` is omitted it becomes `Re: <original subject>` (not doubled if the original already starts with `Re:`), and when `to` is omitted the reply goes to the original's `Reply-To`, else its `From`. A reply never adds `cc` on its own — reply-all is an explicit choice, made by supplying `cc`.
 
 Non-ASCII search text is sent as a UTF-8 literal. IMAP allows one such literal per command, so only one of `from`/`to`/`subject`/`query` may contain non-ASCII text (or quotes) in a single search; a server that cannot search UTF-8 is reported as such.
+
+## Downloading attachments
+
+`attachment` is the one action that leaves something behind in Yap: every other read only returns a result, while this one writes a file into the bundle the service belongs to, where it stays until someone deletes it. Each call stores a new file, so downloading the same attachment twice gives two files. The driver declares `writes: { files: true }` for it; the service's `actions` allowlist still decides whether an agent gets the action at all, so adding it to the driver exposes nothing until an operator lists `attachment` on a service.
+
+The flow is `read`, then `attachment` with a `part` from the list:
+
+```
+run_service {"id": "inbox", "action": "read", "params": {"uid": "4711"}}
+  → … "attachments": [{ "part": "2", "filename": "invoice.pdf", "content_type": "application/pdf", "size": 48213 }]
+run_service {"id": "inbox", "action": "attachment", "params": {"uid": "4711", "part": "2"}}
+  → { "uid": 4711, "folder": "INBOX", "part": "2", "filename": "invoice.pdf", "content_type": "application/pdf", "size": 35189, "file": { "id": "…", "ref": "file://…", … } }
+```
+
+How a download works, and what it refuses:
+
+- **Only listed attachments.** The driver fetches the message's BODYSTRUCTURE and looks `part` up among the parts `read` lists as attachments. The message's text body, a multipart container, `HEADER`, `TEXT`, or a part that does not exist is refused with `part "…" is not an attachment of message <uid>`; the agent's string never reaches the wire unless it equals a listed attachment's number. A forwarded message (`message/rfc822`) is one attachment and downloads whole, as an `.eml`.
+- **Decoding.** base64 and quoted-printable are decoded; `7bit`, `8bit`, and `binary` are stored as they are. Any other transfer encoding (`x-uuencode`, say) is refused rather than stored undecoded.
+- **Size.** At most 25 MiB after decoding. A part whose BODYSTRUCTURE size already rules that out is refused before anything is fetched. Otherwise the part is read in 4 MiB partial fetches (`BODY.PEEK[part]<offset.count>`), so no single literal approaches the 25 MiB transport cap, and reading stops — refused — as soon as the encoded bytes pass what a 25 MiB attachment could take in that encoding. A part the server returns shorter than its BODYSTRUCTURE size is refused as incomplete. A refusal stores nothing: a partial file is never written. The instance's own file limits still apply on top (`maxFileSizeBytes`, the MIME allowlist); their refusals reach the agent as they are.
+- **Naming.** The stored file takes the attachment's own filename with control characters and `/` `\` replaced by `_`, leading dots removed, and names over 255 characters shortened with the extension kept. A nameless attachment is stored as `attachment-<uid>-<part>.<ext>`, the extension taken from the content type (`bin` when nothing fits). The file's MIME type is the part's `type/subtype`, lowercased.
+
+Not covered: downloading every attachment of a message at once, linking the stored file to an item (an agent can do that itself with the `file` it gets back), deduplicating repeat downloads, attaching files to drafts, and walking into the parts of a forwarded message.
 
 ## Three service shapes
 
@@ -116,6 +139,7 @@ Invoking:
 ```
 run_service {"id": "inbox", "action": "search", "params": {"unseen": "true", "limit": "10"}, "wait_ms": 15000}
 run_service {"id": "inbox", "action": "read", "params": {"uid": "4711"}}
+run_service {"id": "inbox", "action": "attachment", "params": {"uid": "4711", "part": "2"}}
 run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.com", "reply_to_uid": "4711", "body": "Thanks — on it."}}
 ```
 
@@ -130,7 +154,7 @@ run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.
 - Results never contain config, credentials, hosts, or pinned values. Folder names and message ids are returned — the agent needs them to refer to things.
 - `delete_draft` has no folder parameter and can only operate in the resolved Drafts folder; it requires UIDPLUS so deletion is UID-scoped.
 - `search` returns at most 100 summaries per call; `read` text is capped at `max_chars` (≤ 100 000) and the fetched section at 512 KiB, with `truncated: true` when either cap applied.
-- Attachments are listed with name, type, and size, never fetched.
+- `read` lists attachments with part, name, type, and size and never fetches them; `attachment` fetches one listed attachment, at most 25 MiB decoded, into the bundle (see [Downloading attachments](#downloading-attachments)).
 - Header injection is blocked: no CR/LF in any header-bound parameter (addresses, subject, display name). Bodies are normalised to CRLF and dot-stuffed on the wire so no line can impersonate the SMTP terminator.
 - Credentials travel only over TLS unless `allow_plaintext_auth` is set; a server advertising `LOGINDISABLED`, or one that does not offer STARTTLS when `starttls` was configured, fails the run rather than downgrading.
 - Every read races the run's abort signal; sockets are closed in `finally`; IMAP reply lines are bounded at 64 KiB and literals at 25 MiB.
@@ -143,7 +167,7 @@ run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.
 
 The runs layer shows an agent only the failures a driver raises as Yap's own errors; any other error collapses to a flat "run failed" on the run row, with the detail kept in the operator log. The mail driver raises an agent-visible error for what an agent can act on:
 
-- `invalid_request`: a missing, malformed, or too-large parameter (uid, limit, max_chars, dates, flag, addresses, subject, body, search text, a header-bound value with a line break, a recipient field supplied on a service whose recipients are pinned, two non-ASCII criteria in one search); an action the service's account cannot do (`send` without an `smtp` block, a reply or `save_sent` without `imap`); an unknown action; no Drafts/Sent folder found (the error names the config field that settles it); `delete_draft` on a server without UIDPLUS; a server that cannot search non-ASCII text; a replied-to message with no usable Reply-To or From; and a recipient the server refused — reported as exactly that, with neither the address (it may be pinned) nor the server's reply line, both of which go to the log.
+- `invalid_request`: a missing, malformed, or too-large parameter (uid, limit, max_chars, dates, flag, addresses, subject, body, search text, a header-bound value with a line break, a recipient field supplied on a service whose recipients are pinned, two non-ASCII criteria in one search, an `attachment` part that is not a listed attachment, an attachment over 25 MiB, one in a transfer encoding the driver cannot decode, or one the server returned incomplete); an action the service's account cannot do (`send` without an `smtp` block, a reply or `save_sent` without `imap`); an unknown action; no Drafts/Sent folder found (the error names the config field that settles it); `delete_draft` on a server without UIDPLUS; a server that cannot search non-ASCII text; a replied-to message with no usable Reply-To or From; and a recipient the server refused — reported as exactly that, with neither the address (it may be pinned) nor the server's reply line, both of which go to the log.
 - `not_found`: `folder "…" not found` (the name is the agent's own input) and `message <uid> not found` in the given folder.
 
 Connection, TLS, authentication, and other protocol failures — and a service config that no longer validates — are never shown: their messages can name the host or carry a server reply, so they reach the operator log only.

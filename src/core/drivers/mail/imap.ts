@@ -538,18 +538,28 @@ export class ImapClient {
   }
 
   /**
-   * Fetch one section (e.g. "1", "2.1", "TEXT", "HEADER") capped at maxBytes.
-   * `truncated` is true when the server returned exactly maxBytes and the
-   * part is known (or assumed) to be larger; pass `size` from the structure
-   * to make that exact.
+   * Fetch one section (e.g. "1", "2.1", "TEXT", "HEADER"): at most maxBytes,
+   * starting `offset` bytes in (default 0). `truncated` is true when the
+   * server returned exactly maxBytes and the section is known (or assumed) to
+   * go on past them; pass `size` from the structure to make that exact.
+   *
+   * A partial fetch is how a caller reads a section larger than one literal
+   * may be (net.ts caps a literal): ask for consecutive windows until one
+   * comes back short. The server answers a window past the end with an empty
+   * section, so the loop always ends.
    */
-  async fetchSection(uid: number, section: string, { maxBytes, size }: { maxBytes: number; size?: number | null }): Promise<{ buffer: Buffer; truncated: boolean }> {
+  async fetchSection(
+    uid: number,
+    section: string,
+    { maxBytes, size, offset = 0 }: { maxBytes: number; size?: number | null; offset?: number },
+  ): Promise<{ buffer: Buffer; truncated: boolean }> {
     if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error("fetchSection: maxBytes is required");
-    const [row] = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<0.${maxBytes}>`);
+    if (!Number.isInteger(offset) || offset < 0) throw new Error("fetchSection: offset must be a non-negative integer");
+    const [row] = await this.fetchRaw([uid], `UID BODY.PEEK[${section}]<${offset}.${maxBytes}>`);
     if (!row) throw this.fail(`message ${uid} not found`, "UID FETCH", undefined, { agent: "not_found" });
     const buffer = row.sections[0]?.data ?? Buffer.alloc(0);
-    const truncated = buffer.length >= maxBytes && (size == null || size > maxBytes);
-    this.ctx.log(`imap: section ${section} of ${uid}: ${buffer.length} bytes${truncated ? " (truncated)" : ""}`);
+    const truncated = buffer.length >= maxBytes && (size == null || size > offset + maxBytes);
+    this.ctx.log(`imap: section ${section} of ${uid} from ${offset}: ${buffer.length} bytes${truncated ? " (truncated)" : ""}`);
     return { buffer, truncated };
   }
 
