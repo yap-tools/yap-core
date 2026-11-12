@@ -667,15 +667,18 @@ function decodeQuotedPrintable(buffer: Buffer): Buffer {
 // Attachments
 
 /**
- * How many wire bytes an encoding may spend per decoded byte, worst case,
- * line breaks included: base64 is 4/3 plus a CRLF per line (64-character
- * lines are the costliest common wrapping, 66/48); quoted-printable is up to
+ * How many wire bytes an encoding may spend per decoded byte, line breaks
+ * included. These bound how much is read before the decoded cap is checked,
+ * so they lean generous. base64 is 4/3 plus a CRLF per line: 1.5 covers lines
+ * down to 24 characters, well past the 76 and 64 that encoders use (RFC 2045
+ * sets a maximum line length, no minimum, so a stranger wrapping is refused
+ * as over the limit rather than read without bound); quoted-printable is up to
  * "=XX" per byte with a soft break every 75 characters (78/25); the identity
  * encodings carry the bytes as they are, with room for CRLF normalisation.
  * Unknown encodings have no entry and are refused rather than stored raw.
  */
 const ENCODING_EXPANSION: Record<string, number> = {
-  base64: 1.4,
+  base64: 1.5,
   "quoted-printable": 3.2,
   "7bit": 1.05,
   "8bit": 1.05,
