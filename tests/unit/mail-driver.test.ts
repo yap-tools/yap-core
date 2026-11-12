@@ -376,9 +376,11 @@ describe("read", () => {
   });
 });
 
+type StoredFile = { name: string; mimeType?: string; bytes: Buffer };
+
 /** A bundle writer that keeps what it was handed instead of storing it. */
-function fakeWriter(): { writer: BundleWriter; files: Array<{ name: string; mimeType?: string; bytes: Buffer }> } {
-  const files: Array<{ name: string; mimeType?: string; bytes: Buffer }> = [];
+function fakeWriter(): { writer: BundleWriter; files: StoredFile[] } {
+  const files: StoredFile[] = [];
   const writer: BundleWriter = {
     createItems: async () => {
       throw new Error("fake writer: no item writes");
@@ -427,9 +429,10 @@ describe("attachment", () => {
     PDF.toString("base64"),
   ];
 
-  async function attach(raw: string, params: Record<string, string>, opts: { bodystructure?: string } = {}) {
-    const imap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw, ...opts }] }] });
-    const { writer, files } = fakeWriter();
+  async function attach(raw: string, params: Record<string, string>, { bodystructure, writeFile }: { bodystructure?: string; writeFile?: BundleWriter["writeFile"] } = {}) {
+    const imap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw, bodystructure }] }] });
+    const { writer: fake, files } = fakeWriter();
+    const writer = writeFile ? { ...fake, writeFile } : fake;
     const ctx = createCtx(createFakeEgress());
     ctx.config = config({ imap });
     ctx.action = "attachment";
@@ -502,10 +505,8 @@ describe("attachment", () => {
       "--B1--",
       "",
     ].join("\r\n");
-    const { result: listed } = await (async () => {
-      const imap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw }] }] });
-      return run(config({ imap }), "read", { uid: "5" });
-    })();
+    const readImap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw }] }] });
+    const listed = (await run(config({ imap: readImap }), "read", { uid: "5" })).result;
     expect(listed.attachments).toEqual([{ part: "2.1", filename: "logo.png", content_type: "image/png", size: expect.any(Number) }]);
     const { result, files, imap } = await attach(raw, { part: "2.1" });
     expect(files[0]!.bytes.toString()).toBe("PNGDATA");
@@ -550,8 +551,7 @@ describe("attachment", () => {
     const bodystructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "ZIP" ("NAME" "big.zip") NIL NIL "BASE64" ${huge} NIL ("ATTACHMENT" ("FILENAME" "big.zip")) NIL NIL) "MIXED" ("BOUNDARY" "B1") NIL NIL NIL)`;
     const { error, files, imap } = await attach(withParts(pdfPart()), { part: "2" }, { bodystructure });
     expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "invalid_request" });
-    expect(error!.message).toMatch(/25 MiB/);
-    expect(error!.message).toMatch(/MiB/);
+    expect(error!.message).toMatch(/over the 25 MiB limit/);
     expect(files).toEqual([]);
     expect(imap.commands.filter((c) => /BODY\.PEEK\[2\]/.test(c))).toEqual([]);
   });
@@ -590,19 +590,11 @@ describe("attachment", () => {
   });
 
   it("passes the bundle's own refusal (e.g. a MIME type the instance disallows) through to the agent", async () => {
-    const imap = await imapMock({ mailboxes: [{ ...seededInbox(), messages: [{ uid: 5, flags: [], internalDate: new Date(), raw: withParts(pdfPart()) }] }] });
-    const ctx = createCtx(createFakeEgress());
-    ctx.config = config({ imap });
-    ctx.action = "attachment";
-    ctx.params = { uid: "5", part: "2" };
-    ctx.writer = {
-      ...fakeWriter().writer,
-      writeFile: async () => {
-        throw new YapError("unsupported_media_type", "MIME type application/pdf is not allowed");
-      },
+    const writeFile = async (): Promise<never> => {
+      throw new YapError("unsupported_media_type", "MIME type application/pdf is not allowed");
     };
-    const error = (await driver.run(ctx).catch((e: Error) => e)) as Error;
-    expect(agentSafe(error)).toEqual({ agentSafe: true, code: "unsupported_media_type" });
+    const { error } = await attach(withParts(pdfPart()), { part: "2" }, { writeFile });
+    expect(agentSafe(error!)).toEqual({ agentSafe: true, code: "unsupported_media_type" });
   });
 
   it("collapses a run without a writer: that is the host's wiring, not the agent's doing", async () => {

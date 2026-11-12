@@ -38,7 +38,9 @@ import type { Security } from "./config.js";
 export type MailCtx = Pick<RunContext, "egress" | "signal" | "log">;
 
 const MAX_LINE_BYTES = 64 * 1024;
-const MAX_LITERAL_BYTES = 25 * 1024 * 1024;
+/** The largest literal the reader accepts; a caller after a bigger section
+ * reads it in partial windows (imap.ts `fetchSectionWhole`). */
+export const MAX_LITERAL_BYTES = 25 * 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 /** How long `close()` waits for the peer to answer our FIN before destroying. */
 const CLOSE_GRACE_MS = 200;

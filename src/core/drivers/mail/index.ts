@@ -80,8 +80,6 @@ const SUMMARY_FIELD_CHARS = 512;
 const TEXT_SECTION_BYTES = 512 * 1024;
 /** The largest attachment `attachment` stores, counted after transfer decoding. */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-/** One partial fetch of an attachment; well under net.ts's per-literal cap. */
-const ATTACHMENT_CHUNK_BYTES = 4 * 1024 * 1024;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -355,14 +353,12 @@ const handlers: Record<string, Handler> = {
       const encoding = part.encoding ?? "7bit";
       const ceiling = encodedCeiling(encoding);
       if (ceiling === null) throw new AgentError(`${label} uses the ${encoding} transfer encoding, which cannot be decoded`);
-      if (part.size != null && part.size > ceiling) {
-        throw new AgentError(`${label} is about ${mib(decodedEstimate(part.size, encoding))} MiB, over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
-      }
-      const encoded = await fetchWhole(client, uid, part, ceiling, label);
-      const bytes = transferDecode(encoded, encoding);
-      if (bytes.length > MAX_ATTACHMENT_BYTES) {
-        throw new AgentError(`${label} is ${mib(bytes.length)} MiB, over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
-      }
+      // Three checks, one per thing that can be too big: the size the
+      // structure declares, the bytes the server actually sends, and what
+      // they decode to.
+      if (part.size != null && part.size > ceiling) throw overCap(label, `${mib(part.size)} MiB encoded`);
+      const bytes = transferDecode(await fetchWhole(client, uid, part, ceiling, label), encoding);
+      if (bytes.length > MAX_ATTACHMENT_BYTES) throw overCap(label, `${mib(bytes.length)} MiB`);
       const contentType = `${part.type}/${part.subtype}`.toLowerCase();
       const filename = safeFilename(partFilename(part)) ?? `attachment-${uid}-${part.part}.${extensionFor(contentType)}`;
       // The writer's own refusals (the instance's MIME allowlist, its file
@@ -689,15 +685,12 @@ const ENCODING_EXPANSION: Record<string, number> = {
 /** The most encoded bytes an attachment under the cap could take, or null
  * for an encoding the driver cannot decode. */
 function encodedCeiling(encoding: string): number | null {
-  const ratio = Object.hasOwn(ENCODING_EXPANSION, encoding) ? ENCODING_EXPANSION[encoding] : undefined;
-  return ratio === undefined ? null : Math.ceil(MAX_ATTACHMENT_BYTES * ratio) + 64 * 1024;
+  if (!Object.hasOwn(ENCODING_EXPANSION, encoding)) return null;
+  return Math.ceil(MAX_ATTACHMENT_BYTES * ENCODING_EXPANSION[encoding]!) + 64 * 1024;
 }
 
-/** Roughly what an encoded size decodes to, for a refusal's message only. */
-function decodedEstimate(encodedSize: number, encoding: string): number {
-  if (encoding === "base64") return (encodedSize * 3) / 4;
-  if (encoding === "quoted-printable") return encodedSize / 3;
-  return encodedSize;
+function overCap(label: string, size: string): AgentError {
+  return new AgentError(`${label} is over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit (${size})`);
 }
 
 function mib(bytes: number): string {
@@ -706,27 +699,18 @@ function mib(bytes: number): string {
 }
 
 /**
- * The whole encoded part, read in consecutive partial fetches so no single
- * literal approaches net.ts's cap. A window that comes back short is the end
- * of the part. Past `ceiling` the part cannot decode to something under the
- * cap, so reading stops there; and a part that ends before the size its
- * BODYSTRUCTURE gave is incomplete. Both are refused: a partial file is
- * never stored.
+ * The whole encoded part. Past `ceiling` it cannot decode to something under
+ * the cap, so the client stops reading there; and a part that ends before
+ * the size its BODYSTRUCTURE gave is incomplete. Both are refused: a partial
+ * file is never stored.
  */
 async function fetchWhole(client: ImapClient, uid: number, part: BodyPart, ceiling: number, label: string): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for (;;) {
-    const { buffer } = await client.fetchSection(uid, part.part, { offset: total, maxBytes: ATTACHMENT_CHUNK_BYTES });
-    chunks.push(buffer);
-    total += buffer.length;
-    if (total > ceiling) throw new AgentError(`${label} is larger than the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit`);
-    if (buffer.length < ATTACHMENT_CHUNK_BYTES) break;
+  const { buffer, exceeded } = await client.fetchSectionWhole(uid, part.part, { limit: ceiling });
+  if (exceeded) throw overCap(label, `more than ${mib(ceiling)} MiB encoded`);
+  if (part.size != null && buffer.length < part.size) {
+    throw new AgentError(`${label} came back incomplete from the server (${buffer.length} of ${part.size} bytes); try again`);
   }
-  if (part.size != null && total < part.size) {
-    throw new AgentError(`${label} came back incomplete from the server (${total} of ${part.size} bytes); try again`);
-  }
-  return Buffer.concat(chunks, total);
+  return buffer;
 }
 
 /**
