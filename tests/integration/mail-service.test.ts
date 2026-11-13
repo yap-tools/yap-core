@@ -6,11 +6,14 @@
  * than on the first run. The per-action behaviour lives in the unit suite;
  * this is the wiring.
  */
+import { randomUUID } from "node:crypto";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { simpleMessage, startImapMock, type ImapMock } from "../helpers/mail/imap-mock.js";
+import { parseMessage } from "../helpers/mail/mime.js";
 import { startMockSmtp, type MockSmtp } from "../helpers/smtp.js";
 
 const PASS = "reader-pw-4711";
@@ -19,6 +22,9 @@ describe("mail service (built-in driver)", () => {
   let app: TestApp;
   let alice: ApiClient;
   let bundleId: string;
+  let otherBundleId: string;
+  let spaceId: string;
+  let aliceId: string;
   let imap: ImapMock;
   /** A server that refuses every login — the mock does not check passwords. */
   let refusing: ImapMock;
@@ -60,8 +66,10 @@ describe("mail service (built-in driver)", () => {
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
     alice = apiClient(app.baseUrl, a.body.initialKey.key);
-    const spaceId = (await alice.post("/v1/spaces", { name: "Mail" })).body.id;
+    aliceId = a.body.user.id;
+    spaceId = (await alice.post("/v1/spaces", { name: "Mail" })).body.id;
     bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "inbox" })).body.id;
+    otherBundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "elsewhere" })).body.id;
 
     const created = await alice.post(`/v1/bundles/${bundleId}/services`, {
       name: "inbox",
@@ -147,6 +155,140 @@ describe("mail service (built-in driver)", () => {
     const res = await run("send", { to: "x@example.com", subject: "s", body: "b" });
     expect(res.status).toBe(400);
     expect(res.body.error.message).toBe('unknown action "send" for service "inbox" (available: folders, search, read)');
+  });
+
+  describe("attachments on draft", () => {
+    /** A file row and its bytes, written straight to the store the way an
+     * upload would leave them. `status: "reserved"` is an upload that was
+     * never completed. */
+    async function makeFile(
+      bundle: string,
+      body: Buffer,
+      opts: { name: string; mimeType: string; status?: "finalized" | "reserved"; recordedSize?: number },
+    ): Promise<string> {
+      const status = opts.status ?? "finalized";
+      const id = randomUUID();
+      const storageKey = `${spaceId}/${bundle}/${id}`;
+      if (status === "finalized") await app.blob.put(storageKey, body);
+      const now = new Date().toISOString();
+      await app.db.client.insert(app.db.tables.files).values({
+        id,
+        bundleId: bundle,
+        spaceId,
+        ownerId: aliceId,
+        status,
+        name: opts.name,
+        mimeType: opts.mimeType,
+        size: opts.recordedSize ?? body.length,
+        storageKey,
+        uploadConsumed: status === "finalized" ? 1 : 0,
+        createdAt: now,
+        finalizedAt: status === "finalized" ? now : null,
+      });
+      return id;
+    }
+
+    let drafter: string;
+    let locked: string;
+    const clip = Buffer.from(Array.from({ length: 3000 }, (_, i) => (i * 7) % 256));
+    const drafts = () => imap.mailbox("Drafts")!.messages;
+    const post = (service: string, params: Record<string, string>) =>
+      alice.post(`/v1/services/${service}/run`, { action: "draft", params, wait_ms: 10_000 });
+    const base = { to: "mie@example.com", subject: "Clips", body: "Two clips attached." };
+
+    beforeAll(async () => {
+      const created = await alice.post(`/v1/bundles/${bundleId}/services`, { name: "drafter", driver: "mail", actions: ["draft"], config: config() });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      drafter = created.body.id;
+      const pinned = await alice.post(`/v1/bundles/${bundleId}/services`, {
+        name: "no-attachments",
+        driver: "mail",
+        actions: ["draft"],
+        pins: { attachments: "" },
+        config: config(),
+      });
+      expect(pinned.status, JSON.stringify(pinned.body)).toBe(201);
+      locked = pinned.body.id;
+    });
+
+    it("shows the param on draft with its format, the own-bundle rule and the cap", async () => {
+      const listed = (await alice.get(`/v1/bundles/${bundleId}/services`)).body.data.find((s: any) => s.name === "drafter");
+      const draft = listed.actions.find((a: any) => a.name === "draft");
+      const param = draft.params.find((p: any) => p.name === "attachments");
+      expect(param.required).toBe(false);
+      expect(param.description).toMatch(/file:\/\/\{uuid\}/);
+      expect(param.description).toMatch(/comma-separated/);
+      expect(param.description).toMatch(/own bundle/);
+      expect(param.description).toMatch(/18 MiB/);
+    });
+
+    it("attaches bundle files and records a file_read per file on the run", async () => {
+      const a = await makeFile(bundleId, clip, { name: "clip-1.mp3", mimeType: "audio/mpeg" });
+      const b = await makeFile(bundleId, Buffer.from("take two"), { name: "Prøve; \"to\".txt", mimeType: "text/plain" });
+      const before = drafts().length;
+      const res = await post(drafter, { ...base, attachments: `file://${a}, ${b}` });
+      expect(res.body.status, JSON.stringify(res.body)).toBe("succeeded");
+      expect(res.body.result.attachments).toEqual([
+        { name: "clip-1.mp3", mime_type: "audio/mpeg", size: 3000 },
+        { name: 'Prøve; "to".txt', mime_type: "text/plain", size: 8 },
+      ]);
+      expect(res.body.writes).toEqual([
+        { type: "file_read", id: a, name: "clip-1.mp3", size: 3000 },
+        { type: "file_read", id: b, name: 'Prøve; "to".txt', size: 8 },
+      ]);
+      expect(drafts()).toHaveLength(before + 1);
+      const msg = parseMessage(drafts().at(-1)!.raw);
+      expect(msg.parts.map((p) => p.dispositionParams["filename"] ?? null)).toEqual([null, "clip-1.mp3", 'Prøve; "to".txt']);
+      expect(Buffer.compare(msg.parts[1]!.bytes, clip)).toBe(0);
+      expect(msg.parts[2]!.bytes.toString()).toBe("take two");
+    });
+
+    it("refuses a file from another bundle, an unfinished upload, and a missing file, naming each and appending nothing", async () => {
+      const elsewhere = await makeFile(otherBundleId, Buffer.from("x"), { name: "x.txt", mimeType: "text/plain" });
+      const reserved = await makeFile(bundleId, Buffer.from(""), { name: "half.txt", mimeType: "text/plain", status: "reserved" });
+      const missing = randomUUID();
+      const ok = await makeFile(bundleId, Buffer.from("fine"), { name: "fine.txt", mimeType: "text/plain" });
+      const before = drafts().length;
+      for (const ref of [`file://${elsewhere}`, reserved, `file://${missing}`]) {
+        const res = await post(drafter, { ...base, attachments: `${ok},${ref}` });
+        expect(res.body.status, ref).toBe("failed");
+        expect(res.body.errorCode, ref).toBe("not_found");
+        expect(res.body.error, ref).toBe(`attachment ${JSON.stringify(ref)} is not a file in this bundle`);
+        // Every reference is resolved before any is read: no file_read at all.
+        expect(res.body.writes ?? [], ref).toEqual([]);
+      }
+      expect(drafts()).toHaveLength(before);
+    });
+
+    it("refuses a total over the cap from the file record, before reading anything", async () => {
+      const huge = await makeFile(bundleId, Buffer.from("small on disk"), { name: "huge.wav", mimeType: "audio/wav", recordedSize: 19 * 1024 * 1024 });
+      const before = drafts().length;
+      const res = await post(drafter, { ...base, attachments: huge });
+      expect(res.body.status).toBe("failed");
+      expect(res.body.errorCode).toBe("invalid_request");
+      expect(res.body.error).toBe("attachments total 19 MiB; the cap is 18 MiB");
+      expect(res.body.writes ?? []).toEqual([]);
+      expect(drafts()).toHaveLength(before);
+    });
+
+    it("lets an operator switch attachments off with an empty pin", async () => {
+      const listed = (await alice.get(`/v1/bundles/${bundleId}/services`)).body.data.find((s: any) => s.name === "no-attachments");
+      const names = listed.actions.find((a: any) => a.name === "draft").params.map((p: any) => p.name);
+      expect(names).not.toContain("attachments");
+      expect(names).toContain("body");
+
+      const file = await makeFile(bundleId, Buffer.from("secret"), { name: "secret.txt", mimeType: "text/plain" });
+      const before = drafts().length;
+      const refused = await post(locked, { ...base, attachments: file });
+      expect(refused.status).toBe(400);
+      expect(refused.body.error.message).toBe('parameter "attachments" is fixed by this service configuration');
+      expect(drafts()).toHaveLength(before);
+
+      const plain = await post(locked, base);
+      expect(plain.body.status, JSON.stringify(plain.body)).toBe("succeeded");
+      expect(plain.body.result).toEqual({ folder: "Drafts", uid: expect.any(Number) });
+      expect(drafts().at(-1)!.raw).not.toContain("multipart");
+    });
   });
 
   it("refuses a bad password at authoring time (validateConfigOnline)", async () => {

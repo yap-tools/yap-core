@@ -209,6 +209,30 @@ interface CommandResult {
   untagged: ParsedResponse[];
 }
 
+/** The largest message `append` will send. Above the driver's own caps (a
+ * 1 MiB body plus 18 MiB of attachments is about 25 MiB encoded), so it only
+ * ever catches a message nothing else bounded. */
+export const MAX_APPEND_BYTES = 32 * 1024 * 1024;
+
+const SIZE_CODES = new Set(["TOOBIG", "LIMIT", "OVERQUOTA"]);
+
+/**
+ * The server's own words when a tagged NO refused an APPEND for size, else
+ * null. The text is the reply after the tag and verb, response code
+ * included, with anything unprintable dropped and the length clipped: it
+ * goes to the agent.
+ */
+function sizeRefusal(e: unknown): string | null {
+  if (!e || typeof e !== "object") return null;
+  const { code, reply } = e as { code?: unknown; reply?: unknown };
+  if (typeof reply !== "string") return null;
+  const text = reply.replace(/^\S+\s+NO\s+/i, "");
+  if (text === reply) return null;
+  const sized = (typeof code === "string" && SIZE_CODES.has(code.toUpperCase())) || /too (big|large)|size|exceed/i.test(text);
+  if (!sized) return null;
+  return text.replace(/[^\x20-\x7e]/g, "").slice(0, 200).trim();
+}
+
 export class ImapClient {
   capabilities = new Set<string>();
   closed = false;
@@ -612,10 +636,34 @@ export class ImapClient {
     await this.command(`UID EXPUNGE ${uid}`, { step: "UID EXPUNGE" });
   }
 
+  /**
+   * APPEND the message as one literal. Two size guards: our own ceiling,
+   * checked before anything is sent (nothing else bounds what goes *out* —
+   * MAX_LITERAL_BYTES is about what comes in), and the server's, whose
+   * refusal (`[TOOBIG]`, `[LIMIT]`, `[OVERQUOTA]`, or a reply that says so in
+   * words) is passed to the agent in the server's own text, since what to
+   * do about it — fewer or smaller attachments — is the agent's call. Any
+   * other refusal stays an operator-log matter, as before.
+   */
   async append(folder: string, message: Buffer, flags: string[] = []): Promise<{ uid: number | null }> {
+    if (message.length > MAX_APPEND_BYTES) {
+      throw this.fail(
+        `the message is ${(message.length / 1024 / 1024).toFixed(1)} MiB; at most ${MAX_APPEND_BYTES / 1024 / 1024} MiB can be appended`,
+        "APPEND",
+        undefined,
+        { agent: "invalid_request" },
+      );
+    }
     const flagPart = flags.length ? ` (${flags.join(" ")})` : "";
     const line = `APPEND ${quote(utf7Encode(folder))}${flagPart}`;
-    const { tagged } = await this.command(line, { literal: message, logLine: `${line} {${message.length} bytes}` });
+    let tagged: ParsedResponse;
+    try {
+      ({ tagged } = await this.command(line, { literal: message, logLine: `${line} {${message.length} bytes}` }));
+    } catch (e) {
+      const refusal = sizeRefusal(e);
+      if (refusal === null) throw e;
+      throw this.fail(`the server refused the message: ${refusal}`, "APPEND", undefined, { agent: "invalid_request" });
+    }
     const appendUid = tagged.codeArgs?.[1];
     if (tagged.code === "APPENDUID" && appendUid != null) {
       return { uid: Number(str(appendUid)) };

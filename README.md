@@ -452,7 +452,13 @@ be the instance's externally reachable origin (https except on loopback).
   `actions` allowlist decides which of them a given agent gets. `attachment`
   is the one that writes into Yap: it downloads one attachment `read` listed
   (by its `part`), up to 25 MiB decoded, and stores it as a finalized file
-  in the service's bundle, where it stays. Its config is the account: `user` plus
+  in the service's bundle, where it stays. `draft` and `send` go the other
+  way: their optional `attachments` parameter names files in that same
+  bundle (`file://{uuid}` or bare ids, comma-separated; at most 10 files and
+  18 MiB in all) and puts them on the message as MIME attachments. That
+  reach is the caller's `run_services` on the bundle, so an operator who
+  does not want a service to attach pins `attachments` to `""`, which
+  removes the parameter. Its config is the account: `user` plus
   either `pass` (an app password) or an `oauth2` block (XOAUTH2 for Google
   Workspace / Microsoft 365), `from` (and an optional display `name`), and
   one or both of `imap: {host, port, security?}` / `smtp: {host, port,
