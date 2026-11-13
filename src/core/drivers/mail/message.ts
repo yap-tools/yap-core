@@ -166,10 +166,21 @@ function attachmentFilename(value: unknown): string {
   return name === "" ? "attachment" : name;
 }
 
-/** What a run reports about the files on a message: the same name and type
- * the message carries, and the raw (pre-base64) size. */
+/**
+ * The attachment as the message will carry it: the name checked for line
+ * breaks ("" becomes "attachment"), the type checked and normalised. Throws
+ * on a line break in either. `buildMessage` applies the same to whatever it
+ * is given; calling this first is how a caller learns of a bad name before
+ * it opens any connection.
+ */
+export function normalizeAttachment(attachment: MessageAttachment): MessageAttachment {
+  return { filename: attachmentFilename(attachment.filename), mimeType: attachmentMimeType(attachment.mimeType), bytes: attachment.bytes };
+}
+
+/** What a run reports about the files on a (normalised) message: name,
+ * type, and the raw (pre-base64) size. */
 export function attachmentSummary(attachments: readonly MessageAttachment[]): Array<{ name: string; mime_type: string; size: number }> {
-  return attachments.map((a) => ({ name: attachmentFilename(a.filename), mime_type: attachmentMimeType(a.mimeType), size: a.bytes.byteLength }));
+  return attachments.map((a) => ({ name: a.filename, mime_type: a.mimeType, size: a.bytes.byteLength }));
 }
 
 /** RFC 2231 attr-char: what may appear unencoded in an extended parameter value. */
@@ -212,9 +223,8 @@ function rfc2231Filename(name: string): string {
   return sections.map((section, i) => (i === 0 ? `filename*0*=utf-8''${section}` : `filename*${i}*=${section}`)).join(";\r\n ");
 }
 
-function attachmentPart(attachment: MessageAttachment): { header: string; body: string } {
-  const name = attachmentFilename(attachment.filename);
-  const type = attachmentMimeType(attachment.mimeType);
+function attachmentPart(attachment: MessageAttachment): { header: string; body: Buffer } {
+  const { filename: name, mimeType: type, bytes } = normalizeAttachment(attachment);
   const [typeParam, dispositionParam] = isPlainFilename(name)
     ? [`name="${name}"`, `filename="${name}"`]
     : [`name="${encodedWords(name)}"`, rfc2231Filename(name)];
@@ -223,21 +233,40 @@ function attachmentPart(attachment: MessageAttachment): { header: string; body: 
     `Content-Disposition: attachment;\r\n ${dispositionParam}`,
     "Content-Transfer-Encoding: base64",
   ].join("\r\n");
-  return { header, body: base64Lines(attachment.bytes) };
+  return { header, body: base64Lines(bytes) };
 }
 
-/** base64 in lines of 76 characters (RFC 2045 §6.8), CRLF between them. */
-function base64Lines(bytes: Uint8Array): string {
-  const encoded = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
-  const lines: string[] = [];
-  for (let i = 0; i < encoded.length; i += 76) lines.push(encoded.slice(i, i + 76));
-  return lines.join("\r\n");
+/** Raw bytes per base64 line: 57 bytes encode to exactly 76 characters. */
+const BASE64_LINE_BYTES = 57;
+/** Lines encoded per chunk, so a large file is never one giant string. */
+const BASE64_CHUNK_LINES = 1024;
+
+/**
+ * base64 in lines of 76 characters (RFC 2045 §6.8), CRLF between them, as
+ * bytes. Encoded a chunk of whole lines at a time straight into one buffer
+ * of the exact final size, so an 18 MiB attachment costs its encoded size
+ * once rather than several intermediate strings.
+ */
+function base64Lines(bytes: Uint8Array): Buffer {
+  const input = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const lines = Math.ceil(input.length / BASE64_LINE_BYTES);
+  const out = Buffer.allocUnsafe(Math.ceil(input.length / 3) * 4 + Math.max(0, lines - 1) * 2);
+  let at = 0;
+  for (let line = 0; line < lines; line += BASE64_CHUNK_LINES) {
+    const start = line * BASE64_LINE_BYTES;
+    const encoded = input.subarray(start, start + BASE64_LINE_BYTES * BASE64_CHUNK_LINES).toString("base64");
+    for (let i = 0; i < encoded.length; i += 76) {
+      if (at > 0) at += out.write("\r\n", at, "latin1");
+      at += out.write(encoded.slice(i, i + 76), at, "latin1");
+    }
+  }
+  return out;
 }
 
 /**
  * A boundary of 128 random bits behind `=_yap_`. The `=_` pair cannot occur
- * in base64 at all, and the body and part headers are checked anyway, so a
- * delimiter line can only ever be one of ours.
+ * in base64 at all, so only the text body and the part headers need
+ * checking (and are), and a delimiter line can only ever be one of ours.
  */
 function pickBoundary(contents: readonly string[]): string {
   for (;;) {
@@ -306,9 +335,13 @@ export function buildMessage(options: BuildMessageOptions): Buffer {
   }
   // Every part is built (and every filename and type checked) before any of
   // it is joined, so a refused attachment leaves nothing half-assembled.
-  const parts = [{ header: textHeader, body: text }, ...attachments.map(attachmentPart)];
-  const boundary = pickBoundary(parts.flatMap((part) => [part.header, part.body]));
+  const files = attachments.map(attachmentPart);
+  const boundary = pickBoundary([text, ...files.map((part) => part.header)]);
   headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
-  const delimited = parts.map((part) => `--${boundary}\r\n${part.header}\r\n\r\n${part.body}\r\n`).join("");
-  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${delimited}--${boundary}--\r\n`, "utf8");
+  const chunks: Buffer[] = [Buffer.from(`${headers.join("\r\n")}\r\n\r\n--${boundary}\r\n${textHeader}\r\n\r\n${text}\r\n`, "utf8")];
+  for (const part of files) {
+    chunks.push(Buffer.from(`--${boundary}\r\n${part.header}\r\n\r\n`, "latin1"), part.body, Buffer.from("\r\n", "latin1"));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "latin1"));
+  return Buffer.concat(chunks);
 }

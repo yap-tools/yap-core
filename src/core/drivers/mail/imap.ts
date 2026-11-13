@@ -218,19 +218,18 @@ const SIZE_CODES = new Set(["TOOBIG", "LIMIT", "OVERQUOTA"]);
 
 /**
  * The server's own words when a tagged NO refused an APPEND for size, else
- * null. The text is the reply after the tag and verb, response code
- * included, with anything unprintable dropped and the length clipped: it
- * goes to the agent.
+ * null — read from the parsed reply `command()` attaches to its error. The
+ * text keeps the response code (`[TOOBIG] …`), drops anything unprintable,
+ * and is clipped: it goes to the agent.
  */
-function sizeRefusal(e: unknown): string | null {
-  if (!e || typeof e !== "object") return null;
-  const { code, reply } = e as { code?: unknown; reply?: unknown };
-  if (typeof reply !== "string") return null;
-  const text = reply.replace(/^\S+\s+NO\s+/i, "");
-  if (text === reply) return null;
-  const sized = (typeof code === "string" && SIZE_CODES.has(code.toUpperCase())) || /too (big|large)|size|exceed/i.test(text);
+function sizeRefusal(e: ProtocolError): string | null {
+  const { code, replyType, replyText } = e;
+  if (replyType !== "NO") return null;
+  const text = typeof replyText === "string" ? replyText : "";
+  const sized = (typeof code === "string" && SIZE_CODES.has(code.toUpperCase())) || /too (big|large)|exceed|size limit/i.test(text);
   if (!sized) return null;
-  return text.replace(/[^\x20-\x7e]/g, "").slice(0, 200).trim();
+  const words = typeof code === "string" ? `[${code}] ${text}` : text;
+  return words.replace(/[^\x20-\x7e]/g, "").slice(0, 200).trim();
 }
 
 export class ImapClient {
@@ -339,7 +338,12 @@ export class ImapClient {
         this.ctx.log(`imap: < ${summarise(res.raw ?? "")}`);
         this.lastTagged = res;
         if (res.type !== "OK") {
-          throw this.fail(`${stepName} failed: ${res.text || res.type}`, stepName, res.raw, { code: res.code, codeArgs: res.codeArgs });
+          throw this.fail(`${stepName} failed: ${res.text || res.type}`, stepName, res.raw, {
+            code: res.code,
+            codeArgs: res.codeArgs,
+            replyType: res.type,
+            replyText: res.text,
+          });
         }
         return { tagged: res, untagged };
       }
@@ -660,7 +664,7 @@ export class ImapClient {
     try {
       ({ tagged } = await this.command(line, { literal: message, logLine: `${line} {${message.length} bytes}` }));
     } catch (e) {
-      const refusal = sizeRefusal(e);
+      const refusal = e instanceof this.ProtocolError ? sizeRefusal(e) : null;
       if (refusal === null) throw e;
       throw this.fail(`the server refused the message: ${refusal}`, "APPEND", undefined, { agent: "invalid_request" });
     }

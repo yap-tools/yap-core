@@ -74,6 +74,7 @@ import { convert as htmlToText } from "html-to-text";
 import iconv from "iconv-lite";
 
 import { YapError } from "../../errors.js";
+import { parseFileRef } from "../../fileRefs.js";
 import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverFailCode, type DriverParamSpec, type Egress, type RunContext } from "../types.js";
 import { resolveAuth } from "./auth.js";
 import { configDoc, normalizeMailConfig, type MailConfig } from "./config.js";
@@ -86,6 +87,7 @@ import {
   isAddress,
   makeMessageId,
   MAX_RECIPIENTS,
+  normalizeAttachment,
   parseAddresses,
   type MessageAttachment,
 } from "./message.js";
@@ -108,8 +110,6 @@ const MAX_OUTBOUND_ATTACHMENTS = 10;
  * about 24 MiB, under the 25 MB most providers accept, so a draft that was
  * accepted can also be sent. */
 const MAX_OUTBOUND_ATTACHMENT_BYTES = 18 * 1024 * 1024;
-const FILE_REF_PREFIX = "file://";
-const FILE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -156,7 +156,7 @@ const composeParams: DriverParamSpec[] = [
   { name: "body", description: "Plain-text body", required: true },
   {
     name: "attachments",
-    description: `Files from this bundle to attach, comma-separated: each a file://{uuid} reference or a bare file id. Only files in this service's own bundle can be attached; at most ${MAX_OUTBOUND_ATTACHMENTS} files and ${MAX_OUTBOUND_ATTACHMENT_BYTES / 1024 / 1024} MiB in all`,
+    description: `Files from this bundle to attach, comma-separated: each a file://{uuid} reference or a bare file id. Only files in this service's own bundle can be attached; at most ${MAX_OUTBOUND_ATTACHMENTS} files and ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB in all`,
     required: false,
   },
   { name: "reply_to_uid", description: "UID of the message being replied to: sets In-Reply-To/References and the Re: subject", required: false },
@@ -843,8 +843,6 @@ interface Draft {
   folder: string;
   /** File references to attach, in order; empty for a plain message. */
   attachments: string[];
-  /** Whether `attachments` came from a pin, and so must not be echoed. */
-  attachmentsPinned: boolean;
 }
 
 /** Validates the shared send/draft parameters; the header checks run before
@@ -888,20 +886,24 @@ function composeParams_(params: Params, pinned: readonly string[]): Draft {
       // Deriving `to` from an arbitrary message would be aiming by proxy.
       throw new AgentError("recipients are fixed on this service; a reply cannot derive `to` from the original message");
     }
-    const attachmentsPinned = pinned.includes("attachments");
-    const attachments = attachmentRefs(params["attachments"], attachmentsPinned);
-    return { to, cc, bcc, body, subject, replyToUid, folder: folderOf(params), attachments, attachmentsPinned };
+    const attachments = attachmentRefs(params["attachments"], pinned.includes("attachments"));
+    return { to, cc, bcc, body, subject, replyToUid, folder: folderOf(params), attachments };
   } catch (e) {
     throw e instanceof AgentError ? e : new AgentError(e instanceof Error ? e.message : String(e));
   }
 }
 
+/** How an error names one attachment reference. A pinned list is the
+ * operator's, and like every pinned value it is never quoted back. */
+function attachmentLabel(ref: string, pinned: boolean): string {
+  return pinned ? "a pinned attachment" : `attachment ${JSON.stringify(ref.slice(0, 100))}`;
+}
+
 /**
  * "file://a, b" → ["file://a", "b"]: split on commas, trimmed, empty entries
- * dropped, each checked for shape and for not repeating another (a bare id
- * and its file:// form are the same file). Nothing is resolved here, so a
- * bad list costs no reads. A pinned list is the operator's and is never
- * quoted back.
+ * dropped, each checked for shape (the same parser the bundle reader uses)
+ * and for not repeating another (a bare id and its file:// form are the same
+ * file). Nothing is resolved here, so a bad list costs no reads.
  */
 function attachmentRefs(raw: string | undefined, pinned: boolean): string[] {
   if (raw === undefined) return [];
@@ -911,13 +913,10 @@ function attachmentRefs(raw: string | undefined, pinned: boolean): string[] {
   }
   const seen = new Set<string>();
   for (const ref of refs) {
-    const id = ref.startsWith(FILE_REF_PREFIX) ? ref.slice(FILE_REF_PREFIX.length) : ref;
-    if (!FILE_ID_RE.test(id)) {
-      throw new AgentError(pinned ? "a pinned attachment is not a file reference" : `attachment ${JSON.stringify(ref.slice(0, 100))} is not a file://{uuid} reference or file id`);
-    }
-    const key = id.toLowerCase();
-    if (seen.has(key)) throw new AgentError(pinned ? "a pinned attachment is listed more than once" : `attachment ${JSON.stringify(ref)} is listed more than once`);
-    seen.add(key);
+    const id = parseFileRef(ref);
+    if (id === null) throw new AgentError(`${attachmentLabel(ref, pinned)} is not a file://{uuid} reference or file id`);
+    if (seen.has(id.toLowerCase())) throw new AgentError(`${attachmentLabel(ref, pinned)} is listed more than once`);
+    seen.add(id.toLowerCase());
   }
   return refs;
 }
@@ -925,57 +924,55 @@ function attachmentRefs(raw: string | undefined, pinned: boolean): string[] {
 /**
  * The files named in `attachments`, read through the run's bundle reader —
  * the one way this driver reaches file bytes. Every reference is resolved
- * first and the total checked against the file records, so an unknown
- * reference or an oversized request fails before a byte is read; then each
- * file is read with the remaining budget as its ceiling, so a record that
- * understates its size cannot carry the total past the cap either. The
- * reader confines this to finalized files of the run's own bundle and
- * audits each read; its not-found becomes an error naming the reference.
+ * first (together; they are independent lookups) and the total checked
+ * against the file records, so an unknown reference or an oversized request
+ * fails before a byte is read. Then each file is read with the remaining
+ * budget as its ceiling, so a record that understates its size cannot carry
+ * the total past the cap either. The reader confines this to finalized
+ * files of the run's own bundle and audits each read; its not-found becomes
+ * an error naming the reference. Any other reader failure is not about the
+ * reference (attachmentRefs already checked its shape) and passes through.
  */
 async function loadAttachments(ctx: RunContext, draft: Draft): Promise<MessageAttachment[]> {
   if (draft.attachments.length === 0) return [];
   const reader = ctx.reader;
   if (!reader) throw new Error("mail: attachments were given but the run has no file reader");
-  const label = (ref: string): string => (draft.attachmentsPinned ? "a pinned attachment" : `attachment ${JSON.stringify(ref)}`);
-  const resolved = [];
-  for (const ref of draft.attachments) {
-    try {
-      resolved.push({ ref, file: await reader.readFile(ref) });
-    } catch (e) {
-      if (e instanceof YapError && (e.code === "not_found" || e.code === "invalid_request")) {
-        throw new AgentError(`${label(ref)} is not a file in this bundle`, "not_found");
-      }
-      throw e;
+  const pinned = ctx.pinned.includes("attachments");
+  const settled = await Promise.allSettled(draft.attachments.map((ref) => reader.readFile(ref)));
+  const files = settled.map((outcome, i) => {
+    if (outcome.status === "fulfilled") return outcome.value;
+    const e: unknown = outcome.reason;
+    if (e instanceof YapError && e.code === "not_found") {
+      throw new AgentError(`${attachmentLabel(draft.attachments[i]!, pinned)} is not a file in this bundle`, "not_found");
     }
-  }
-  const capMiB = MAX_OUTBOUND_ATTACHMENT_BYTES / 1024 / 1024;
-  const total = resolved.reduce((sum, { file }) => sum + file.size, 0);
+    throw e;
+  });
+  const total = files.reduce((sum, file) => sum + file.size, 0);
   if (total > MAX_OUTBOUND_ATTACHMENT_BYTES) {
-    throw new AgentError(`attachments total ${mib(total)} MiB; the cap is ${capMiB} MiB`);
+    throw new AgentError(`attachments total ${mib(total)} MiB; the cap is ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB`);
   }
   const out: MessageAttachment[] = [];
   let remaining = MAX_OUTBOUND_ATTACHMENT_BYTES;
-  for (const { ref, file } of resolved) {
+  for (const [i, file] of files.entries()) {
+    const label = attachmentLabel(draft.attachments[i]!, pinned);
     let bytes: Uint8Array;
     try {
       bytes = await file.bytes({ maxBytes: remaining });
     } catch (e) {
       if (e instanceof YapError && e.code === "payload_too_large") {
-        throw new AgentError(`${label(ref)} takes the attachments past the ${capMiB} MiB cap`);
+        throw new AgentError(`${label} takes the attachments past the ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB cap`);
       }
       throw e;
     }
     remaining -= bytes.byteLength;
-    const attachment = { filename: file.name, mimeType: file.mimeType, bytes };
     try {
-      // The same header checks buildMessage applies, run now so a name with
+      // The header checks buildMessage would apply, run now, so a name with
       // a line break in it (the uploader chose it) fails before any mailbox
       // or server is touched, and as an error the caller can act on.
-      attachmentSummary([attachment]);
+      out.push(normalizeAttachment({ filename: file.name, mimeType: file.mimeType, bytes }));
     } catch (e) {
-      throw new AgentError(`${label(ref)}: ${e instanceof Error ? e.message : String(e)}`);
+      throw new AgentError(`${label}: ${e instanceof Error ? e.message : String(e)}`);
     }
-    out.push(attachment);
   }
   return out;
 }

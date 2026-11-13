@@ -9,6 +9,7 @@ import {
   encodeHeaderWord,
   isAddress,
   makeMessageId,
+  normalizeAttachment,
   normalizeLineBreaks,
   parseAddresses,
   rfc5322Date,
@@ -316,8 +317,10 @@ describe("buildMessage with attachments", () => {
     expect(part.dispositionParams["filename"]).toBe("attachment");
   });
 
-  it("describes what went on through attachmentSummary", () => {
-    expect(attachmentSummary([{ ...pdf, mimeType: "Text/Plain; charset=utf-8" }, { ...pdf, filename: "", mimeType: "" }])).toEqual([
+  it("normalises once (normalizeAttachment) and describes what went on (attachmentSummary)", () => {
+    const normalized = [{ ...pdf, mimeType: "Text/Plain; charset=utf-8" }, { ...pdf, filename: "", mimeType: "" }].map(normalizeAttachment);
+    expect(() => normalizeAttachment({ ...pdf, filename: "a\r\nb" })).toThrow(/attachment filename/);
+    expect(attachmentSummary(normalized)).toEqual([
       { name: "report.pdf", mime_type: "text/plain", size: 1000 },
       { name: "attachment", mime_type: "application/octet-stream", size: 1000 },
     ]);
