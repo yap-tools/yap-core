@@ -15,13 +15,16 @@
  * the 2,704-byte btree limit even for incompressible 4-byte text.
  *
  * Queries that want the index compare the prefix next to the full value:
- * `substr(iv.value, 1, N) = substr(?, 1, N) AND iv.value = ?`. The prefix
- * test lets the planner use the index; the full test keeps the result exact
- * when two values share their first N characters. This is only sound for
+ * `substr(iv.value, 1, N) = ? AND iv.value = ?`, the first operand being the
+ * operand's first N characters. The prefix test lets the planner use the
+ * index; the full test keeps the result exact when two values share their
+ * first N characters. This is only sound for
  * equality (and therefore IN): under a deterministic collation equal values
  * have equal prefixes, but under a linguistic collation such as Postgres's
  * default en_US ordering is not prefix-consistent, so range filters keep the
- * full comparison alone.
+ * full comparison alone. (The equality argument needs a deterministic
+ * collation. `value` declares no collation, so it gets the database default,
+ * and Postgres only allows deterministic collations as a database default.)
  *
  * Migration 0012 swaps the old full-value index for this one. drizzle-kit
  * (0.31) renders the expression correctly for Postgres but quotes it as if it
@@ -34,7 +37,27 @@ import { type SQL, sql } from "drizzle-orm";
 /** Characters of each value covered by the value index. */
 export const VALUE_INDEX_PREFIX = 600;
 
-/** The indexed prefix of a value expression (a column or an operand). */
+/** The indexed prefix of a value expression (a column). */
 export function valueIndexPrefix(value: unknown): SQL {
   return sql`substr(${value}, 1, ${sql.raw(String(VALUE_INDEX_PREFIX))})`;
+}
+
+/**
+ * The indexed prefix of an operand, cut here rather than in SQL so a long
+ * operand is not sent twice. Cut by code point, as SQL `substr` counts on
+ * both dialects (a JS string slice would count UTF-16 units).
+ */
+export function operandPrefix(value: string): string {
+  return value.length <= VALUE_INDEX_PREFIX ? value : Array.from(value).slice(0, VALUE_INDEX_PREFIX).join("");
+}
+
+/**
+ * `column IN (operands)` stated twice: on the indexed prefix, so the planner
+ * can use the value index, and on the full value, so the result stays exact
+ * past the prefix. One operand is plain equality.
+ */
+export function indexedValueIn(column: unknown, operands: string[]): SQL {
+  const list = (values: string[]) => sql.join(values.map((v) => sql`${v}`), sql.raw(", "));
+  const prefixes = [...new Set(operands.map(operandPrefix))];
+  return sql`${valueIndexPrefix(column)} IN (${list(prefixes)}) AND ${column} IN (${list(operands)})`;
 }

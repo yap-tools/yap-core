@@ -4,12 +4,10 @@
  * which names tables, indexes and stored values. The caller gets a bare
  * `internal` error; the detail goes to the operator log.
  */
-import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
-import type { Db } from "../../src/db/index.js";
 import { createLogger } from "../../src/logger.js";
-import { describeEachAdapter } from "../helpers/adapters.js";
+import { describeEachAdapter, rawExec } from "../helpers/adapters.js";
 import { apiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
@@ -38,22 +36,22 @@ describeEachAdapter("MCP storage errors", (adapter) => {
     ).body.id;
     // A constraint Core does not know about: at most one value row per item.
     // Any item with two tags now fails inside the database, not in validation.
-    await rawSql(db, "CREATE UNIQUE INDEX test_one_value_per_item ON item_values (item_id)");
+    await rawExec(db, "CREATE UNIQUE INDEX test_one_value_per_item ON item_values (item_id)");
+    // And at most one space per name, for a first-tier tool to trip over.
+    await rawExec(db, "CREATE UNIQUE INDEX test_one_space_per_name ON spaces (name)");
     mcp = await connectMcp(app.baseUrl, key);
   });
 
   afterAll(async () => {
     await mcp?.close();
     // The Postgres test database is shared across suites: drop the index.
-    if (app) await rawSql(app.db, "DROP INDEX IF EXISTS test_one_value_per_item");
+    if (app) {
+      await rawExec(app.db, "DROP INDEX IF EXISTS test_one_value_per_item");
+      await rawExec(app.db, "DROP INDEX IF EXISTS test_one_space_per_name");
+    }
     await app?.stop();
   });
 
-  async function rawSql(db: Db, statement: string): Promise<void> {
-    const client = db.client as unknown as { run?(q: unknown): unknown; execute?(q: unknown): Promise<unknown> };
-    if (adapter.dialect === "pg") await client.execute!(sql.raw(statement));
-    else client.run!(sql.raw(statement));
-  }
 
   it("reports a bare internal error and logs the detail", async () => {
     const out = await mcp.call("call", {
@@ -65,5 +63,14 @@ describeEachAdapter("MCP storage errors", (adapter) => {
     expect(result.error).toEqual({ code: "internal", message: "internal error" });
     expect(JSON.stringify(out)).not.toMatch(/item_values|test_one_value_per_item|duplicate|UNIQUE/i);
     expect(logged.some((args) => args[0] === "unhandled MCP call error")).toBe(true);
+  });
+
+  it("does the same for a first-tier tool", async () => {
+    // "S" already exists (made in beforeAll), so the raw index refuses this.
+    const result = await mcp.callRaw("space_create", { name: "S" });
+    expect(result.isError).toBe(true);
+    const text = result.content.map((c: { text: string }) => c.text).join("\n");
+    expect(text).toBe("internal: internal error");
+    expect(logged.some((args) => args[0] === "unhandled MCP tool error")).toBe(true);
   });
 });

@@ -8,7 +8,6 @@ import { UserError } from "fastmcp";
 import { z } from "zod";
 
 import type { YapConfig } from "../config.js";
-import type { YapLogger } from "../logger.js";
 import { runWithTokenAuth } from "../core/authScope.js";
 import {
   DATATYPES,
@@ -33,7 +32,7 @@ import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
-import { executeCall, INTERNAL_ERROR_TEXT, offeredSecondTier, type PerCallResult } from "./call.js";
+import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
@@ -41,18 +40,12 @@ function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-/**
- * Translates errors into agent-facing tool errors. A domain error carries a
- * message meant for the caller. Anything else (a storage error from an index
- * or constraint, a bug) is logged for the operator and reported as a bare
- * `internal` error, so a raw database message never reaches the caller.
- */
-function rethrow(err: unknown, logger: Pick<YapLogger, "error">): never {
+/** Translates domain errors into agent-facing tool errors. */
+function rethrow(err: unknown): never {
   if (err instanceof YapError) {
     throw new UserError(`${err.code}: ${err.message}${err.details ? ` ${JSON.stringify(err.details)}` : ""}`);
   }
-  logger.error("unhandled MCP tool error", err);
-  throw new UserError(INTERNAL_ERROR_TEXT);
+  throw err;
 }
 
 function sessionUser(session: SessionAuth | undefined): string {
@@ -143,10 +136,21 @@ export function registerMcpTools(server: YapServer): void {
   const addTool: typeof mcp.addTool = (tool) =>
     rawAddTool({
       ...tool,
-      execute: (args, ctx) => {
+      execute: async (args, ctx) => {
         const tokenAuth = ctx.session?.tokenAuth;
         const run = () => tool.execute(args, ctx);
-        return tokenAuth ? runWithTokenAuth(tokenAuth, run) : run();
+        try {
+          return await (tokenAuth ? runWithTokenAuth(tokenAuth, run) : run());
+        } catch (err) {
+          // A UserError is meant for the caller. Anything else (a storage
+          // error from an index or constraint, a bug) would reach the caller
+          // as its raw message, which can name tables, indexes and values:
+          // log it for the operator and report a bare internal error.
+          if (err instanceof UserError) throw err;
+          if (err instanceof YapError) rethrow(err);
+          logger.error("unhandled MCP tool error", err);
+          throw new UserError(`internal: ${INTERNAL_ERROR_MESSAGE}`);
+        }
       },
     });
 
@@ -284,7 +288,7 @@ export function registerMcpTools(server: YapServer): void {
           },
         });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -300,7 +304,7 @@ export function registerMcpTools(server: YapServer): void {
         // rather than in core whoami so the core stays a pure DB lookup.
         return asJson({ ...(await usersCore.whoami(db, userId)), version });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -330,7 +334,7 @@ export function registerMcpTools(server: YapServer): void {
           bundles: bundles.map((b) => ({ id: b.id, name: b.name, description: b.description })),
         });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -403,7 +407,7 @@ export function registerMcpTools(server: YapServer): void {
         }
         return asJson({ bundles: results });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -432,7 +436,7 @@ export function registerMcpTools(server: YapServer): void {
           second_tier: Object.fromEntries(args.names.map((name) => [name, SECOND_TIER_FULL_SPECS[name]])),
         });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -500,7 +504,7 @@ export function registerMcpTools(server: YapServer): void {
         const durationMs = Math.round(performance.now() - t0);
         return { content: [{ type: "text" as const, text: asJson({ durationMs, results }) }] };
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -570,7 +574,7 @@ export function registerMcpTools(server: YapServer): void {
         const space = await createSpace(db, userId, args);
         return asJson({ id: space.id, name: space.name });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -622,7 +626,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         });
         return asJson({ id: bundle.id, space_id: bundle.spaceId, name: bundle.name });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -639,7 +643,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const docs = await userDocsCore.listUserDocs(db, userId);
         return asJson({ data: docs.map((d) => ({ ...d, autoload: d.autoload === 1 })) });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -654,7 +658,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const userId = sessionUser(ctx.session);
         return asJson({ data: await userDocsCore.loadUserDocs(db, userId, args.refs) });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -669,7 +673,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const userId = sessionUser(ctx.session);
         return asJson(await userDocsCore.getUserDoc(db, userId, args.id));
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -688,7 +692,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const userId = sessionUser(ctx.session);
         return asJson(await userDocsCore.createUserDoc(db, userId, args));
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -708,7 +712,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const { id, ...patch } = args;
         return asJson(await userDocsCore.updateUserDoc(db, userId, id, patch));
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -726,7 +730,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         const userId = sessionUser(ctx.session);
         return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits as EditOp[]));
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });
@@ -741,7 +745,7 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
         await userDocsCore.deleteUserDoc(db, userId, args.id);
         return asJson({ deleted: true });
       } catch (err) {
-        rethrow(err, logger);
+        rethrow(err);
       }
     },
   });

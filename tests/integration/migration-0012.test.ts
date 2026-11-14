@@ -8,29 +8,21 @@
  */
 import { randomBytes } from "node:crypto";
 
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { expect, it } from "vitest";
 
 import type { Db } from "../../src/db/index.js";
-import { describeEachAdapter, type Adapter } from "../helpers/adapters.js";
+import { describeEachAdapter, rawAll, type Adapter } from "../helpers/adapters.js";
 
 const now = "2026-01-01T00:00:00.000Z";
 
 async function valueIndexes(adapter: Adapter, db: Db): Promise<string[]> {
-  const client = db.client as unknown as {
-    all?(q: unknown): { name: string }[];
-    execute?(q: unknown): Promise<{ rows: { name: string }[] }>;
-  };
-  const rows =
+  const rows = await rawAll<{ name: string }>(
+    db,
     adapter.dialect === "pg"
-      ? (
-          await client.execute!(
-            sql.raw("SELECT indexname AS name FROM pg_indexes WHERE tablename = 'item_values' AND indexname LIKE 'item_values_prop%'"),
-          )
-        ).rows
-      : client.all!(
-          sql.raw("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'item_values' AND name LIKE 'item_values_prop%'"),
-        );
+      ? "SELECT indexname AS name FROM pg_indexes WHERE tablename = 'item_values' AND indexname LIKE 'item_values_prop%'"
+      : "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'item_values' AND name LIKE 'item_values_prop%'",
+  );
   return rows.map((r) => r.name);
 }
 

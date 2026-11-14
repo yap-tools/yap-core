@@ -77,6 +77,27 @@ async function makeFreshPgDb(url: string): Promise<Db> {
   return db;
 }
 
+/** The drizzle clients' raw-SQL entry points (test-only structural view). */
+type RawClient = {
+  run?(q: unknown): unknown;
+  all?(q: unknown): Record<string, unknown>[];
+  execute?(q: unknown): Promise<{ rows: Record<string, unknown>[] }>;
+};
+
+/** Runs one raw SQL statement on either dialect (DDL in tests). */
+export async function rawExec(db: Db, statement: string): Promise<void> {
+  const client = db.client as unknown as RawClient;
+  if (client.execute) await client.execute(sql.raw(statement));
+  else client.run!(sql.raw(statement));
+}
+
+/** Runs one raw SQL query on either dialect and returns its rows. */
+export async function rawAll<T = Record<string, unknown>>(db: Db, query: string): Promise<T[]> {
+  const client = db.client as unknown as RawClient;
+  const rows = client.execute ? (await client.execute(sql.raw(query))).rows : client.all!(sql.raw(query));
+  return rows as T[];
+}
+
 export function describeEachAdapter(name: string, fn: (adapter: Adapter) => void): void {
   describe(`${name} [sqlite]`, () => {
     fn({ dialect: "sqlite", makeDb: makeSqliteDb, makeFreshDb: makeFreshSqliteDb });

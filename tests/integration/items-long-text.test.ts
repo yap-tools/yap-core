@@ -27,22 +27,17 @@ function randomText(chars: number): string {
     .slice(0, chars);
 }
 
-/** Random multibyte text (2–4 bytes per character), to push the byte count well past the character count. */
-function randomMultibyte(chars: number): string {
-  const pool = ["æ", "ø", "å", "€", "語", "文", "字", "🙂", "🚀", "ß", "λ", "ж"];
-  const bytes = randomBytes(chars);
-  let out = "";
-  for (let i = 0; i < chars; i++) out += pool[bytes[i]! % pool.length];
-  return out;
+/** `chars` random characters, each picked from a random byte. */
+function randomChars(chars: number, pick: (byte: number) => string): string {
+  return Array.from(randomBytes(chars), pick).join("");
 }
 
+/** Random multibyte text (2–4 bytes per character), to push the byte count well past the character count. */
+const MULTIBYTE = ["æ", "ø", "å", "€", "語", "文", "字", "🙂", "🚀", "ß", "λ", "ж"];
+const randomMultibyte = (chars: number) => randomChars(chars, (b) => MULTIBYTE[b % MULTIBYTE.length]!);
+
 /** Random 4-byte characters only (emoji), so the indexed prefix is as wide in bytes as it can be. */
-function randomEmoji(chars: number): string {
-  const bytes = randomBytes(chars);
-  let out = "";
-  for (let i = 0; i < chars; i++) out += String.fromCodePoint(0x1f300 + bytes[i]!);
-  return out;
-}
+const randomEmoji = (chars: number) => randomChars(chars, (b) => String.fromCodePoint(0x1f300 + b));
 
 describeEachAdapter("long text values", (adapter) => {
   let db: Db;
@@ -147,6 +142,17 @@ describeEachAdapter("long text values", (adapter) => {
       expect(among(await q("body", "gte", b))).toEqual([ib, ic].sort());
       expect(among(await q("body", "lt", c))).toEqual([ia, ib].sort());
       expect(among(await q("body", "lte", a))).toEqual([ia]);
+    });
+
+    it("equality is exact when the shared prefix is made of 4-byte characters", async () => {
+      // The operand's prefix is cut in JS; it must agree with SQL substr,
+      // which counts code points, not UTF-16 units.
+      const p = randomEmoji(VALUE_INDEX_PREFIX);
+      const e1 = (await create("doc", { body: `${p}1${randomEmoji(100)}` })).id;
+      const v2 = `${p}2${randomEmoji(100)}`;
+      const e2 = (await create("doc", { body: v2 })).id;
+      expect(await q("body", "eq", v2)).toEqual([e2]);
+      expect(await q("body", "eq", v2)).not.toContain(e1);
     });
 
     it("in matches exactly", async () => {

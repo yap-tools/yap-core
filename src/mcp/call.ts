@@ -27,8 +27,8 @@ import { YapError } from "../core/errors.js";
 /** A second-tier call targets either a bundle (the default) or its space. */
 export type TargetKind = "bundle" | "space";
 
-/** What an agent sees for an error that is not a domain error. */
-export const INTERNAL_ERROR_TEXT = "internal: internal error";
+/** What an MCP caller is told about an error that is not a domain error. */
+export const INTERNAL_ERROR_MESSAGE = "internal error";
 
 export interface CallEnv {
   db: Db;
@@ -766,6 +766,6 @@ export async function executeCall(
     // tables, indexes and values. The operator gets it in the log; the
     // caller gets a bare internal error.
     env.logger?.error("unhandled MCP call error", err);
-    return { ...base, ok: false, durationMs, error: { code: "internal", message: "internal error" } };
+    return { ...base, ok: false, durationMs, error: { code: "internal", message: INTERNAL_ERROR_MESSAGE } };
   }
 }

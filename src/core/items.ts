@@ -15,7 +15,7 @@
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { valueIndexPrefix } from "../db/valueIndex.js";
+import { indexedValueIn } from "../db/valueIndex.js";
 import {
   getBundleContext,
   requireBundleCapability,
@@ -257,25 +257,20 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
 type ComparisonOp = (typeof COMPARISON_OPS)[number];
 
 /**
- * `column IN (operands)` stated twice: on the indexed prefix, so the planner
- * can use the value index, and on the full value, so the result stays exact
- * for values longer than the prefix. One operand is plain equality.
+ * `expr IN (operands)`. Text-stored values go through the value index (see
+ * src/db/valueIndex.ts); numbers compare through CAST, which it cannot serve.
  */
-function valueInList(column: SQL, operands: (string | number)[]): SQL {
-  const list = (wrap: (o: string | number) => SQL) => sql.join(operands.map(wrap), sql.raw(", "));
-  return sql`${valueIndexPrefix(column)} IN (${list((o) => valueIndexPrefix(o))}) AND ${column} IN (${list((o) => sql`${o}`)})`;
+function valueIn(property: Property, expr: SQL, operands: (string | number)[]): SQL {
+  if (property.datatype !== "number") return indexedValueIn(expr, operands as string[]);
+  return inArray(expr, operands);
 }
 
 /** Builds the per-value-row SQL condition (over alias `iv`) for a comparison op. */
 function filterValueCondition(property: Property, op: ComparisonOp, value: unknown): SQL {
   const expr = storedValueExpr(property);
   switch (op) {
-    case "eq": {
-      const operand = compareOperand(property, value);
-      // Number values compare through CAST, which the index cannot serve.
-      if (property.datatype === "number") return sql`${expr} = ${operand}`;
-      return valueInList(expr, [operand]);
-    }
+    case "eq":
+      return valueIn(property, expr, [compareOperand(property, value)]);
     case "neq":
       return sql`${expr} <> ${compareOperand(property, value)}`;
     case "gt":
@@ -296,12 +291,11 @@ function filterValueCondition(property: Property, op: ComparisonOp, value: unkno
       if (!Array.isArray(value) || value.length === 0) {
         throw invalid(`in filter on "${property.name}" expects a non-empty array`);
       }
-      const operands = value.map((v) => compareOperand(property, v));
-      if (property.datatype !== "number") return valueInList(expr, operands);
-      return sql`${expr} IN (${sql.join(
-        operands.map((o) => sql`${o}`),
-        sql.raw(", "),
-      )})`;
+      return valueIn(
+        property,
+        expr,
+        value.map((v) => compareOperand(property, v)),
+      );
     }
   }
 }
@@ -334,7 +328,7 @@ function buildFilterPredicate(itemId: SQL, property: Property, filter: ItemFilte
       // Stored values are canonical text, so exact text equality is correct
       // membership; dedupe operands so the count target matches.
       const operands = [...new Set(filter.value.map((v) => normalizeValue(property, v)))];
-      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${valueInList(sql.raw("iv.value"), operands)}) = ${operands.length}`;
+      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${indexedValueIn(sql.raw("iv.value"), operands)}) = ${operands.length}`;
     }
     default: {
       const cond = filterValueCondition(property, filter.op, filter.value);
@@ -529,7 +523,7 @@ async function validateUniqueness(
     const rows = await db.client
       .select({ itemId: itemValues.itemId, value: itemValues.value })
       .from(itemValues)
-      .where(and(eq(itemValues.propertyId, propId), valueInList(sql`${itemValues.value}`, [...firstLabelByValue.keys()])));
+      .where(and(eq(itemValues.propertyId, propId), indexedValueIn(itemValues.value, [...firstLabelByValue.keys()])));
     for (const row of rows) {
       if (exclude?.has(row.itemId)) continue;
       const label = firstLabelByValue.get(row.value);
