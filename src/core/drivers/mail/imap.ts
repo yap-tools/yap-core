@@ -210,8 +210,8 @@ interface CommandResult {
 }
 
 /** The largest message `append` will send. Above the driver's own caps (a
- * 1 MiB body plus 18 MiB of attachments is about 25 MiB encoded), so it only
- * ever catches a message nothing else bounded. */
+ * 1 MiB body plus 17 MiB of attachments is about 24.3 MiB encoded), so it
+ * only ever catches a message nothing else bounded. */
 export const MAX_APPEND_BYTES = 32 * 1024 * 1024;
 
 const SIZE_CODES = new Set(["TOOBIG", "LIMIT", "OVERQUOTA"]);

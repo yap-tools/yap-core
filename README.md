@@ -455,7 +455,7 @@ be the instance's externally reachable origin (https except on loopback).
   in the service's bundle, where it stays. `draft` and `send` go the other
   way: their optional `attachments` parameter names files in that same
   bundle (`file://{uuid}` or bare ids, comma-separated; at most 10 files and
-  18 MiB in all) and puts them on the message as MIME attachments. That
+  17 MiB in all) and puts them on the message as MIME attachments. That
   reach is the caller's `run_services` on the bundle, so an operator who
   does not want a service to attach pins `attachments` to `""`, which
   removes the parameter. Its config is the account: `user` plus

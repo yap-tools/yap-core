@@ -219,7 +219,7 @@ describe("mail service (built-in driver)", () => {
       expect(param.description).toMatch(/file:\/\/\{uuid\}/);
       expect(param.description).toMatch(/comma-separated/);
       expect(param.description).toMatch(/own bundle/);
-      expect(param.description).toMatch(/18 MiB/);
+      expect(param.description).toMatch(/17 MiB/);
     });
 
     it("attaches bundle files and records a file_read per file on the run", async () => {
@@ -266,7 +266,7 @@ describe("mail service (built-in driver)", () => {
       const res = await post(drafter, { ...base, attachments: huge });
       expect(res.body.status).toBe("failed");
       expect(res.body.errorCode).toBe("invalid_request");
-      expect(res.body.error).toBe("attachments total 19 MiB; the cap is 18 MiB");
+      expect(res.body.error).toBe("attachments total 19 MiB; the cap is 17 MiB");
       expect(res.body.writes ?? []).toEqual([]);
       expect(drafts()).toHaveLength(before);
     });

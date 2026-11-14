@@ -113,7 +113,7 @@ describe("definition", () => {
       expect(attachments, action).toMatchObject({ required: false });
       expect(attachments!.description).toMatch(/file:\/\/\{uuid\}/);
       expect(attachments!.description).toMatch(/this bundle/);
-      expect(attachments!.description).toMatch(/18 MiB/);
+      expect(attachments!.description).toMatch(/17 MiB/);
       expect(attachments!.description).toMatch(/10 files/);
     }
     expect(driver.actions["attachment"]!.params!.map((p) => [p.name, p.required])).toEqual([
@@ -1290,15 +1290,15 @@ describe("attachments on draft and send", () => {
     expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
   });
 
-  it("caps the total at 18 MiB from the file records, before reading a byte", async () => {
+  it("caps the total at 17 MiB from the file records, before reading a byte", async () => {
     const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
     const big = files();
     big[ID_A]!.size = 10 * 1024 * 1024;
-    big[ID_B]!.size = 8 * 1024 * 1024 + 1;
+    big[ID_B]!.size = 7 * 1024 * 1024 + 1;
     const reader = fakeReader(big);
     const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B}` }, { reader }).catch((e: Error) => e);
     expect(agentSafe(error as Error).code).toBe("invalid_request");
-    expect((error as Error).message).toMatch(/attachments total 18874369 bytes; the cap is 18 MiB/);
+    expect((error as Error).message).toMatch(/attachments total 17825793 bytes; the cap is 17 MiB/);
     expect(reader.read).toEqual([]);
     expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
   });

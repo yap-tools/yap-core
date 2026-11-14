@@ -244,7 +244,7 @@ const BASE64_CHUNK_LINES = 1024;
 /**
  * base64 in lines of 76 characters (RFC 2045 §6.8), CRLF between them, as
  * bytes. Encoded a chunk of whole lines at a time straight into one buffer
- * of the exact final size, so an 18 MiB attachment costs its encoded size
+ * of the exact final size, so a 17 MiB attachment costs its encoded size
  * once rather than several intermediate strings.
  */
 function base64Lines(bytes: Uint8Array): Buffer {

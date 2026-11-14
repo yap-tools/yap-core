@@ -54,7 +54,7 @@
  * Numbers arrive as strings and are parsed and capped here (summaries ≤ 100,
  * text ≤ 100 000 chars, outbound bodies ≤ 1 MiB, search text ≤ 1000 chars,
  * downloaded attachments ≤ 25 MiB decoded, outbound attachments ≤ 10 files
- * and 18 MiB in all, an appended message ≤ 32 MiB);
+ * and 17 MiB in all, an appended message ≤ 32 MiB);
  * dates are calendar days the way IMAP defines them; every header-bound
  * parameter goes through the injection check in message.ts before it reaches
  * a wire.
@@ -107,10 +107,11 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 /** Files one outgoing message may carry. */
 const MAX_OUTBOUND_ATTACHMENTS = 10;
 /** Raw bytes of all files on one outgoing message. Base64 with its line
- * breaks grows 18 MiB to about 24.6 MiB (25.8 MB): within a 25 MiB limit,
- * but at the edge of a provider that counts 25 MB, so a draft near the cap
- * may be accepted into Drafts and still be refused when it is sent. */
-const MAX_OUTBOUND_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+ * breaks grows 17 MiB to about 24.4 MB, under the 25 MB limit common
+ * providers enforce with room for an ordinary text body and headers, so a
+ * draft that was accepted can also be sent. (Only a body near its own 1 MiB
+ * cap, on top of a full 17 MiB of files, could still pass 25 MB.) */
+const MAX_OUTBOUND_ATTACHMENT_BYTES = 17 * 1024 * 1024;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -743,7 +744,7 @@ function overCap(label: string, size: string): AgentError {
 }
 
 /** A size over a cap, in MiB, or in bytes when MiB would round it to the cap
- * itself ("18.0 MiB; the cap is 18 MiB" says nothing). */
+ * itself ("17.0 MiB; the cap is 17 MiB" says nothing). */
 function overCapSize(bytes: number, cap: number): string {
   return Number(mib(bytes)) === Number(mib(cap)) ? `${bytes} bytes` : `${mib(bytes)} MiB`;
 }
