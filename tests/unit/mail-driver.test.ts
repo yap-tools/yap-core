@@ -1298,7 +1298,7 @@ describe("attachments on draft and send", () => {
     const reader = fakeReader(big);
     const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B}` }, { reader }).catch((e: Error) => e);
     expect(agentSafe(error as Error).code).toBe("invalid_request");
-    expect((error as Error).message).toMatch(/attachments total 18\.0 MiB; the cap is 18 MiB/);
+    expect((error as Error).message).toMatch(/attachments total 18874369 bytes; the cap is 18 MiB/);
     expect(reader.read).toEqual([]);
     expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
   });
@@ -1391,15 +1391,18 @@ describe("attachments on draft and send", () => {
       mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [{ uid: 7, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Old" }) }] }]),
     });
     const cfg = config({ imap });
-    const calls: Array<[string, Record<string, string>]> = [
-      ["folders", {}],
-      ["search", {}],
-      ["read", { uid: "1" }],
-      ["mark", { uid: "1", flag: "seen" }],
-      ["delete_draft", { uid: "7" }],
-      ["attachment", { uid: "1", part: "2" }],
+    // Each call must get as far as the server, so a handler that failed early
+    // cannot pass by never reaching code that might touch the reader.
+    // attachment fetches the message's structure and then finds no part 2.
+    const calls: Array<[string, Record<string, string>, string]> = [
+      ["folders", {}, "ok"],
+      ["search", {}, "ok"],
+      ["read", { uid: "1" }, "ok"],
+      ["mark", { uid: "1", flag: "seen" }, "ok"],
+      ["delete_draft", { uid: "7" }, "ok"],
+      ["attachment", { uid: "1", part: "2" }, 'part "2" is not an attachment of message 1; take part from read\'s attachments'],
     ];
-    for (const [action, params] of calls) {
+    for (const [action, params, expected] of calls) {
       const ctx = createCtx(createFakeEgress());
       let touched = false;
       Object.defineProperty(ctx, "reader", {
@@ -1408,10 +1411,15 @@ describe("attachments on draft and send", () => {
           return null;
         },
       });
+      ctx.writer = fakeWriter().writer;
       ctx.config = cfg;
       ctx.action = action;
       ctx.params = params;
-      await driver.run(ctx).catch(() => {});
+      const outcome = await driver.run(ctx).then(
+        () => "ok",
+        (e: Error) => e.message,
+      );
+      expect(outcome, action).toBe(expected);
       expect(touched, action).toBe(false);
     }
   });

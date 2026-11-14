@@ -106,9 +106,10 @@ const TEXT_SECTION_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 /** Files one outgoing message may carry. */
 const MAX_OUTBOUND_ATTACHMENTS = 10;
-/** Raw bytes of all files on one outgoing message. Base64 grows 18 MiB to
- * about 24 MiB, under the 25 MB most providers accept, so a draft that was
- * accepted can also be sent. */
+/** Raw bytes of all files on one outgoing message. Base64 with its line
+ * breaks grows 18 MiB to about 24.6 MiB (25.8 MB): within a 25 MiB limit,
+ * but at the edge of a provider that counts 25 MB, so a draft near the cap
+ * may be accepted into Drafts and still be refused when it is sent. */
 const MAX_OUTBOUND_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -741,6 +742,12 @@ function overCap(label: string, size: string): AgentError {
   return new AgentError(`${label} is over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit (${size})`);
 }
 
+/** A size over a cap, in MiB, or in bytes when MiB would round it to the cap
+ * itself ("18.0 MiB; the cap is 18 MiB" says nothing). */
+function overCapSize(bytes: number, cap: number): string {
+  return Number(mib(bytes)) === Number(mib(cap)) ? `${bytes} bytes` : `${mib(bytes)} MiB`;
+}
+
 function mib(bytes: number): string {
   const value = bytes / 1024 / 1024;
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
@@ -949,7 +956,7 @@ async function loadAttachments(ctx: RunContext, draft: Draft): Promise<MessageAt
   });
   const total = files.reduce((sum, file) => sum + file.size, 0);
   if (total > MAX_OUTBOUND_ATTACHMENT_BYTES) {
-    throw new AgentError(`attachments total ${mib(total)} MiB; the cap is ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB`);
+    throw new AgentError(`attachments total ${overCapSize(total, MAX_OUTBOUND_ATTACHMENT_BYTES)}; the cap is ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB`);
   }
   const out: MessageAttachment[] = [];
   let remaining = MAX_OUTBOUND_ATTACHMENT_BYTES;

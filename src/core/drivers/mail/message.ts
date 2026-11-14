@@ -337,7 +337,8 @@ export function buildMessage(options: BuildMessageOptions): Buffer {
   // it is joined, so a refused attachment leaves nothing half-assembled.
   const files = attachments.map(attachmentPart);
   const boundary = pickBoundary([text, ...files.map((part) => part.header)]);
-  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+  // The text part is 8bit, so the multipart around it says so too (RFC 2045 §6.4).
+  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`, "Content-Transfer-Encoding: 8bit");
   const chunks: Buffer[] = [Buffer.from(`${headers.join("\r\n")}\r\n\r\n--${boundary}\r\n${textHeader}\r\n\r\n${text}\r\n`, "utf8")];
   for (const part of files) {
     chunks.push(Buffer.from(`--${boundary}\r\n${part.header}\r\n\r\n`, "latin1"), part.body, Buffer.from("\r\n", "latin1"));

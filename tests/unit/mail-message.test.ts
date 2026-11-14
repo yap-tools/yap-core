@@ -217,7 +217,7 @@ describe("buildMessage with attachments", () => {
     const goldenHeaders = GOLDEN.slice(0, GOLDEN.indexOf("MIME-Version"));
     expect(raw.toString("utf8").startsWith(`${goldenHeaders}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="`)).toBe(true);
     expect(msg.contentType).toBe("multipart/mixed");
-    expect(msg.headers["content-transfer-encoding"]).toBeUndefined();
+    expect(msg.headers["content-transfer-encoding"]).toBe("8bit");
     expect(msg.parts).toHaveLength(3);
     const [text, first, second] = msg.parts;
     expect(text!.rawHeader).toBe("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit");
