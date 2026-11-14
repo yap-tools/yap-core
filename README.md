@@ -288,7 +288,12 @@ read; a reference is checked to exist in the bundle at write time (a later
 delete leaves a dangling reference that resolves to `not_found`, matching the
 loose EAV model). A property may be **multi-valued** (`multi: true`), holding an
 ordered list of its datatype; such fields are read and written as arrays
-(`{"tags": ["a", "b"]}`).
+(`{"tags": ["a", "b"]}`). A `text` value has no length limit: a long one (a
+JSON document, say) saves and reads back in full on both SQLite and Postgres.
+The value index covers each value's first 600 characters, which is what keeps
+long values within Postgres's limit on index entries; filters and `unique`
+still compare the whole value, so two values that differ only after that
+prefix stay distinct.
 
 A property may declare a **`config`** of constraints, enforced at the core
 (so REST and MCP can't drift):

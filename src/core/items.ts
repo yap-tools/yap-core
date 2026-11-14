@@ -7,12 +7,15 @@
  *
  * Query shape: one EXISTS subquery over value rows per filter (AND-combined),
  * a correlated subquery for sorting, offset-backed opaque cursors. The
- * (property_id, value) index serves the common filter path. Everything stays
+ * (property_id, value prefix) index serves the common filter path: equality
+ * and membership tests compare the indexed prefix next to the full value (see
+ * src/db/valueIndex.ts for why the index holds a prefix). Everything stays
  * within the SQLite∩Postgres SQL subset.
  */
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
+import { indexedValueIn, valueIndexPrefix } from "../db/valueIndex.js";
 import {
   getBundleContext,
   requireBundleCapability,
@@ -253,22 +256,44 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
 
 type ComparisonOp = (typeof COMPARISON_OPS)[number];
 
+/**
+ * `expr IN (operands)`. Text-stored values go through the value index (see
+ * src/db/valueIndex.ts); numbers compare through CAST, which it cannot serve.
+ */
+function valueIn(property: Property, expr: SQL, operands: (string | number)[]): SQL {
+  if (property.datatype !== "number") return indexedValueIn(expr, operands as string[]);
+  return inArray(expr, operands);
+}
+
+const RANGE_SQL = { gt: ">", gte: ">=", lt: "<", lte: "<=" } as const;
+
+/**
+ * A range comparison. Dates are stored as canonical ISO-8601 strings, always
+ * shorter than the indexed prefix, so for them the prefix bound equals the
+ * full one and is stated too, letting the value index serve date ranges. For
+ * text of any length a prefix bound is unsound under a linguistic collation
+ * (see src/db/valueIndex.ts), so text keeps the full comparison only; numbers
+ * compare through CAST, which the index cannot serve.
+ */
+function rangeCondition(property: Property, expr: SQL, op: (typeof RANGE_SQL)[keyof typeof RANGE_SQL], operand: string | number): SQL {
+  const full = sql`${expr} ${sql.raw(op)} ${operand}`;
+  if (property.datatype !== "date") return full;
+  return sql`${valueIndexPrefix(expr)} ${sql.raw(op)} ${valueIndexPrefix(operand)} AND ${full}`;
+}
+
 /** Builds the per-value-row SQL condition (over alias `iv`) for a comparison op. */
 function filterValueCondition(property: Property, op: ComparisonOp, value: unknown): SQL {
   const expr = storedValueExpr(property);
   switch (op) {
     case "eq":
-      return sql`${expr} = ${compareOperand(property, value)}`;
+      return valueIn(property, expr, [compareOperand(property, value)]);
     case "neq":
       return sql`${expr} <> ${compareOperand(property, value)}`;
     case "gt":
-      return sql`${expr} > ${compareOperand(property, value)}`;
     case "gte":
-      return sql`${expr} >= ${compareOperand(property, value)}`;
     case "lt":
-      return sql`${expr} < ${compareOperand(property, value)}`;
     case "lte":
-      return sql`${expr} <= ${compareOperand(property, value)}`;
+      return rangeCondition(property, expr, RANGE_SQL[op], compareOperand(property, value));
     case "contains": {
       if (typeof value !== "string") throw invalid(`contains filter on "${property.name}" expects text`);
       // Case-insensitive on both dialects (SQLite LIKE is ASCII-insensitive,
@@ -279,11 +304,11 @@ function filterValueCondition(property: Property, op: ComparisonOp, value: unkno
       if (!Array.isArray(value) || value.length === 0) {
         throw invalid(`in filter on "${property.name}" expects a non-empty array`);
       }
-      const operands = value.map((v) => compareOperand(property, v));
-      return sql`${expr} IN (${sql.join(
-        operands.map((o) => sql`${o}`),
-        sql.raw(", "),
-      )})`;
+      return valueIn(
+        property,
+        expr,
+        value.map((v) => compareOperand(property, v)),
+      );
     }
   }
 }
@@ -316,11 +341,7 @@ function buildFilterPredicate(itemId: SQL, property: Property, filter: ItemFilte
       // Stored values are canonical text, so exact text equality is correct
       // membership; dedupe operands so the count target matches.
       const operands = [...new Set(filter.value.map((v) => normalizeValue(property, v)))];
-      const inList = sql.join(
-        operands.map((o) => sql`${o}`),
-        sql.raw(", "),
-      );
-      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND iv.value IN (${inList})) = ${operands.length}`;
+      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${indexedValueIn(sql.raw("iv.value"), operands)}) = ${operands.length}`;
     }
     default: {
       const cond = filterValueCondition(property, filter.op, filter.value);
@@ -515,7 +536,7 @@ async function validateUniqueness(
     const rows = await db.client
       .select({ itemId: itemValues.itemId, value: itemValues.value })
       .from(itemValues)
-      .where(and(eq(itemValues.propertyId, propId), inArray(itemValues.value, [...firstLabelByValue.keys()])));
+      .where(and(eq(itemValues.propertyId, propId), indexedValueIn(itemValues.value, [...firstLabelByValue.keys()])));
     for (const row of rows) {
       if (exclude?.has(row.itemId)) continue;
       const label = firstLabelByValue.get(row.value);

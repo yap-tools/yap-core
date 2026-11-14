@@ -32,7 +32,7 @@ import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
-import { executeCall, offeredSecondTier, type PerCallResult } from "./call.js";
+import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
@@ -136,10 +136,21 @@ export function registerMcpTools(server: YapServer): void {
   const addTool: typeof mcp.addTool = (tool) =>
     rawAddTool({
       ...tool,
-      execute: (args, ctx) => {
+      execute: async (args, ctx) => {
         const tokenAuth = ctx.session?.tokenAuth;
         const run = () => tool.execute(args, ctx);
-        return tokenAuth ? runWithTokenAuth(tokenAuth, run) : run();
+        try {
+          return await (tokenAuth ? runWithTokenAuth(tokenAuth, run) : run());
+        } catch (err) {
+          // A UserError is meant for the caller. Anything else (a storage
+          // error from an index or constraint, a bug) would reach the caller
+          // as its raw message, which can name tables, indexes and values:
+          // log it for the operator and report a bare internal error.
+          if (err instanceof UserError) throw err;
+          if (err instanceof YapError) rethrow(err);
+          logger.error("unhandled MCP tool error", err);
+          throw new UserError(`internal: ${INTERNAL_ERROR_MESSAGE}`);
+        }
       },
     });
 

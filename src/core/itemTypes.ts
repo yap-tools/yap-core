@@ -8,6 +8,7 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
+import { valueIndexPrefix } from "../db/valueIndex.js";
 import {
   DATATYPES,
   getBundleContext,
@@ -264,7 +265,9 @@ export async function updateProperty(
       .select({ value: itemValues.value })
       .from(itemValues)
       .where(eq(itemValues.propertyId, propertyId))
-      .groupBy(itemValues.value)
+      // The prefix key mirrors the value index; the full value is what keeps
+      // values sharing a prefix apart.
+      .groupBy(valueIndexPrefix(itemValues.value), itemValues.value)
       .having(sql`count(*) > 1`)
       .limit(5);
     if (dupes.length > 0) {

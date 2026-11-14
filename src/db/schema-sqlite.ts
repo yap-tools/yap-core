@@ -1,7 +1,9 @@
 /**
  * SQLite schema. Twin of schema-pg.ts — table and column names must stay
  * identical; only the dialect-specific column builders differ. Both schemas
- * stay within the SQLite∩Postgres subset: text, integer, plain indexes.
+ * stay within the SQLite∩Postgres subset: text, integer, plain indexes, and
+ * one expression index on `substr`, which both dialects support (see
+ * valueIndex.ts).
  *
  * Portability conventions:
  * - ids: uuid strings
@@ -9,6 +11,7 @@
  * - booleans: integer 0/1
  * - EAV values: text, cast on read per the property's declared datatype
  */
+import { valueIndexPrefix } from "./valueIndex.js";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable(
@@ -167,7 +170,8 @@ export const itemValues = sqliteTable(
     position: integer("position").notNull().default(0), // element order for multi-valued properties
   },
   (t) => [
-    index("item_values_prop_value_idx").on(t.propertyId, t.value),
+    // Prefix only: see src/db/valueIndex.ts.
+    index("item_values_prop_value_prefix_idx").on(t.propertyId, valueIndexPrefix(t.value)),
     index("item_values_item_idx").on(t.itemId),
   ],
 );
