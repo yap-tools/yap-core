@@ -15,10 +15,9 @@
  * the 2,704-byte btree limit even for incompressible 4-byte text.
  *
  * Queries that want the index compare the prefix next to the full value:
- * `substr(iv.value, 1, N) = ? AND iv.value = ?`, the first operand being the
- * operand's first N characters. The prefix test lets the planner use the
- * index; the full test keeps the result exact when two values share their
- * first N characters. This is only sound for
+ * `substr(iv.value, 1, N) = substr(?, 1, N) AND iv.value = ?`. The prefix
+ * test lets the planner use the index; the full test keeps the result exact
+ * when two values share their first N characters. This is only sound for
  * equality (and therefore IN): under a deterministic collation equal values
  * have equal prefixes, but under a linguistic collation such as Postgres's
  * default en_US ordering is not prefix-consistent, so range filters keep the
@@ -37,18 +36,13 @@ import { type SQL, sql } from "drizzle-orm";
 /** Characters of each value covered by the value index. */
 export const VALUE_INDEX_PREFIX = 600;
 
-/** The indexed prefix of a value expression (a column). */
+/**
+ * The indexed prefix of a value expression: a column, or an operand. Operands
+ * are cut by the same SQL `substr` as the index rather than in JS, so the two
+ * can never disagree (SQLite's substr, for one, stops at a NUL character).
+ */
 export function valueIndexPrefix(value: unknown): SQL {
   return sql`substr(${value}, 1, ${sql.raw(String(VALUE_INDEX_PREFIX))})`;
-}
-
-/**
- * The indexed prefix of an operand, cut here rather than in SQL so a long
- * operand is not sent twice. Cut by code point, as SQL `substr` counts on
- * both dialects (a JS string slice would count UTF-16 units).
- */
-export function operandPrefix(value: string): string {
-  return value.length <= VALUE_INDEX_PREFIX ? value : Array.from(value).slice(0, VALUE_INDEX_PREFIX).join("");
 }
 
 /**
@@ -57,7 +51,6 @@ export function operandPrefix(value: string): string {
  * past the prefix. One operand is plain equality.
  */
 export function indexedValueIn(column: unknown, operands: string[]): SQL {
-  const list = (values: string[]) => sql.join(values.map((v) => sql`${v}`), sql.raw(", "));
-  const prefixes = [...new Set(operands.map(operandPrefix))];
-  return sql`${valueIndexPrefix(column)} IN (${list(prefixes)}) AND ${column} IN (${list(operands)})`;
+  const list = (wrap: (v: string) => SQL) => sql.join(operands.map(wrap), sql.raw(", "));
+  return sql`${valueIndexPrefix(column)} IN (${list(valueIndexPrefix)}) AND ${column} IN (${list((v) => sql`${v}`)})`;
 }

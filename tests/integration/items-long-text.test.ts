@@ -145,8 +145,7 @@ describeEachAdapter("long text values", (adapter) => {
     });
 
     it("equality is exact when the shared prefix is made of 4-byte characters", async () => {
-      // The operand's prefix is cut in JS; it must agree with SQL substr,
-      // which counts code points, not UTF-16 units.
+      // substr counts code points, not UTF-16 units, on both dialects.
       const p = randomEmoji(VALUE_INDEX_PREFIX);
       const e1 = (await create("doc", { body: `${p}1${randomEmoji(100)}` })).id;
       const v2 = `${p}2${randomEmoji(100)}`;
@@ -184,6 +183,20 @@ describeEachAdapter("long text values", (adapter) => {
     it("accepts two long values that differ only after the index prefix", async () => {
       const item = await create("doc", { key: k2 });
       expect(item.values.key).toBe(k2);
+    });
+
+    it("rejects a duplicate holding a NUL character, written in separate requests", async () => {
+      // SQLite's substr stops at NUL; the operand's prefix must be cut the
+      // same way, or the prefix test hides the stored duplicate. (Postgres
+      // refuses NUL in text, so there both writes fail.)
+      if (adapter.dialect === "pg") return;
+      await create("doc", { key: "nul\u0000key" });
+      await expect(create("doc", { key: "nul\u0000key" })).rejects.toThrow(/unique/i);
+      const found = await queryItems(db, userId, bundleId, {
+        itemType: "doc",
+        filters: [{ property: "key", op: "eq", value: "nul\u0000key" }],
+      });
+      expect(found.data).toHaveLength(1);
     });
 
     it("rejects an update to an existing long value", async () => {
