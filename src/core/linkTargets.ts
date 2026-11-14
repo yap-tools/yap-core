@@ -17,7 +17,7 @@
  * (resolveItemType in bundles.ts); the name step is there for those leftover
  * rows, and no save path stores a name any more.
  */
-import { and, eq, exists, inArray, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, like, sql } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
@@ -56,10 +56,15 @@ export function withResolvedLinkTarget(
   config: PropertyConfig | undefined,
   candidates: readonly LinkTargetCandidate[],
 ): PropertyConfig | undefined {
-  if (config?.itemType === undefined || config.itemType === null) return config;
-  const id = resolveLinkTarget(config.itemType, candidates);
-  if (id === null) throw invalid(unknownLinkTargetMessage(propertyName, config.itemType));
+  if (!hasLinkTarget(config)) return config;
+  const id = resolveLinkTarget(config!.itemType!, candidates);
+  if (id === null) throw invalid(unknownLinkTargetMessage(propertyName, config!.itemType!));
   return { ...config, itemType: id };
+}
+
+/** Whether a config pins a link target (and so needs resolving on save). */
+export function hasLinkTarget(config: PropertyConfig | undefined): boolean {
+  return config?.itemType !== undefined && config.itemType !== null;
 }
 
 /** The bundle's item types, as link-target candidates. */
@@ -124,75 +129,59 @@ export interface LinkTargetPlan {
  */
 export async function planLinkTargetUpgrade(db: Db): Promise<LinkTargetPlan> {
   const { properties, itemTypes, bundles } = db.tables;
+  // Only link properties whose config mentions itemType can hold a pin; the
+  // rest (no constraints, or only minItems/maxItems) are never read.
   const props = await db.client
     .select({
       propertyId: properties.id,
       propertyName: properties.name,
-      itemTypeId: properties.itemTypeId,
       config: properties.config,
+      itemTypeId: itemTypes.id,
+      itemTypeName: itemTypes.name,
+      bundleId: bundles.id,
+      bundleName: bundles.name,
     })
     .from(properties)
-    .where(eq(properties.datatype, "item"));
+    .innerJoin(itemTypes, eq(itemTypes.id, properties.itemTypeId))
+    .innerJoin(bundles, eq(bundles.id, itemTypes.bundleId))
+    .where(and(eq(properties.datatype, "item"), like(properties.config, "%itemType%")));
   const plan: LinkTargetPlan = { rewrites: [], leftAlone: [] };
   if (props.length === 0) return plan;
 
-  const owners = await db.client
+  const typesByBundle = new Map<string, LinkTargetCandidate[]>();
+  const bundleTypes = await db.client
     .select({ id: itemTypes.id, bundleId: itemTypes.bundleId, name: itemTypes.name })
     .from(itemTypes)
-    .where(inArray(itemTypes.id, [...new Set(props.map((p) => p.itemTypeId))]));
-  const ownerById = new Map(owners.map((t) => [t.id, t]));
-  const bundleIds = [...new Set(owners.map((t) => t.bundleId))];
-  const bundleTypes = bundleIds.length
-    ? await db.client
-        .select({ id: itemTypes.id, bundleId: itemTypes.bundleId, name: itemTypes.name })
-        .from(itemTypes)
-        .where(inArray(itemTypes.bundleId, bundleIds))
-    : [];
-  const bundleRows = bundleIds.length
-    ? await db.client.select({ id: bundles.id, name: bundles.name }).from(bundles).where(inArray(bundles.id, bundleIds))
-    : [];
-  const bundleName = new Map(bundleRows.map((b) => [b.id, b.name]));
-  const typesByBundle = new Map<string, LinkTargetCandidate[]>();
+    .where(inArray(itemTypes.bundleId, [...new Set(props.map((p) => p.bundleId))]));
   for (const t of bundleTypes) {
-    typesByBundle.set(t.bundleId, [...(typesByBundle.get(t.bundleId) ?? []), { id: t.id, name: t.name }]);
+    const list = typesByBundle.get(t.bundleId);
+    if (list) list.push({ id: t.id, name: t.name });
+    else typesByBundle.set(t.bundleId, [{ id: t.id, name: t.name }]);
   }
 
-  for (const p of props) {
-    const owner = ownerById.get(p.itemTypeId);
-    if (!owner || !p.config) continue; // "" = no constraints, so no pin
-    const parsed = parseObject(p.config);
+  for (const row of props) {
+    const parsed = parseObject(row.config);
     if (parsed && parsed.itemType === undefined) continue; // constraints, but no pin
     const value = typeof parsed?.itemType === "string" ? parsed.itemType : null;
-    const candidates = typesByBundle.get(owner.bundleId) ?? [];
-    if (value !== null && candidates.some((c) => c.id === value)) continue; // already an id
-    const row: LinkTargetRow = {
-      propertyId: p.propertyId,
-      propertyName: p.propertyName,
-      itemTypeId: owner.id,
-      itemTypeName: owner.name,
-      bundleId: owner.bundleId,
-      bundleName: bundleName.get(owner.bundleId) ?? "",
-      config: p.config,
-      value,
-    };
+    const candidates = typesByBundle.get(row.bundleId) ?? [];
     if (value === null) {
-      plan.leftAlone.push({ ...row, reason: "unreadable" });
+      plan.leftAlone.push({ ...row, value, reason: "unreadable" });
       continue;
     }
-    const byName = candidates.filter((c) => c.name === value);
-    if (byName.length !== 1) {
-      plan.leftAlone.push({ ...row, reason: "no-match" });
+    const targetId = resolveLinkTarget(value, candidates);
+    if (targetId === value) continue; // already an id
+    if (targetId === null) {
+      plan.leftAlone.push({ ...row, value, reason: "no-match" });
       continue;
     }
     // Core writes config with JSON.stringify (serializeConfig). When the stored
     // text is exactly that, re-serializing with the new id changes the bytes of
     // the itemType value and nothing else; any other form (whitespace, number
     // spellings, duplicate keys) is left for an operator.
-    if (JSON.stringify(parsed) !== p.config) {
-      plan.leftAlone.push({ ...row, reason: "not-canonical" });
+    if (JSON.stringify(parsed) !== row.config) {
+      plan.leftAlone.push({ ...row, value, reason: "not-canonical" });
       continue;
     }
-    const targetId = byName[0]!.id;
     plan.rewrites.push({ ...row, value, targetId, newConfig: JSON.stringify({ ...parsed, itemType: targetId }) });
   }
   return plan;
@@ -235,6 +224,12 @@ export async function applyLinkTargetPlan(db: Db, plan: LinkTargetPlan): Promise
   return changed;
 }
 
+const LEFT_ALONE_WHY: Record<LeftAloneReason, (r: LinkTargetRow) => string> = {
+  unreadable: (r) => `config ${JSON.stringify(r.config)} has no readable itemType`,
+  "not-canonical": (r) => `config ${JSON.stringify(r.config)} is not in the form Core writes, so it was not rewritten`,
+  "no-match": (r) => `config.itemType ${JSON.stringify(r.value)} matches no single item type in its bundle`,
+};
+
 export interface UpgradeLinkTargetsOpts {
   logger: Pick<YapLogger, "info" | "warn">;
   /** Runs once, before the first row is rewritten, only when there is something to rewrite
@@ -256,12 +251,7 @@ export async function upgradeLinkTargets(db: Db, opts: UpgradeLinkTargetsOpts): 
     opts.logger.info(`link targets: stored ${changed} link propert${changed === 1 ? "y's" : "ies'"} target item type by id`);
   }
   for (const r of plan.leftAlone) {
-    const why =
-      r.reason === "unreadable"
-        ? `config ${JSON.stringify(r.config)} has no readable itemType`
-        : r.reason === "not-canonical"
-          ? `config ${JSON.stringify(r.config)} is not in the form Core writes, so it was not rewritten`
-          : `config.itemType ${JSON.stringify(r.value)} matches no single item type in its bundle`;
+    const why = LEFT_ALONE_WHY[r.reason](r);
     opts.logger.warn(
       `link targets: left alone — bundle ${JSON.stringify(r.bundleName)} (${r.bundleId}), ` +
         `item type ${JSON.stringify(r.itemTypeName)}, property ${JSON.stringify(r.propertyName)} (${r.propertyId}): ` +

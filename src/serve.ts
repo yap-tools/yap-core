@@ -41,22 +41,29 @@ export async function serve(): Promise<void> {
   const db = await createDb(config.db);
   const blob = await createBlobStore(config);
 
+  // One pre-migration backup per start, taken before whichever step first
+  // changes data: pending schema migrations, else the link target upgrade.
   let preMigrationBackupTaken = false;
-  if (config.backup.beforeMigrate) {
+  const takePreMigrationBackup = async (force: boolean): Promise<void> => {
+    if (!config.backup.beforeMigrate || preMigrationBackupTaken) return;
     const sink = await createBackupSink(config.backup.sink);
-    try {
-      const name = await maybePreMigrationBackup({ db, blob, sink, yapVersion });
-      preMigrationBackupTaken = name !== undefined;
-      if (name) logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
-    } catch (err) {
-      // The safety promise: never migrate data that could not be backed up.
-      logger.error(
-        "pre-migration backup failed — refusing to migrate; set YAP_BACKUP_BEFORE_MIGRATE=false to override",
-        err,
-      );
-      await db.close();
-      process.exit(1);
-    }
+    const ctx = { db, blob, sink, yapVersion };
+    const name = force ? await backupToSink(ctx, "pre-migration") : await maybePreMigrationBackup(ctx);
+    if (!name) return;
+    preMigrationBackupTaken = true;
+    logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
+  };
+
+  try {
+    await takePreMigrationBackup(false);
+  } catch (err) {
+    // The safety promise: never migrate data that could not be backed up.
+    logger.error(
+      "pre-migration backup failed — refusing to migrate; set YAP_BACKUP_BEFORE_MIGRATE=false to override",
+      err,
+    );
+    await db.close();
+    process.exit(1);
   }
   await db.migrate();
 
@@ -67,12 +74,7 @@ export async function serve(): Promise<void> {
   try {
     await upgradeLinkTargets(db, {
       logger,
-      beforeRewrite: async () => {
-        if (!config.backup.beforeMigrate || preMigrationBackupTaken) return;
-        const sink = await createBackupSink(config.backup.sink);
-        const name = await backupToSink({ db, blob, sink, yapVersion }, "pre-migration");
-        logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
-      },
+      beforeRewrite: () => takePreMigrationBackup(true),
     });
   } catch (err) {
     logger.error(

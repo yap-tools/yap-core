@@ -18,7 +18,7 @@ import {
   type PropertyInput,
 } from "./bundles.js";
 import { invalid, notFound } from "./errors.js";
-import { linkTargetCandidates, withResolvedLinkTarget } from "./linkTargets.js";
+import { hasLinkTarget, linkTargetCandidates, withResolvedLinkTarget } from "./linkTargets.js";
 import { parseConfig, serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
 import { displayValue, newId, nowIso } from "./util.js";
 
@@ -114,7 +114,9 @@ export async function createItemType(
   // Link targets resolve to ids before anything is written. The new type is a
   // candidate too, so a property can link to the type it belongs to.
   const id = newId();
-  const candidates = [...(await linkTargetCandidates(db, bundleId)), { id, name }];
+  const candidates = propInputs.some((p) => hasLinkTarget(p.config))
+    ? [...(await linkTargetCandidates(db, bundleId)), { id, name }]
+    : [];
   const configs = propInputs.map((prop) => withResolvedLinkTarget(prop.name.trim(), prop.config, candidates));
 
   await db.client.insert(itemTypes).values({ id, bundleId, name, createdAt: nowIso() });
@@ -195,7 +197,9 @@ export async function addProperty(
   const { properties } = db.tables;
   const siblings = await db.client.select().from(properties).where(eq(properties.itemTypeId, itemTypeId));
   if (siblings.some((p) => p.name === name)) throw invalid(`property "${name}" already exists on this item-type`);
-  const config = withResolvedLinkTarget(name, input.config, await linkTargetCandidates(db, ctx.bundle.id));
+  const config = hasLinkTarget(input.config)
+    ? withResolvedLinkTarget(name, input.config, await linkTargetCandidates(db, ctx.bundle.id))
+    : input.config;
   const row: Property = {
     id: newId(),
     itemTypeId,
@@ -288,10 +292,9 @@ export async function updateProperty(
   // A config patch replaces the stored config whole, so its link target is
   // resolved to an id here; a stored config the patch leaves alone is not
   // re-resolved (the startup upgrade owns rows written before ids).
-  const config =
-    patch.config !== undefined
-      ? withResolvedLinkTarget(current.name, patch.config, await linkTargetCandidates(db, ctx.bundle.id))
-      : undefined;
+  const config = hasLinkTarget(patch.config)
+    ? withResolvedLinkTarget(current.name, patch.config, await linkTargetCandidates(db, ctx.bundle.id))
+    : patch.config;
   await db.client
     .update(properties)
     .set({

@@ -56,7 +56,7 @@ const PRE_CHANGE_CONFIGS = {
   // and one whose config is not JSON.
   pNoPin: "",
   pBounds: '{"maxItems":2}',
-  pBroken: "{not json",
+  pBroken: '{"itemType":',
 };
 
 /**

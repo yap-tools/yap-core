@@ -177,22 +177,19 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
       .values(seeded.map((t) => ({ id: t.id, bundleId: bundle.id, name: t.name, createdAt: now })));
   }
   const candidates: LinkTargetCandidate[] = seeded.map((t) => ({ id: t.id, name: t.name }));
-  for (const { itemType, id: itemTypeId } of seeded) {
-    if (itemType.properties.length > 0) {
-      await db.client.insert(properties).values(
-        itemType.properties.map((prop, order) => ({
-          id: newId(),
-          itemTypeId,
-          name: prop.name.trim(),
-          datatype: prop.datatype,
-          required: prop.required ? 1 : 0,
-          multi: prop.multi ? 1 : 0,
-          config: serializeConfig(withResolvedLinkTarget(prop.name.trim(), prop.config, candidates)),
-          sortOrder: order,
-        })),
-      );
-    }
-  }
+  const propRows = seeded.flatMap(({ itemType, id: itemTypeId }) =>
+    itemType.properties.map((prop, order) => ({
+      id: newId(),
+      itemTypeId,
+      name: prop.name.trim(),
+      datatype: prop.datatype,
+      required: prop.required ? 1 : 0,
+      multi: prop.multi ? 1 : 0,
+      config: serializeConfig(withResolvedLinkTarget(prop.name.trim(), prop.config, candidates)),
+      sortOrder: order,
+    })),
+  );
+  if (propRows.length > 0) await db.client.insert(properties).values(propRows);
   return bundle;
 }
 

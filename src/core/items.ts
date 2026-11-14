@@ -441,17 +441,10 @@ async function validateReferences(db: Db, bundleId: string, refs: ValueEntry[]):
     const byId = new Map(rows.map((r) => [r.id, r]));
     // config.itemType holds the target's id. The name step inside
     // resolveItemType is there for rows the startup upgrade left alone.
-    const typeCache = new Map<string, { id: string; name: string } | null>();
-    const resolveTargetType = async (ref: string): Promise<{ id: string; name: string } | null> => {
-      if (typeCache.has(ref)) return typeCache.get(ref)!;
-      let type: { id: string; name: string } | null = null;
-      try {
-        type = await resolveItemType(db, bundleId, ref);
-      } catch {
-        type = null;
-      }
-      typeCache.set(ref, type);
-      return type;
+    const typeCache = new Map<string, Promise<{ id: string; name: string } | null>>();
+    const resolveTargetType = (ref: string) => {
+      if (!typeCache.has(ref)) typeCache.set(ref, resolveItemType(db, bundleId, ref).catch(() => null));
+      return typeCache.get(ref)!;
     };
     for (const ref of itemRefs) {
       const row = byId.get(refId(ref.value));
