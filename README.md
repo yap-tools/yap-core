@@ -335,6 +335,19 @@ run services in one bundle and not its sibling, with the deciding row
 auditable either way. Personal spaces accept no grants; their owner
 implicitly holds all capabilities.
 
+### Reading your own permissions
+
+Every space and bundle that REST returns (`GET /v1/spaces`,
+`GET /v1/spaces/:id`, `GET /v1/spaces/:id/bundles`, `GET /v1/bundles/:id`)
+carries a `role` array: the capability names the calling credential holds on
+it, computed by the same core function MCP uses for `role` on `load`,
+`load_space` and `load_bundle`, so the two transports agree. The array is
+never omitted and may be empty. A space's `role` counts space-level rows only:
+a user holding just a bundle grant sees `[]` on the space and the granted set
+on the bundle. For an OAuth token, the token's role scope and any `space:` /
+`bundle:` limits are already applied. Account-level restrictions are a
+separate set, reported as `deniedCapabilities` on `whoami`.
+
 ### Account-level restrictions
 
 Two things a user can do belong to their account rather than to any space:

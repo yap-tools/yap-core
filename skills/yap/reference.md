@@ -14,6 +14,8 @@ Verified against yap-core source. Base URL defaults to `http://localhost:8787`; 
 | `GET/POST /v1/spaces/:id/grants`, `DELETE …/grants/:grantId` | role grants on a space |
 | `GET/POST /v1/bundles/:id/grants`, `DELETE …/grants/:grantId` | role grants on a bundle |
 
+Space and bundle reads (`GET /v1/spaces`, `GET /v1/spaces/:id`, `GET /v1/spaces/:id/bundles`, `GET /v1/bundles/:id`) carry a top-level `role`: the array of capability names the calling credential holds there, the same set MCP `load`, `load_space` and `load_bundle` return. It is never omitted and may be empty. A space's `role` ignores bundle-level grants, so a user with only a bundle grant sees `[]` on the space and the granted set on the bundle. An OAuth token's role scope and `space:` / `bundle:` limits are already applied. Account-level `deniedCapabilities` are separate and live on `GET /v1/whoami`.
+
 ### Bundle docs & user docs
 | Method & path | Body |
 |---|---|

@@ -8,7 +8,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
-import { hasAnyCapability, requireCapability, resolveCapability } from "./capabilities.js";
+import { effectiveCapabilities, hasAnyCapability, requireCapability, resolveCapability } from "./capabilities.js";
 import { forbidden, invalid, notFound } from "./errors.js";
 import type { GrantTarget } from "./grants.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
@@ -209,6 +209,18 @@ export async function bundleGrantTarget(db: Db, bundleId: string): Promise<Grant
   return { type: "bundle", id: bundle.id, space };
 }
 
+/**
+ * The caller's effective capabilities on a bundle (the same set MCP reports as
+ * `role`), refusing with 404 when it is empty so the bundle's existence stays
+ * hidden from outsiders. One grants query serves both the access check and the
+ * role.
+ */
+export async function requireBundleRole(db: Db, userId: string, ctx: BundleContext): Promise<string[]> {
+  const role = await effectiveCapabilities(db, userId, bundleCapabilityCtx(ctx));
+  if (role.length === 0) throw notFound("bundle", ctx.bundle.id);
+  return role;
+}
+
 /** Requires "bundle read access": at least one effective capability. */
 export async function requireBundleReadAccess(db: Db, userId: string, ctx: BundleContext): Promise<void> {
   if (!(await hasAnyCapability(db, userId, bundleCapabilityCtx(ctx)))) {
@@ -243,13 +255,20 @@ export async function requireBundleCapability(
   throw forbidden(`missing capability ${capability}`, { capability, decidedBy: decision.decidedBy });
 }
 
-/** Lists bundles in a space the user can see (any effective capability). */
+/** A bundle together with the caller's effective capabilities on it. */
+export type BundleWithRole = Bundle & { role: string[] };
+
+/**
+ * Lists bundles in a space the user can see (any effective capability), each
+ * carrying that capability set as `role`. The set computed for the visibility
+ * check is kept, so reporting it costs no extra queries.
+ */
 export async function listBundles(
   db: Db,
   userId: string,
   spaceId: string,
   opts: { cursor?: string; limit?: string | number } = {},
-): Promise<Page<Bundle>> {
+): Promise<Page<BundleWithRole>> {
   const space = await getSpaceRow(db, spaceId);
   const { bundles } = db.tables;
   const limit = clampLimit(opts.limit);
@@ -259,11 +278,10 @@ export async function listBundles(
     .from(bundles)
     .where(eq(bundles.spaceId, spaceId))
     .orderBy(asc(bundles.createdAt), asc(bundles.id));
-  const visible: Bundle[] = [];
+  const visible: BundleWithRole[] = [];
   for (const bundle of rows) {
-    if (await hasAnyCapability(db, userId, { space: toSpaceRef(space), bundleId: bundle.id })) {
-      visible.push(bundle);
-    }
+    const role = await effectiveCapabilities(db, userId, { space: toSpaceRef(space), bundleId: bundle.id });
+    if (role.length > 0) visible.push({ ...bundle, role });
   }
   return toPage(visible.slice(offset, offset + limit + 1), offset, limit);
 }

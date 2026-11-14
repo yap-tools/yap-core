@@ -367,7 +367,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/spaces",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      return c.json(await spacesCore.listSpacesForUser(db, userId, pageOpts(c)));
+      return c.json(await spacesCore.listSpacesWithRole(db, userId, pageOpts(c)));
     }),
   );
 
@@ -379,7 +379,7 @@ export function registerRestRoutes(server: YapServer): void {
       if (!(await spacesCore.canReachSpace(db, userId, space))) {
         throw new YapError("not_found", `space ${space.id} not found`);
       }
-      return c.json(space);
+      return c.json({ ...space, role: await spacesCore.spaceRole(db, userId, space) });
     }),
   );
 
@@ -522,10 +522,10 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const ctx = await bundlesCore.getBundleContext(db, param(c, "id"));
-      await bundlesCore.requireBundleReadAccess(db, userId, ctx);
+      const role = await bundlesCore.requireBundleRole(db, userId, ctx);
       const itemTypes = (await itemTypesCore.listItemTypesUnchecked(db, ctx.bundle.id)).map(itemTypesCore.itemTypeView);
       const docs = (await bundleDocsCore.listDocsUnchecked(db, ctx.bundle.id)).map(bundleDocsCore.docInfoView);
-      return c.json({ ...ctx.bundle, docs, itemTypes });
+      return c.json({ ...ctx.bundle, role, docs, itemTypes });
     }),
   );
 
