@@ -159,7 +159,7 @@ POST /v1/bundles/:id/services
 }
 ```
 
-A pinned parameter is injected server-side and never appears in the run record or the result; the agent supplies only `subject` and `body`. Pins are per parameter *name*, so on their own they would leave `cc` and `bcc` open — which is why the driver treats the three recipient fields as one: **pinning any of `to`, `cc`, `bcc` locks the others.** On such a service, supplying an unpinned recipient field fails with `recipients are fixed on this service; cc cannot be supplied`, and a reply may not derive `to` from the original message either (that would be aiming by proxy). The host tells the driver which parameters were pinned through `ctx.pinned`. Pin `to` and allow only `draft` for a service that may propose replies to one person and nothing else; leave all three unpinned for a service that may address mail freely.
+A pinned parameter is injected server-side and its value never appears in the run's params or in an error; the agent supplies only `subject` and `body`. Pins are per parameter *name*, so on their own they would leave `cc` and `bcc` open — which is why the driver treats the three recipient fields as one: **pinning any of `to`, `cc`, `bcc` locks the others.** On such a service, supplying an unpinned recipient field fails with `recipients are fixed on this service; cc cannot be supplied`, and a reply may not derive `to` from the original message either (that would be aiming by proxy). The host tells the driver which parameters were pinned through `ctx.pinned`. Pin `to` and allow only `draft` for a service that may propose replies to one person and nothing else; leave all three unpinned for a service that may address mail freely. One exception to keep in mind: when `attachments` is pinned to real file references, what those files are is not hidden. Each attached file is read through the bundle reader, so the run's audit trail records a `file_read` entry for it, and the `attachments` summary in the result names it. Both are there so the run shows what went on the message.
 
 Invoking:
 
@@ -178,7 +178,7 @@ run_service {"id": "triage", "action": "draft", "params": {"to": "alice@example.
 
 ## Limits and safety
 
-- Results never contain config, credentials, hosts, or pinned values. Folder names and message ids are returned — the agent needs them to refer to things.
+- Results never contain config, credentials, or hosts, and pinned values only as the files a pinned `attachments` put on the message (see above). Folder names and message ids are returned — the agent needs them to refer to things.
 - `delete_draft` has no folder parameter and can only operate in the resolved Drafts folder; it requires UIDPLUS so deletion is UID-scoped.
 - `search` returns at most 100 summaries per call; `read` text is capped at `max_chars` (≤ 100 000) and the fetched section at 512 KiB, with `truncated: true` when either cap applied.
 - `read` lists attachments with part, name, type, and size and never fetches them; `attachment` fetches one listed attachment, at most 25 MiB decoded, into the bundle (see [Downloading attachments](#downloading-attachments)).
@@ -202,4 +202,4 @@ Connection, TLS, authentication, and other protocol failures — and a service c
 
 ## Trust model
 
-The mail driver is part of the server, so it carries the server's trust. The egress guard protects against hostile *parameters* flowing through it — an agent cannot point the account at a different host, because the host is config — and the action allowlist plus pins decide what an agent may do with the account at all. The driver's errors and logs redact credentials and message bodies; the server's reply lines (which can echo an address) survive only in the operator log. See [SECURITY.md](../SECURITY.md).
+The mail driver is part of the server, so it carries the server's trust. The egress guard protects against hostile *parameters* flowing through it — an agent cannot point the account at a different host, because the host is config — and the action allowlist plus pins decide what an agent may do with the account at all. The driver's errors and logs redact credentials and message bodies; the server's reply lines (which can echo an address) survive only in the operator log. The one exception is an append the server refused for size: its reply text, cut to printable ASCII and 200 characters, reaches the agent, because it is the only explanation of the server's own limit. See [SECURITY.md](../SECURITY.md).
