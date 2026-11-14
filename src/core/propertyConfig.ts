@@ -30,7 +30,9 @@ export interface PropertyConfig {
   /** any multi-valued property: bounds on the number of elements. */
   minItems?: number;
   maxItems?: number;
-  /** item: constrain the referent to a target item-type (name or id). */
+  /** item: constrain the referent to a target item-type in the same bundle.
+   *  Stored as the target's id; a name is accepted on save and resolved to the
+   *  id then (see linkTargets.ts), so a rename never breaks the link. */
   itemType?: string;
   /** single-valued text/number: no two items of the type may share a value
    *  (exact match on the stored text; absent values never collide). Enforced

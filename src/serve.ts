@@ -1,11 +1,12 @@
 import { createRequire } from "node:module";
 
-import { maybePreMigrationBackup, startBackupScheduler } from "./backup/auto.js";
+import { backupToSink, maybePreMigrationBackup, startBackupScheduler } from "./backup/auto.js";
 import { createBackupSink } from "./backup/sink.js";
 import { createBlobStore } from "./blob/index.js";
 import { resolveEnvFile } from "./instance/env.js";
 import { ConfigError, loadConfig, type YapConfig } from "./config.js";
 import { DriverLoadError, loadExternalDrivers } from "./core/drivers/load.js";
+import { upgradeLinkTargets } from "./core/linkTargets.js";
 import { sweepOrphans } from "./core/files.js";
 import { pruneRuns, recoverInterruptedRuns } from "./core/runs.js";
 import { createDb } from "./db/index.js";
@@ -40,10 +41,12 @@ export async function serve(): Promise<void> {
   const db = await createDb(config.db);
   const blob = await createBlobStore(config);
 
+  let preMigrationBackupTaken = false;
   if (config.backup.beforeMigrate) {
     const sink = await createBackupSink(config.backup.sink);
     try {
       const name = await maybePreMigrationBackup({ db, blob, sink, yapVersion });
+      preMigrationBackupTaken = name !== undefined;
       if (name) logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
     } catch (err) {
       // The safety promise: never migrate data that could not be backed up.
@@ -56,6 +59,30 @@ export async function serve(): Promise<void> {
     }
   }
   await db.migrate();
+
+  // Link properties store their target item type by id. Rows written before
+  // that held names; rewrite the unambiguous ones (backing up first, under
+  // the same promise as schema migrations) and log the rest. Runs on every
+  // start: rows already holding ids are never touched.
+  try {
+    await upgradeLinkTargets(db, {
+      logger,
+      beforeRewrite: async () => {
+        if (!config.backup.beforeMigrate || preMigrationBackupTaken) return;
+        const sink = await createBackupSink(config.backup.sink);
+        const name = await backupToSink({ db, blob, sink, yapVersion }, "pre-migration");
+        logger.info(`pre-migration backup written: ${name} → ${sink.describe()}`);
+      },
+    });
+  } catch (err) {
+    logger.error(
+      "link target upgrade failed — refusing to start (nothing was rewritten if its pre-migration backup failed; " +
+        "YAP_BACKUP_BEFORE_MIGRATE=false skips that backup)",
+      err,
+    );
+    await db.close();
+    process.exit(1);
+  }
 
   // Minted upload/download/widget links are absolute and built from baseUrl.
   // If the server binds publicly but baseUrl still defaults to localhost, those

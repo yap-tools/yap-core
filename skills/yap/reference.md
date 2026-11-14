@@ -40,7 +40,7 @@ Property: `{"name", "datatype", "required"?, "multi"?, "config"?}`.
 | `text` | string | `{pattern}` — regex via `RegExp.test`; anchor `^…$` for full match; `{enum}` — one of the listed strings (multi-select when `multi`) |
 | `number` | number | `{min, max, decimals}` — inclusive bounds; default 2 decimals, excess precision rejected |
 | `boolean`, `date` | bool / ISO date | — |
-| `item` | `item://<id>` (same bundle) | `{itemType}` — referent must be of that type |
+| `item` | `item://<id>` (same bundle) | `{itemType}` — referent must be of that type; send a name or id of a type in the bundle, it is stored and read back as the id (renames never break it; an unknown one is refused) |
 | `file` | `file://<id>` (finalized file) | — |
 | any with `multi: true` | ordered array | `{minItems, maxItems}` |
 | single-valued `text` / `number` | — | `{unique}` — no two items of the type may share a value; enabling it on a property with existing duplicates is rejected |
