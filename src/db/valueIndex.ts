@@ -34,6 +34,14 @@
  * Any generated SQLite migration that recreates this index (a rebuild of
  * `item_values`, for one) needs the same hand fix; it fails loudly with
  * "no such column" if missed.
+ *
+ * Upgrading on Postgres: `DROP INDEX` takes an ACCESS EXCLUSIVE lock on
+ * `item_values`, and drizzle's Postgres migrator applies every pending
+ * migration in one transaction, so reads and writes of items block until
+ * that transaction commits. The rebuild computes the prefix for every row,
+ * so its duration scales with the table; migrations run at startup, before
+ * the server accepts requests. Large installs should upgrade in a
+ * maintenance window.
  */
 import { type SQL, sql } from "drizzle-orm";
 
