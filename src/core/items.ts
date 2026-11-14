@@ -439,17 +439,12 @@ async function validateReferences(db: Db, bundleId: string, refs: ValueEntry[]):
       .from(items)
       .where(inArray(items.id, ids));
     const byId = new Map(rows.map((r) => [r.id, r]));
-    const typeIdCache = new Map<string, string | null>();
-    const resolveTargetTypeId = async (ref: string): Promise<string | null> => {
-      if (typeIdCache.has(ref)) return typeIdCache.get(ref)!;
-      let id: string | null = null;
-      try {
-        id = (await resolveItemType(db, bundleId, ref)).id;
-      } catch {
-        id = null;
-      }
-      typeIdCache.set(ref, id);
-      return id;
+    // config.itemType holds the target's id. The name step inside
+    // resolveItemType is there for rows the startup upgrade left alone.
+    const typeCache = new Map<string, Promise<{ id: string; name: string } | null>>();
+    const resolveTargetType = (ref: string) => {
+      if (!typeCache.has(ref)) typeCache.set(ref, resolveItemType(db, bundleId, ref).catch(() => null));
+      return typeCache.get(ref)!;
     };
     for (const ref of itemRefs) {
       const row = byId.get(refId(ref.value));
@@ -459,9 +454,9 @@ async function validateReferences(db: Db, bundleId: string, refs: ValueEntry[]):
       }
       const target = parseConfig(ref.prop.config).itemType;
       if (target !== undefined) {
-        const wantId = await resolveTargetTypeId(target);
-        if (wantId === null || row.itemTypeId !== wantId) {
-          errors.push(`${ref.label}: property "${ref.prop.name}" must reference an item of type "${target}"`);
+        const want = await resolveTargetType(target);
+        if (want === null || row.itemTypeId !== want.id) {
+          errors.push(`${ref.label}: property "${ref.prop.name}" must reference an item of type "${want?.name ?? target}"`);
         }
       }
     }

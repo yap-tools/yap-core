@@ -24,7 +24,8 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   datatype). A property may declare config constraints, enforced on every
   write: text {pattern, enum}; number {min, max, decimals} (default 2 decimals,
   out-of-precision writes rejected); item {itemType} to pin the referent's
-  type; any multi field {minItems, maxItems}; single-valued text/number
+  type (send a name or id; it is stored and read back as the type's id, so a
+  rename never breaks the link); any multi field {minItems, maxItems}; single-valued text/number
   {unique} — no two items of the type may share a value. Query multi fields with the set
   operators has/has_any/has_all/has_none, or a comparison op with a quantifier
   (any/all/none).

@@ -13,6 +13,7 @@ import { forbidden, invalid, notFound } from "./errors.js";
 import type { GrantTarget } from "./grants.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
+import { unknownLinkTargetMessage, withResolvedLinkTarget, type LinkTargetCandidate } from "./linkTargets.js";
 import { getSpaceRow, toSpaceRef, type Space } from "./spaces.js";
 import { newId, nowIso } from "./util.js";
 
@@ -110,6 +111,18 @@ export function validateBundleInput(input: BundleInput): string[] {
       }
     }
   }
+  // Seeded link properties may target any type of this same call, in either
+  // order and themselves included, but nothing else: the bundle is new, so
+  // there is no other type to point at. Checked here, before any write.
+  for (const [i, itemType] of (input.itemTypes ?? []).entries()) {
+    for (const [j, prop] of (itemType.properties ?? []).entries()) {
+      const target = prop.config?.itemType;
+      if (prop.datatype !== "item" || target === undefined || target === null) continue;
+      if (!typeNames.has(target)) {
+        errors.push(`itemTypes[${i}].properties[${j}]: ${unknownLinkTargetMessage(prop.name?.trim() ?? "", target)}`);
+      }
+    }
+  }
   return errors;
 }
 
@@ -153,29 +166,30 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
       })),
     );
   }
-  for (const itemType of input.itemTypes ?? []) {
-    const itemTypeId = newId();
-    await db.client.insert(itemTypes).values({
-      id: itemTypeId,
-      bundleId: bundle.id,
-      name: itemType.name.trim(),
-      createdAt: now,
-    });
-    if (itemType.properties.length > 0) {
-      await db.client.insert(properties).values(
-        itemType.properties.map((prop, order) => ({
-          id: newId(),
-          itemTypeId,
-          name: prop.name.trim(),
-          datatype: prop.datatype,
-          required: prop.required ? 1 : 0,
-          multi: prop.multi ? 1 : 0,
-          config: serializeConfig(prop.config),
-          sortOrder: order,
-        })),
-      );
-    }
+  // Types first, then properties: a link property stores its target's id, and
+  // seeded types may link to each other in any order, so every id must exist
+  // before the first property is written. validateBundleInput has already
+  // refused any target outside this call, so resolution cannot fail here.
+  const seeded = (input.itemTypes ?? []).map((itemType) => ({ itemType, id: newId(), name: itemType.name.trim() }));
+  if (seeded.length > 0) {
+    await db.client
+      .insert(itemTypes)
+      .values(seeded.map((t) => ({ id: t.id, bundleId: bundle.id, name: t.name, createdAt: now })));
   }
+  const candidates: LinkTargetCandidate[] = seeded.map((t) => ({ id: t.id, name: t.name }));
+  const propRows = seeded.flatMap(({ itemType, id: itemTypeId }) =>
+    itemType.properties.map((prop, order) => ({
+      id: newId(),
+      itemTypeId,
+      name: prop.name.trim(),
+      datatype: prop.datatype,
+      required: prop.required ? 1 : 0,
+      multi: prop.multi ? 1 : 0,
+      config: serializeConfig(withResolvedLinkTarget(prop.name.trim(), prop.config, candidates)),
+      sortOrder: order,
+    })),
+  );
+  if (propRows.length > 0) await db.client.insert(properties).values(propRows);
   return bundle;
 }
 
@@ -337,7 +351,12 @@ export async function deleteBundle(db: Db, userId: string, bundleId: string, blo
     .where(and(eq(grants.resourceType, "bundle"), eq(grants.resourceId, bundleId)));
 }
 
-/** Resolves an item-type within a bundle by id or name. */
+/**
+ * Resolves an item-type within a bundle by id, then by name. Item reads and
+ * writes name their type either way. Link properties store their target as an
+ * id; for a pin, the name step serves the rows the startup upgrade had to
+ * leave alone (see linkTargets.ts).
+ */
 export async function resolveItemType(
   db: Db,
   bundleId: string,

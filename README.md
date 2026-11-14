@@ -303,7 +303,7 @@ A property may declare a **`config`** of constraints, enforced at the core
 | `text` | `{ pattern }` | value must match the regex (`RegExp.test`; anchor with `^…$` for a full match) |
 | `text` | `{ enum }` | value must be one of the listed strings (exact, case-sensitive); with `multi` it is a multi-select |
 | `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
-| `item` | `{ itemType }` | the referent must be of this item-type |
+| `item` | `{ itemType }` | the referent must be of this item-type (same bundle); send its name or id, it is stored and read back as the id — see [docs/item-links.md](docs/item-links.md) |
 | any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
 | single-valued `text` / `number` | `{ unique }` | no two items of the type may share a value (exact match on the stored value; absent values never collide) — for ids and other identity fields |
 
