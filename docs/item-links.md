@@ -10,7 +10,7 @@ A property of datatype `item` holds a link to another item in the same bundle
 
 ## How the target is stored
 
-The target is stored as the **id** of the item type, never its name. That is
+Every save stores the target as the **id** of the item type, never its name. That is
 what keeps a link pointing at the same type when the type is renamed, and what
 stops a different type that later takes the old name from becoming the
 target.
@@ -33,9 +33,13 @@ target.
   partial bundle, as before. Link resolution adds no new way for that to
   happen, because it cannot fail once validation has passed.)
 - **On read** — REST schema responses, the MCP `load_bundle` output and every
-  other read path return `config.itemType` as stored: the id. `load_bundle`
-  lists each item type's `id` next to its `name`, so a client can map one to
-  the other.
+  other read path return `config.itemType` as stored: the id, except for the
+  rows the upgrade below had to leave alone, which still read back as the
+  name they hold. `load_bundle` lists each item type's `id` next to its
+  `name`, so a client can map one to the other.
+- **`update_property` without a `config`** (a rename, a reorder, a flag
+  change) leaves the stored config as it is. Only a patch that carries a
+  `config` resolves its target.
 - **On an item write** — a link value is checked against the pinned type by
   id. If the pin cannot be met, the error names the target type by its
   current name: `property "project" must reference an item of type "Project"`.
@@ -54,8 +58,13 @@ target upgrade (`upgradeLinkTargets`, called from `src/serve.ts`):
 - **What changes.** For each property of datatype `item` whose
   `config.itemType` is not the id of an item type in the property's own
   bundle: if exactly one item type in that bundle has that value as its name
-  today, the value is rewritten to that type's id. Only that one key of the
-  `config` column changes; every other key keeps its value and its order.
+  today, the value is rewritten to that type's id. Only that one value in the
+  `config` column changes: the rewrite runs only on a config stored in the
+  exact form Core writes it (compact JSON), so the rest of the text stays
+  byte-for-byte the same. Each row is written only if, at that moment, it
+  still holds the config that was read and the target type still has that
+  name; a row that changed in between is skipped and looked at again on the
+  next start.
 - **What does not change.** Item values, other properties, other datatypes,
   constraints and the schema are never touched; no property is deleted. Rows
   that already hold an id are skipped, so running it again changes nothing.
@@ -68,7 +77,9 @@ target upgrade (`upgradeLinkTargets`, called from `src/serve.ts`):
 - **Rows left alone.** A value that matches no item type in the bundle (the
   type was renamed or deleted), or that is the name of a type in another
   bundle, is left exactly as it is and logged as a warning on every start,
-  with the bundle, item type, property and stored value. Fix one by setting
+  with the bundle, item type, property and stored value. So is a config that
+  is not readable JSON, and one that resolves but is not in the form Core
+  writes (say, hand-edited with extra spaces). Fix one by setting
   the target with `update_property` (`config: { "itemType": "<name or id>" }`).
   Until then it behaves as before: item writes resolve it by id first, then by
   name.

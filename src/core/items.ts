@@ -439,8 +439,8 @@ async function validateReferences(db: Db, bundleId: string, refs: ValueEntry[]):
       .from(items)
       .where(inArray(items.id, ids));
     const byId = new Map(rows.map((r) => [r.id, r]));
-    // config.itemType holds the target's id. The name fallback inside
-    // resolveItemType only matters for rows the startup upgrade left alone.
+    // config.itemType holds the target's id. The name step inside
+    // resolveItemType is there for rows the startup upgrade left alone.
     const typeCache = new Map<string, { id: string; name: string } | null>();
     const resolveTargetType = async (ref: string): Promise<{ id: string; name: string } | null> => {
       if (typeCache.has(ref)) return typeCache.get(ref)!;

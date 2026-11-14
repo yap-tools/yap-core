@@ -12,11 +12,12 @@
  *
  * Instances that predate this rule stored whatever the caller sent, usually a
  * name. `upgradeLinkTargets` rewrites those rows to ids at startup (see
- * src/serve.ts), and leaves alone, and logs, any row whose value it cannot
- * resolve unambiguously. Item writes still fall back to a name lookup for
- * exactly those leftover rows (resolveItemType in bundles.ts).
+ * src/serve.ts), and leaves alone, and logs, any row it cannot rewrite
+ * safely. Item writes still resolve a pin by id first, then by name
+ * (resolveItemType in bundles.ts); the name step is there for those leftover
+ * rows, and no save path stores a name any more.
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, exists, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
@@ -82,11 +83,22 @@ export interface LinkTargetRow {
   bundleName: string;
   /** The stored `config` column, verbatim. */
   config: string;
-  /** The stored `config.itemType` value. */
-  value: string;
+  /** The stored `config.itemType` value (null when the config cannot be read). */
+  value: string | null;
 }
 
+/** Why the upgrade left a row as it was. */
+export type LeftAloneReason =
+  /** The value is the name of no item type in the bundle (or of more than one). */
+  | "no-match"
+  /** The config is not a JSON object with a string itemType. */
+  | "unreadable"
+  /** The value resolves, but the stored JSON is not in the exact form Core
+   *  writes, so rewriting it could change more than the one key. */
+  | "not-canonical";
+
 export interface LinkTargetRewrite extends LinkTargetRow {
+  value: string;
   /** The id the value resolves to. */
   targetId: string;
   /** The new `config` column: the stored JSON with only `itemType` changed. */
@@ -95,8 +107,8 @@ export interface LinkTargetRewrite extends LinkTargetRow {
 
 export interface LinkTargetPlan {
   rewrites: LinkTargetRewrite[];
-  /** Name-valued links that match no item type (or more than one): left as they are. */
-  leftAlone: LinkTargetRow[];
+  /** Link properties the upgrade could not rewrite safely: left exactly as they are. */
+  leftAlone: (LinkTargetRow & { reason: LeftAloneReason })[];
 }
 
 /**
@@ -146,13 +158,13 @@ export async function planLinkTargetUpgrade(db: Db): Promise<LinkTargetPlan> {
   }
 
   for (const p of props) {
-    const parsed = parseObject(p.config);
-    const value = parsed?.itemType;
-    if (typeof value !== "string") continue; // no pin (or not one this rule can read)
     const owner = ownerById.get(p.itemTypeId);
-    if (!owner) continue;
+    if (!owner || !p.config) continue; // "" = no constraints, so no pin
+    const parsed = parseObject(p.config);
+    if (parsed && parsed.itemType === undefined) continue; // constraints, but no pin
+    const value = typeof parsed?.itemType === "string" ? parsed.itemType : null;
     const candidates = typesByBundle.get(owner.bundleId) ?? [];
-    if (candidates.some((c) => c.id === value)) continue; // already an id
+    if (value !== null && candidates.some((c) => c.id === value)) continue; // already an id
     const row: LinkTargetRow = {
       propertyId: p.propertyId,
       propertyName: p.propertyName,
@@ -163,13 +175,25 @@ export async function planLinkTargetUpgrade(db: Db): Promise<LinkTargetPlan> {
       config: p.config,
       value,
     };
+    if (value === null) {
+      plan.leftAlone.push({ ...row, reason: "unreadable" });
+      continue;
+    }
     const byName = candidates.filter((c) => c.name === value);
     if (byName.length !== 1) {
-      plan.leftAlone.push(row);
+      plan.leftAlone.push({ ...row, reason: "no-match" });
+      continue;
+    }
+    // Core writes config with JSON.stringify (serializeConfig). When the stored
+    // text is exactly that, re-serializing with the new id changes the bytes of
+    // the itemType value and nothing else; any other form (whitespace, number
+    // spellings, duplicate keys) is left for an operator.
+    if (JSON.stringify(parsed) !== p.config) {
+      plan.leftAlone.push({ ...row, reason: "not-canonical" });
       continue;
     }
     const targetId = byName[0]!.id;
-    plan.rewrites.push({ ...row, targetId, newConfig: JSON.stringify({ ...parsed, itemType: targetId }) });
+    plan.rewrites.push({ ...row, value, targetId, newConfig: JSON.stringify({ ...parsed, itemType: targetId }) });
   }
   return plan;
 }
@@ -187,18 +211,24 @@ function parseObject(stored: string): Record<string, unknown> | null {
 
 /**
  * Applies the planned rewrites: one UPDATE per row, of the `config` column
- * only, and only while the row still holds the config the plan read (a row
- * changed in between is skipped, and picked up by the next run). Returns the
- * number of rows changed.
+ * only, and only while the plan still holds at the moment of the write — the
+ * row keeps the config the plan read, and the target type still exists in the
+ * bundle under that name. A row whose plan went stale (say a schema edit during
+ * the backup) is skipped and reconsidered on the next start. Returns the number
+ * of rows changed.
  */
 export async function applyLinkTargetPlan(db: Db, plan: LinkTargetPlan): Promise<number> {
-  const { properties } = db.tables;
+  const { properties, itemTypes } = db.tables;
   let changed = 0;
   for (const r of plan.rewrites) {
+    const targetStillNamed = db.client
+      .select({ one: sql`1` })
+      .from(itemTypes)
+      .where(and(eq(itemTypes.id, r.targetId), eq(itemTypes.bundleId, r.bundleId), eq(itemTypes.name, r.value)));
     const res = await db.client
       .update(properties)
       .set({ config: r.newConfig })
-      .where(and(eq(properties.id, r.propertyId), eq(properties.config, r.config)))
+      .where(and(eq(properties.id, r.propertyId), eq(properties.config, r.config), exists(targetStillNamed)))
       .returning({ id: properties.id });
     changed += res.length;
   }
@@ -226,11 +256,16 @@ export async function upgradeLinkTargets(db: Db, opts: UpgradeLinkTargetsOpts): 
     opts.logger.info(`link targets: stored ${changed} link propert${changed === 1 ? "y's" : "ies'"} target item type by id`);
   }
   for (const r of plan.leftAlone) {
+    const why =
+      r.reason === "unreadable"
+        ? `config ${JSON.stringify(r.config)} has no readable itemType`
+        : r.reason === "not-canonical"
+          ? `config ${JSON.stringify(r.config)} is not in the form Core writes, so it was not rewritten`
+          : `config.itemType ${JSON.stringify(r.value)} matches no single item type in its bundle`;
     opts.logger.warn(
       `link targets: left alone — bundle ${JSON.stringify(r.bundleName)} (${r.bundleId}), ` +
         `item type ${JSON.stringify(r.itemTypeName)}, property ${JSON.stringify(r.propertyName)} (${r.propertyId}): ` +
-        `config.itemType ${JSON.stringify(r.value)} matches no single item type in its bundle; ` +
-        `fix it with update_property`,
+        `${why}; set its target with update_property`,
     );
   }
   return plan;

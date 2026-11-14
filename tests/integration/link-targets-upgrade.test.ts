@@ -20,7 +20,7 @@ import type { YapConfig } from "../../src/config.js";
 import { createItems } from "../../src/core/items.js";
 import { upgradeLinkTargets } from "../../src/core/linkTargets.js";
 import type { Db } from "../../src/db/index.js";
-import { describeEachAdapter, rawAll } from "../helpers/adapters.js";
+import { describeEachAdapter, rawAll, rawExec } from "../helpers/adapters.js";
 
 const now = "2026-01-01T00:00:00.000Z";
 
@@ -49,8 +49,13 @@ const PRE_CHANGE_CONFIGS = {
   pRenamed: '{"itemType":"person"}',
   // A name that only exists in another bundle: links never cross bundles.
   pForeign: '{"itemType":"elsewhere"}',
-  // An item property with no pin, and one whose config is not JSON.
+  // Resolves, but not in the form Core writes: rewriting could change more
+  // than the one key, so it is left for an operator.
+  pSpaced: '{ "itemType": "project" }',
+  // An item property with no constraints, one with constraints but no pin,
+  // and one whose config is not JSON.
   pNoPin: "",
+  pBounds: '{"maxItems":2}',
   pBroken: "{not json",
 };
 
@@ -103,6 +108,8 @@ async function seedPreChange(db: Db): Promise<void> {
     prop("pForeign", "t-task", 5),
     prop("pNoPin", "t-task", 6),
     prop("pBroken", "t-task", 7),
+    prop("pSpaced", "t-task", 9),
+    prop("pBounds", "t-task", 10, 1),
     // A text property carrying an itemType key is not a link: ignored.
     {
       id: "pText",
@@ -155,19 +162,27 @@ describeEachAdapter("link target upgrade", (adapter) => {
       const plan = await upgradeLinkTargets(db, { logger: first.logger, beforeRewrite: async () => void backups++ });
       expect(backups).toBe(1);
       expect(plan.rewrites.map((r) => r.propertyId).sort()).toEqual(["pBlocks", "pProject"]);
-      expect(plan.leftAlone.map((r) => r.propertyId).sort()).toEqual(["pForeign", "pGhost", "pRenamed"]);
+      expect(Object.fromEntries(plan.leftAlone.map((r) => [r.propertyId, r.reason]))).toEqual({
+        pBroken: "unreadable",
+        pForeign: "no-match",
+        pGhost: "no-match",
+        pRenamed: "no-match",
+        pSpaced: "not-canonical",
+      });
       expect(await configsById(db)).toEqual(UPGRADED_CONFIGS);
       expect(await valueRows(db)).toEqual(valuesBefore);
 
       // Each row left alone is logged with bundle, item type, property and value.
       const warnings = first.lines.filter((l) => l.level === "warn").map((l) => l.text);
-      expect(warnings).toHaveLength(3);
+      expect(warnings).toHaveLength(5);
       const ghost = warnings.find((w) => w.includes('"ghost"'))!;
       expect(ghost).toContain('bundle "Work" (b1)');
       expect(ghost).toContain('item type "task"');
       expect(ghost).toContain('property "ghost" (pGhost)');
       expect(warnings.some((w) => w.includes('config.itemType "person"'))).toBe(true);
       expect(warnings.some((w) => w.includes('config.itemType "elsewhere"'))).toBe(true);
+      expect(warnings.some((w) => w.includes("property \"broken\" (pBroken)") && w.includes("no readable itemType"))).toBe(true);
+      expect(warnings.some((w) => w.includes("(pSpaced)") && w.includes("not in the form Core writes"))).toBe(true);
 
       // Second run: nothing to rewrite, no backup, nothing changed; the rows
       // left alone are logged again (it runs on every start).
@@ -177,7 +192,7 @@ describeEachAdapter("link target upgrade", (adapter) => {
       expect(again.rewrites).toEqual([]);
       expect(await configsById(db)).toEqual(UPGRADED_CONFIGS);
       expect(await valueRows(db)).toEqual(valuesBefore);
-      expect(second.lines.filter((l) => l.level === "warn")).toHaveLength(3);
+      expect(second.lines.filter((l) => l.level === "warn")).toHaveLength(5);
     } finally {
       await db.close();
     }
@@ -197,6 +212,28 @@ describeEachAdapter("link target upgrade", (adapter) => {
         }),
       ).rejects.toThrow("sink unavailable");
       expect(await configsById(db)).toEqual({ ...PRE_CHANGE_CONFIGS, pText: '{"itemType":"project"}' });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("skips a planned rewrite whose target was renamed before the write (e.g. during the backup)", async () => {
+    const db = await adapter.makeDb();
+    try {
+      await seedPreChange(db);
+      const { logger } = captureLogger();
+      const plan = await upgradeLinkTargets(db, {
+        logger,
+        beforeRewrite: async () => {
+          // Another writer renames "project" and gives its name to a new type.
+          await rawExec(db, "UPDATE item_types SET name = 'project-old' WHERE id = 't-project'");
+          await db.insertRows("item_types", [{ id: "t-new", bundle_id: "b1", name: "project", created_at: now }]);
+        },
+      });
+      expect(plan.rewrites.map((r) => r.propertyId)).toContain("pProject");
+      const configs = await configsById(db);
+      expect(configs.pProject).toBe(PRE_CHANGE_CONFIGS.pProject); // stale: not rewritten
+      expect(configs.pBlocks).toBe(UPGRADED_CONFIGS.pBlocks); // still valid: rewritten
     } finally {
       await db.close();
     }

@@ -355,10 +355,10 @@ export async function deleteBundle(db: Db, userId: string, bundleId: string, blo
 }
 
 /**
- * Resolves an item-type within a bundle by id or name. Item reads and writes
- * name their type either way. Link properties store their target as an id;
- * the name lookup still serves the rows the startup upgrade had to leave
- * alone (see linkTargets.ts).
+ * Resolves an item-type within a bundle by id, then by name. Item reads and
+ * writes name their type either way. Link properties store their target as an
+ * id; for a pin, the name step serves the rows the startup upgrade had to
+ * leave alone (see linkTargets.ts).
  */
 export async function resolveItemType(
   db: Db,
