@@ -12,7 +12,7 @@ import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertAccountWrite } from "./authScope.js";
-import { KNOWN_CAPABILITIES, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
+import { KNOWN_CAPABILITIES, effectiveCapabilities, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
@@ -68,6 +68,29 @@ export async function createSpace(
     })),
   );
   return space;
+}
+
+/** A space together with the caller's effective capabilities on it. */
+export type SpaceWithRole = Space & { role: string[] };
+
+/**
+ * The caller's effective capabilities on a space. Bundle-level grants do not
+ * count here: someone holding only a bundle grant gets `[]` for the space.
+ */
+export async function spaceRole(db: Db, userId: string, space: Space): Promise<string[]> {
+  return effectiveCapabilities(db, userId, { space: toSpaceRef(space) });
+}
+
+/** Like listSpacesForUser, with each space's `role` (one grants query per space). */
+export async function listSpacesWithRole(
+  db: Db,
+  userId: string,
+  opts: { cursor?: string; limit?: string | number } = {},
+): Promise<Page<SpaceWithRole>> {
+  const page = await listSpacesForUser(db, userId, opts);
+  const data: SpaceWithRole[] = [];
+  for (const space of page.data) data.push({ ...space, role: await spaceRole(db, userId, space) });
+  return { ...page, data };
 }
 
 /** A space is reachable if the user owns it or holds any grant row on it or on a bundle inside it. */

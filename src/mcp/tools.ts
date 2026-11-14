@@ -14,11 +14,9 @@ import {
   getBundleContext,
   createBundle,
   listBundles,
-  requireBundleReadAccess,
-  bundleCapabilityCtx,
+  requireBundleRole,
   getBundleRow,
 } from "../core/bundles.js";
-import { effectiveCapabilities } from "../core/capabilities.js";
 import { YapError } from "../core/errors.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
@@ -28,7 +26,7 @@ import type { Page } from "../core/pagination.js";
 import { parseConfig, propertyConfigSchema } from "../core/propertyConfig.js";
 import { listSchedulesUnchecked } from "../core/schedules.js";
 import { listServicesUnchecked } from "../core/services.js";
-import { canReachSpace, createSpace, getSpaceRow, listSpacesForUser, toSpaceRef } from "../core/spaces.js";
+import { canReachSpace, createSpace, getSpaceRow, listSpacesWithRole, spaceRole } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
@@ -235,7 +233,7 @@ export function registerMcpTools(server: YapServer): void {
       try {
         const userId = sessionUser(ctx.session);
         const { items: reachable, truncated } = await drainPages((cursor) =>
-          listSpacesForUser(db, userId, { cursor, limit: 200 }),
+          listSpacesWithRole(db, userId, { cursor, limit: 200 }),
         );
         const spaces = [];
         for (const space of reachable) {
@@ -250,7 +248,7 @@ export function registerMcpTools(server: YapServer): void {
             description: space.description,
             keywords: space.keywords,
             personal: space.personal === 1,
-            role: await effectiveCapabilities(db, userId, { space: toSpaceRef(space) }),
+            role: space.role,
             bundles: visibleBundles.map((b) => b.name),
           });
         }
@@ -310,7 +308,6 @@ export function registerMcpTools(server: YapServer): void {
       try {
         const userId = sessionUser(ctx.session);
         const space = await getSpaceRow(db, args.space_id);
-        const ref = toSpaceRef(space);
         if (!(await canReachSpace(db, userId, space))) {
           throw new YapError("not_found", `space ${args.space_id} not found`);
         }
@@ -321,7 +318,7 @@ export function registerMcpTools(server: YapServer): void {
           id: space.id,
           name: space.name,
           context: space.context,
-          role: await effectiveCapabilities(db, userId, { space: ref }),
+          role: await spaceRole(db, userId, space),
           ...(truncated ? { truncated: "more bundles exist than shown; use the REST API to page through all" } : {}),
           bundles: bundles.map((b) => ({ id: b.id, name: b.name, description: b.description })),
         });
@@ -344,14 +341,13 @@ export function registerMcpTools(server: YapServer): void {
         for (const bundleId of args.bundle_ids) {
           try {
             const bundleCtx = await getBundleContext(db, bundleId);
-            await requireBundleReadAccess(db, userId, bundleCtx);
+            const role = await requireBundleRole(db, userId, bundleCtx);
             const docRows = await bundleDocsCore.listDocsUnchecked(db, bundleId);
             // Listed once and viewed twice: `services` is the real surface,
             // `hooks` the legacy projection of it. A service whose driver is
             // no longer installed still lists — with its driver name and an
             // empty action list — rather than taking the bundle down with it.
             const services = await listServicesUnchecked({ db, config, registry }, bundleId);
-            const role = await effectiveCapabilities(db, userId, bundleCapabilityCtx(bundleCtx));
             results.push({
               id: bundleCtx.bundle.id,
               space_id: bundleCtx.space.id,
