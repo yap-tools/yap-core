@@ -149,16 +149,32 @@ const OCTET_STREAM = "application/octet-stream";
 /** RFC 6838 type and subtype names: restricted-name-chars, at most 127 each. */
 const MIME_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 
+/** A charset name as RFC 2978 allows it (mime-charset chars), short enough to be a real one. */
+const CHARSET_RE = /^[a-z0-9!#$%&'+\-^_`{}~.]{1,40}$/;
+
 /**
- * The Content-Type written for a file: its stored type, lowercased, with any
- * parameters dropped; `application/octet-stream` when there is none or it is
- * not a valid type. A line break is refused outright rather than replaced —
- * a stored type with one in it is a sign something upstream is wrong.
+ * The Content-Type written for a file: its stored type, lowercased;
+ * `application/octet-stream` when there is none, it is not a valid type, or
+ * it is a composite type (`multipart/*`, `message/*`), which RFC 2045 §6.4
+ * does not allow in base64 and whose structure the stored bytes would have
+ * to carry. Parameters are dropped except a text type's `charset`, which says
+ * how its bytes are to be read and is kept when it is a valid charset name.
+ * A line break is refused outright rather than replaced — a stored type with
+ * one in it is a sign something upstream is wrong.
  */
 export function attachmentMimeType(value: unknown): string {
   if (value === undefined || value === null || value === "") return OCTET_STREAM;
-  const type = assertHeaderSafe(value, "attachment mime type").split(";")[0]!.trim().toLowerCase();
-  return MIME_TYPE_RE.test(type) ? type : OCTET_STREAM;
+  const [rawType, ...params] = assertHeaderSafe(value, "attachment mime type").split(";");
+  const type = rawType!.trim().toLowerCase();
+  if (!MIME_TYPE_RE.test(type) || type.startsWith("multipart/") || type.startsWith("message/")) return OCTET_STREAM;
+  if (!type.startsWith("text/")) return type;
+  for (const param of params) {
+    const match = /^\s*charset\s*=\s*(?:"([^"]*)"|([^\s"]*))\s*$/i.exec(param);
+    if (!match) continue;
+    const charset = (match[1] ?? match[2] ?? "").toLowerCase();
+    return CHARSET_RE.test(charset) ? `${type}; charset=${charset}` : type;
+  }
+  return type;
 }
 
 function attachmentFilename(value: unknown): string {

@@ -1160,6 +1160,9 @@ describe("attachments on draft and send", () => {
         const bytes = async (opts?: { maxBytes?: number }) => {
           if (opts?.maxBytes !== undefined && size > opts.maxBytes) throw new YapError("payload_too_large", `file ${id} exceeds the maximum inline read size of ${opts.maxBytes} bytes`);
           if (opts?.maxBytes === undefined && size > 10 * 1024 * 1024) throw new YapError("payload_too_large", `file ${id} exceeds the default`);
+          // The real reader also counts the bytes as they stream, so a record
+          // that understates the file cannot get more past maxBytes.
+          if (opts?.maxBytes !== undefined && f.bytes.length > opts.maxBytes) throw new YapError("payload_too_large", `file ${id} exceeds the maximum inline read size of ${opts.maxBytes} bytes`);
           read.push(id);
           return new Uint8Array(f.bytes);
         };
@@ -1300,6 +1303,43 @@ describe("attachments on draft and send", () => {
     expect(agentSafe(error as Error).code).toBe("invalid_request");
     expect((error as Error).message).toMatch(/attachments total 17825793 bytes; the cap is 17 MiB/);
     expect(reader.read).toEqual([]);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("attaches a file over the reader's default 10 MiB inline limit", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const big = files();
+    big[ID_A]!.bytes = Buffer.alloc(11 * 1024 * 1024, 0x5a);
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: ID_A }, { reader: fakeReader(big) });
+    expect(result.attachments).toEqual([{ name: "clip one.mp3", mime_type: "audio/mpeg", size: 11 * 1024 * 1024 }]);
+    const part = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw).parts[1]!;
+    expect(Buffer.compare(part.bytes, big[ID_A]!.bytes)).toBe(0);
+  });
+
+  it("accepts exactly 17 MiB in all, and an empty file once the budget is spent", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const full = files();
+    full[ID_A]!.bytes = Buffer.alloc(10 * 1024 * 1024, 1);
+    full[ID_B]!.bytes = Buffer.alloc(7 * 1024 * 1024, 2);
+    full[ID_C]!.bytes = Buffer.alloc(0);
+    const reader = fakeReader(full);
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B},${ID_C}` }, { reader });
+    expect(result.attachments.map((a: { size: number }) => a.size)).toEqual([10 * 1024 * 1024, 7 * 1024 * 1024, 0]);
+    expect(reader.read).toEqual([ID_A, ID_B, ID_C]);
+    const parts = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw).parts;
+    expect(parts.map((p) => p.bytes.length)).toEqual([parts[0]!.bytes.length, 10 * 1024 * 1024, 7 * 1024 * 1024, 0]);
+  });
+
+  it("stops a file whose record understates it at the cap, appending nothing", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const lying = files();
+    lying[ID_A]!.bytes = Buffer.alloc(10 * 1024 * 1024, 1);
+    lying[ID_B]!.bytes = Buffer.alloc(7 * 1024 * 1024 + 1, 2);
+    lying[ID_B]!.size = 16;
+    const reader = fakeReader(lying);
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B}` }, { reader }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toBe(`attachment "${ID_B}" takes the attachments past the 17 MiB cap`);
     expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
   });
 

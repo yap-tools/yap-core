@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertHeaderSafe,
+  attachmentMimeType,
   attachmentSummary,
   buildMessage,
   encodeHeaderWord,
@@ -310,6 +311,30 @@ describe("buildMessage with attachments", () => {
     expect(typeOf('text/plain"; x="y')).toBe("application/octet-stream");
     expect(typeOf("Text/Plain; charset=utf-8")).toBe("text/plain");
     expect(typeOf("audio/mpeg")).toBe("audio/mpeg");
+    expect(typeOf("audio/mpeg; charset=utf-8")).toBe("audio/mpeg");
+  });
+
+  it("sends composite types as application/octet-stream: RFC 2045 forbids them in base64", () => {
+    const typeOf = (mimeType: string) => parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, mimeType }] })).parts[1]!.contentType;
+    expect(typeOf("message/rfc822")).toBe("application/octet-stream");
+    expect(typeOf("multipart/mixed; boundary=x")).toBe("application/octet-stream");
+    expect(typeOf("Message/Partial")).toBe("application/octet-stream");
+  });
+
+  it("keeps a text type's charset, so its bytes are read the way they were written", () => {
+    const part = (mimeType: string) => parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, mimeType }] })).parts[1]!;
+    const latin1 = part("text/plain; charset=ISO-8859-1");
+    expect(latin1.contentType).toBe("text/plain");
+    expect(latin1.params["charset"]).toBe("iso-8859-1");
+    expect(latin1.params["name"]).toBe(pdf.filename);
+    expect(part('text/csv; header=present; charset="windows-1252"').params["charset"]).toBe("windows-1252");
+    // An invalid charset is dropped, not passed on, and cannot add parameters.
+    const bad = part("text/plain; charset=utf 8; b=c");
+    expect(bad.params["charset"]).toBeUndefined();
+    expect(bad.params["b"]).toBeUndefined();
+    expect(part('text/plain; charset="x; name=evil"').params["charset"]).toBeUndefined();
+    expect(part("text/plain").params["charset"]).toBeUndefined();
+    expect(attachmentMimeType("text/plain; charset=utf-8")).toBe("text/plain; charset=utf-8");
   });
 
   it("names an empty filename 'attachment'", () => {
@@ -321,7 +346,7 @@ describe("buildMessage with attachments", () => {
     const normalized = [{ ...pdf, mimeType: "Text/Plain; charset=utf-8" }, { ...pdf, filename: "", mimeType: "" }].map(normalizeAttachment);
     expect(() => normalizeAttachment({ ...pdf, filename: "a\r\nb" })).toThrow(/attachment filename/);
     expect(attachmentSummary(normalized)).toEqual([
-      { name: "report.pdf", mime_type: "text/plain", size: 1000 },
+      { name: "report.pdf", mime_type: "text/plain; charset=utf-8", size: 1000 },
       { name: "attachment", mime_type: "application/octet-stream", size: 1000 },
     ]);
   });
