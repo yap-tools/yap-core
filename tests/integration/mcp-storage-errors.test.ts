@@ -52,7 +52,6 @@ describeEachAdapter("MCP storage errors", (adapter) => {
     await app?.stop();
   });
 
-
   it("reports a bare internal error and logs the detail", async () => {
     const out = await mcp.call("call", {
       space_id: spaceId,

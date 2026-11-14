@@ -15,7 +15,7 @@
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { indexedValueIn } from "../db/valueIndex.js";
+import { indexedValueIn, valueIndexPrefix } from "../db/valueIndex.js";
 import {
   getBundleContext,
   requireBundleCapability,
@@ -265,6 +265,22 @@ function valueIn(property: Property, expr: SQL, operands: (string | number)[]): 
   return inArray(expr, operands);
 }
 
+const RANGE_SQL = { gt: ">", gte: ">=", lt: "<", lte: "<=" } as const;
+
+/**
+ * A range comparison. Dates are stored as canonical ISO-8601 strings, always
+ * shorter than the indexed prefix, so for them the prefix bound equals the
+ * full one and is stated too, letting the value index serve date ranges. For
+ * text of any length a prefix bound is unsound under a linguistic collation
+ * (see src/db/valueIndex.ts), so text keeps the full comparison only; numbers
+ * compare through CAST, which the index cannot serve.
+ */
+function rangeCondition(property: Property, expr: SQL, op: (typeof RANGE_SQL)[keyof typeof RANGE_SQL], operand: string | number): SQL {
+  const full = sql`${expr} ${sql.raw(op)} ${operand}`;
+  if (property.datatype !== "date") return full;
+  return sql`${valueIndexPrefix(expr)} ${sql.raw(op)} ${valueIndexPrefix(operand)} AND ${full}`;
+}
+
 /** Builds the per-value-row SQL condition (over alias `iv`) for a comparison op. */
 function filterValueCondition(property: Property, op: ComparisonOp, value: unknown): SQL {
   const expr = storedValueExpr(property);
@@ -274,13 +290,10 @@ function filterValueCondition(property: Property, op: ComparisonOp, value: unkno
     case "neq":
       return sql`${expr} <> ${compareOperand(property, value)}`;
     case "gt":
-      return sql`${expr} > ${compareOperand(property, value)}`;
     case "gte":
-      return sql`${expr} >= ${compareOperand(property, value)}`;
     case "lt":
-      return sql`${expr} < ${compareOperand(property, value)}`;
     case "lte":
-      return sql`${expr} <= ${compareOperand(property, value)}`;
+      return rangeCondition(property, expr, RANGE_SQL[op], compareOperand(property, value));
     case "contains": {
       if (typeof value !== "string") throw invalid(`contains filter on "${property.name}" expects text`);
       // Case-insensitive on both dialects (SQLite LIKE is ASCII-insensitive,

@@ -16,15 +16,17 @@ import { describeEachAdapter, rawAll, type Adapter } from "../helpers/adapters.j
 
 const now = "2026-01-01T00:00:00.000Z";
 
-async function valueIndexes(adapter: Adapter, db: Db): Promise<string[]> {
-  const rows = await rawAll<{ name: string }>(
+/** The value index(es) on item_values, with their definitions. */
+async function valueIndexDefs(adapter: Adapter, db: Db): Promise<{ name: string; def: string }[]> {
+  return rawAll<{ name: string; def: string }>(
     db,
     adapter.dialect === "pg"
-      ? "SELECT indexname AS name FROM pg_indexes WHERE tablename = 'item_values' AND indexname LIKE 'item_values_prop%'"
-      : "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'item_values' AND name LIKE 'item_values_prop%'",
+      ? "SELECT indexname AS name, indexdef AS def FROM pg_indexes WHERE tablename = 'item_values' AND indexname LIKE 'item_values_prop%'"
+      : "SELECT name, sql AS def FROM sqlite_master WHERE type = 'index' AND tbl_name = 'item_values' AND name LIKE 'item_values_prop%'",
   );
-  return rows.map((r) => r.name);
 }
+
+const valueIndexes = async (adapter: Adapter, db: Db) => (await valueIndexDefs(adapter, db)).map((r) => r.name);
 
 describeEachAdapter("migration-0012", (adapter) => {
   it("swaps the value index for a prefix index and leaves the data alone", async () => {
@@ -64,7 +66,10 @@ describeEachAdapter("migration-0012", (adapter) => {
 
       await db.migrate(); // apply the rest, incl. 0012
       expect(await db.appliedMigrations()).toBe(db.journalLength());
-      expect(await valueIndexes(adapter, db)).toEqual(["item_values_prop_value_prefix_idx"]);
+      const [def] = await valueIndexDefs(adapter, db);
+      expect(def!.name).toBe("item_values_prop_value_prefix_idx");
+      // The SQLite statement was corrected by hand; pin its shape on both.
+      expect(def!.def.replace(/["`]/g, "")).toMatch(/\(property_id, ?substr\(value, 1, 600\)\)/);
 
       const { itemValues } = db.tables;
       const [kept] = await db.client.select().from(itemValues).where(eq(itemValues.id, "v1"));

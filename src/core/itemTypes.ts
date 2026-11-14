@@ -265,8 +265,8 @@ export async function updateProperty(
       .select({ value: itemValues.value })
       .from(itemValues)
       .where(eq(itemValues.propertyId, propertyId))
-      // Group on the indexed prefix first so the value index can feed the
-      // grouping; the full value keeps values sharing a prefix apart.
+      // The prefix key mirrors the value index; the full value is what keeps
+      // values sharing a prefix apart.
       .groupBy(valueIndexPrefix(itemValues.value), itemValues.value)
       .having(sql`count(*) > 1`)
       .limit(5);

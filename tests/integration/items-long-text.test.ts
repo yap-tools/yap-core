@@ -61,6 +61,7 @@ describeEachAdapter("long text values", (adapter) => {
           ],
         },
         { name: "later", properties: [{ name: "code", datatype: "text" }] },
+        { name: "event", properties: [{ name: "at", datatype: "date" }] },
       ],
     });
     bundleId = bundle.id;
@@ -167,6 +168,21 @@ describeEachAdapter("long text values", (adapter) => {
       expect(none).toContain(iShort);
       expect(none).not.toContain(ia);
       expect(none).not.toContain(ic);
+    });
+  });
+
+  describe("date ranges (indexed through the prefix)", () => {
+    it("give the same results as before", async () => {
+      const at = ["2026-01-01T00:00:00.000Z", "2026-06-15T12:00:00.000Z", "2026-12-31T23:59:59.000Z"];
+      const [d1, d2, d3] = await Promise.all(at.map((a) => create("event", { at: a }).then((i) => i.id)));
+      const q = (op: string, value: string) =>
+        queryItems(db, userId, bundleId, { itemType: "event", filters: [{ property: "at", op, value } as ItemFilter] }).then(
+          (r) => ids(r.data),
+        );
+      expect(await q("gt", "2026-01-01T00:00:00.000Z")).toEqual([d2, d3].sort());
+      expect(await q("gte", "2026-06-15T12:00:00.000Z")).toEqual([d2, d3].sort());
+      expect(await q("lt", "2026-06-15")).toEqual([d1]);
+      expect(await q("lte", "2026-12-31T23:59:59.000Z")).toEqual([d1, d2, d3].sort());
     });
   });
 

@@ -21,7 +21,8 @@
  * equality (and therefore IN): under a deterministic collation equal values
  * have equal prefixes, but under a linguistic collation such as Postgres's
  * default en_US ordering is not prefix-consistent, so range filters keep the
- * full comparison alone. (The equality argument needs a deterministic
+ * full comparison alone, dates excepted (see rangeCondition in
+ * src/core/items.ts). (The equality argument needs a deterministic
  * collation. `value` declares no collation, so it gets the database default,
  * and Postgres only allows deterministic collations as a database default.)
  *
@@ -30,6 +31,9 @@
  * were column names for SQLite, so the SQLite statement in
  * drizzle/sqlite/0012_value_index_prefix.sql was corrected by hand; the
  * snapshot is as generated and a later `npm run db:generate` sees no drift.
+ * Any generated SQLite migration that recreates this index (a rebuild of
+ * `item_values`, for one) needs the same hand fix; it fails loudly with
+ * "no such column" if missed.
  */
 import { type SQL, sql } from "drizzle-orm";
 

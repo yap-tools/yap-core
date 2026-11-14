@@ -1,7 +1,9 @@
 /**
  * SQLite schema. Twin of schema-pg.ts — table and column names must stay
  * identical; only the dialect-specific column builders differ. Both schemas
- * stay within the SQLite∩Postgres subset: text, integer, plain indexes.
+ * stay within the SQLite∩Postgres subset: text, integer, plain indexes, and
+ * one expression index on `substr`, which both dialects support (see
+ * valueIndex.ts).
  *
  * Portability conventions:
  * - ids: uuid strings
