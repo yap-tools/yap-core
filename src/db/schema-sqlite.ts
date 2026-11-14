@@ -9,6 +9,7 @@
  * - booleans: integer 0/1
  * - EAV values: text, cast on read per the property's declared datatype
  */
+import { valueIndexPrefix } from "./valueIndex.js";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable(
@@ -167,7 +168,8 @@ export const itemValues = sqliteTable(
     position: integer("position").notNull().default(0), // element order for multi-valued properties
   },
   (t) => [
-    index("item_values_prop_value_idx").on(t.propertyId, t.value),
+    // Prefix only: see src/db/valueIndex.ts.
+    index("item_values_prop_value_prefix_idx").on(t.propertyId, valueIndexPrefix(t.value)),
     index("item_values_item_idx").on(t.itemId),
   ],
 );

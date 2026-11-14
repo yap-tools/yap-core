@@ -3,6 +3,7 @@
  * stay identical; only the dialect-specific column builders differ. See
  * schema-sqlite.ts for the portability conventions.
  */
+import { valueIndexPrefix } from "./valueIndex.js";
 import { index, integer, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
@@ -161,7 +162,8 @@ export const itemValues = pgTable(
     position: integer("position").notNull().default(0), // element order for multi-valued properties
   },
   (t) => [
-    index("item_values_prop_value_idx").on(t.propertyId, t.value),
+    // Prefix only: see src/db/valueIndex.ts.
+    index("item_values_prop_value_prefix_idx").on(t.propertyId, valueIndexPrefix(t.value)),
     index("item_values_item_idx").on(t.itemId),
   ],
 );

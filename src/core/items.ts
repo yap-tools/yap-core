@@ -7,12 +7,15 @@
  *
  * Query shape: one EXISTS subquery over value rows per filter (AND-combined),
  * a correlated subquery for sorting, offset-backed opaque cursors. The
- * (property_id, value) index serves the common filter path. Everything stays
+ * (property_id, value prefix) index serves the common filter path: equality
+ * and membership tests compare the indexed prefix next to the full value (see
+ * src/db/valueIndex.ts for why the index holds a prefix). Everything stays
  * within the SQLite∩Postgres SQL subset.
  */
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
+import { valueIndexPrefix } from "../db/valueIndex.js";
 import {
   getBundleContext,
   requireBundleCapability,
@@ -253,12 +256,26 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
 
 type ComparisonOp = (typeof COMPARISON_OPS)[number];
 
+/**
+ * `column IN (operands)` stated twice: on the indexed prefix, so the planner
+ * can use the value index, and on the full value, so the result stays exact
+ * for values longer than the prefix. One operand is plain equality.
+ */
+function valueInList(column: SQL, operands: (string | number)[]): SQL {
+  const list = (wrap: (o: string | number) => SQL) => sql.join(operands.map(wrap), sql.raw(", "));
+  return sql`${valueIndexPrefix(column)} IN (${list((o) => valueIndexPrefix(o))}) AND ${column} IN (${list((o) => sql`${o}`)})`;
+}
+
 /** Builds the per-value-row SQL condition (over alias `iv`) for a comparison op. */
 function filterValueCondition(property: Property, op: ComparisonOp, value: unknown): SQL {
   const expr = storedValueExpr(property);
   switch (op) {
-    case "eq":
-      return sql`${expr} = ${compareOperand(property, value)}`;
+    case "eq": {
+      const operand = compareOperand(property, value);
+      // Number values compare through CAST, which the index cannot serve.
+      if (property.datatype === "number") return sql`${expr} = ${operand}`;
+      return valueInList(expr, [operand]);
+    }
     case "neq":
       return sql`${expr} <> ${compareOperand(property, value)}`;
     case "gt":
@@ -280,6 +297,7 @@ function filterValueCondition(property: Property, op: ComparisonOp, value: unkno
         throw invalid(`in filter on "${property.name}" expects a non-empty array`);
       }
       const operands = value.map((v) => compareOperand(property, v));
+      if (property.datatype !== "number") return valueInList(expr, operands);
       return sql`${expr} IN (${sql.join(
         operands.map((o) => sql`${o}`),
         sql.raw(", "),
@@ -316,11 +334,7 @@ function buildFilterPredicate(itemId: SQL, property: Property, filter: ItemFilte
       // Stored values are canonical text, so exact text equality is correct
       // membership; dedupe operands so the count target matches.
       const operands = [...new Set(filter.value.map((v) => normalizeValue(property, v)))];
-      const inList = sql.join(
-        operands.map((o) => sql`${o}`),
-        sql.raw(", "),
-      );
-      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND iv.value IN (${inList})) = ${operands.length}`;
+      return sql`(SELECT COUNT(DISTINCT iv.value) FROM item_values iv WHERE iv.item_id = ${itemId} AND iv.property_id = ${pid} AND ${valueInList(sql.raw("iv.value"), operands)}) = ${operands.length}`;
     }
     default: {
       const cond = filterValueCondition(property, filter.op, filter.value);
@@ -515,7 +529,7 @@ async function validateUniqueness(
     const rows = await db.client
       .select({ itemId: itemValues.itemId, value: itemValues.value })
       .from(itemValues)
-      .where(and(eq(itemValues.propertyId, propId), inArray(itemValues.value, [...firstLabelByValue.keys()])));
+      .where(and(eq(itemValues.propertyId, propId), valueInList(sql`${itemValues.value}`, [...firstLabelByValue.keys()])));
     for (const row of rows) {
       if (exclude?.has(row.itemId)) continue;
       const label = firstLabelByValue.get(row.value);
