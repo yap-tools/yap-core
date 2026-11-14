@@ -1189,7 +1189,7 @@ describe("attachments on draft and send", () => {
     [ID_C]: { name: "notes", mimeType: "", bytes: Buffer.from("plain notes\n") },
   });
   const drafts = (): MockMailboxSeed => ({ name: "Drafts", attributes: ["\\Drafts"], messages: [] });
-  const draftParams = { to: "mie@example.com", bcc: "hidden@example.com", subject: "Voice test", body: "Here are the clips.\nTell me what you think." };
+  const draftParams = { to: "alex@example.com", bcc: "hidden@example.com", subject: "Voice test", body: "Here are the clips.\nTell me what you think." };
 
   it("attaches one file: multipart/mixed in Drafts, flagged \\Draft, body and bytes intact", async () => {
     const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
@@ -1356,7 +1356,7 @@ describe("attachments on draft and send", () => {
       ],
     });
     expect(smtp.messages).toHaveLength(1);
-    expect(smtp.messages[0]!.to).toEqual(["mie@example.com", "hidden@example.com"]);
+    expect(smtp.messages[0]!.to).toEqual(["alex@example.com", "hidden@example.com"]);
     const out = parseMessage(smtp.messages[0]!.data);
     const draft = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw);
     expect(out.headers["bcc"]).toBeUndefined();

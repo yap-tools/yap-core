@@ -261,7 +261,7 @@ describe("buildMessage with attachments", () => {
   });
 
   it("round-trips a non-ASCII filename (RFC 2231 on filename, RFC 2047 on name)", () => {
-    const filename = "Stemmeprøve – Mie æøå 🎙.mp3";
+    const filename = "Stemmeprøve – Åse æøå 🎙.mp3";
     const raw = buildMessage({ ...base, attachments: [{ ...pdf, filename, mimeType: "audio/mpeg" }] });
     const part = parseMessage(raw).parts[1]!;
     expect(part.dispositionParams["filename"]).toBe(filename);

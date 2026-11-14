@@ -194,7 +194,7 @@ describe("mail service (built-in driver)", () => {
     const drafts = () => imap.mailbox("Drafts")!.messages;
     const post = (service: string, params: Record<string, string>) =>
       alice.post(`/v1/services/${service}/run`, { action: "draft", params, wait_ms: 10_000 });
-    const base = { to: "mie@example.com", subject: "Clips", body: "Two clips attached." };
+    const base = { to: "alex@example.com", subject: "Clips", body: "Two clips attached." };
 
     beforeAll(async () => {
       const created = await alice.post(`/v1/bundles/${bundleId}/services`, { name: "drafter", driver: "mail", actions: ["draft"], config: config() });

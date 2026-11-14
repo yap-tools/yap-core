@@ -95,7 +95,7 @@ Not covered: downloading every attachment of a message at once, linking the stor
 `draft` and `send` take an optional `attachments` parameter: files from the service's bundle, as a comma-separated list of `file://{uuid}` references or bare file ids. Whitespace around entries is ignored, and so are empty entries; naming the same file twice (a bare id and its `file://` form count as the same) is refused.
 
 ```
-run_service {"id": "triage", "action": "draft", "params": {"to": "mie@example.com", "subject": "Voice test", "body": "Two clips.", "attachments": "file://0b6e…, 1c7f…"}}
+run_service {"id": "triage", "action": "draft", "params": {"to": "alex@example.com", "subject": "Voice test", "body": "Two clips.", "attachments": "file://0b6e…, 1c7f…"}}
   → { "folder": "Drafts", "uid": 42, "attachments": [{ "name": "clip-1.mp3", "mime_type": "audio/mpeg", "size": 48213 }, …] }
 ```
 
