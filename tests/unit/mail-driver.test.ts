@@ -9,10 +9,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { normalizeMailConfig } from "../../src/core/drivers/mail/config.js";
 import { createMailDriver } from "../../src/core/drivers/mail/index.js";
-import type { BundleWriter } from "../../src/core/drivers/types.js";
+import type { BundleFile, BundleReader, BundleWriter } from "../../src/core/drivers/types.js";
 import { YapError } from "../../src/core/errors.js";
 import { createCtx, createFakeEgress } from "../helpers/mail/egress.js";
 import { simpleMessage, startImapMock, utf7Encode, type ImapMock, type ImapMockOptions, type MockMailboxSeed } from "../helpers/mail/imap-mock.js";
+import { parseMessage } from "../helpers/mail/mime.js";
 import { startMockSmtp, type MockSmtp, type MockSmtpOptions } from "../helpers/smtp.js";
 
 const driver = createMailDriver();
@@ -55,9 +56,10 @@ async function run(
   cfg: Config,
   action: string,
   params: Record<string, string> = {},
-  { pinned = [] }: { pinned?: readonly string[] } = {},
+  { pinned = [], reader = null }: { pinned?: readonly string[]; reader?: BundleReader | null } = {},
 ): Promise<{ result: Result; ctx: ReturnType<typeof createCtx> }> {
   const ctx = createCtx(createFakeEgress(), { pinned });
+  ctx.reader = reader;
   ctx.config = cfg;
   ctx.action = action;
   ctx.params = params;
@@ -103,6 +105,17 @@ describe("definition", () => {
     expect(driver.egress).toBe(true);
     expect(Object.keys(driver.actions).sort()).toEqual(["attachment", "delete_draft", "draft", "folders", "mark", "read", "search", "send"]);
     expect(driver.writes).toEqual({ files: true });
+    expect(driver.reads).toEqual({ files: true });
+    for (const action of ["send", "draft"]) {
+      const spec = driver.actions[action]!;
+      expect(spec.description, action).not.toMatch(/plain-text/i);
+      const attachments = spec.params!.find((p) => p.name === "attachments");
+      expect(attachments, action).toMatchObject({ required: false });
+      expect(attachments!.description).toMatch(/file:\/\/\{uuid\}/);
+      expect(attachments!.description).toMatch(/this bundle/);
+      expect(attachments!.description).toMatch(/17 MiB/);
+      expect(attachments!.description).toMatch(/10 files/);
+    }
     expect(driver.actions["attachment"]!.params!.map((p) => [p.name, p.required])).toEqual([
       ["uid", true],
       ["folder", false],
@@ -1112,5 +1125,342 @@ describe("validateConfigOnline", () => {
   it("fails on a bad smtp password", async () => {
     const smtp = await smtpMock({ rejectAuth: true });
     await expect(driver.validateConfigOnline!(config({ smtp }), createFakeEgress())).rejects.toThrow(/smtp/);
+  });
+});
+
+describe("attachments on draft and send", () => {
+  const ID_A = "0b6e3c1a-8f1e-4c1a-9d2b-1a2b3c4d5e6f";
+  const ID_B = "1c7f4d2b-9a2f-4d2b-8e3c-2b3c4d5e6f70";
+  const ID_C = "2d805e3c-ab30-4e3c-9f4d-3c4d5e6f7081";
+  const ID_MISSING = "3e916f4d-bc41-4f4d-a05e-4d5e6f708192";
+
+  interface FakeFile {
+    name: string;
+    mimeType: string;
+    bytes: Buffer;
+    /** The size on the file record, when it should differ from the bytes. */
+    size?: number;
+  }
+
+  /** A reader over an in-memory bundle, shaped like services.ts's: refs as
+   * file://{uuid} or a bare id, not_found for anything else, and a bytes()
+   * that honours maxBytes. Records which refs were resolved and read. */
+  function fakeReader(files: Record<string, FakeFile>): BundleReader & { resolved: string[]; read: string[] } {
+    const resolved: string[] = [];
+    const read: string[] = [];
+    return {
+      resolved,
+      read,
+      async readFile(refOrId: string): Promise<BundleFile> {
+        resolved.push(refOrId);
+        const id = refOrId.trim().replace(/^file:\/\//, "");
+        const f = Object.hasOwn(files, id) ? files[id] : undefined;
+        if (!f) throw new YapError("not_found", `file ${id} not found`);
+        const size = f.size ?? f.bytes.length;
+        const bytes = async (opts?: { maxBytes?: number }) => {
+          if (opts?.maxBytes !== undefined && size > opts.maxBytes) throw new YapError("payload_too_large", `file ${id} exceeds the maximum inline read size of ${opts.maxBytes} bytes`);
+          if (opts?.maxBytes === undefined && size > 10 * 1024 * 1024) throw new YapError("payload_too_large", `file ${id} exceeds the default`);
+          // The real reader also counts the bytes as they stream, so a record
+          // that understates the file cannot get more past maxBytes.
+          if (opts?.maxBytes !== undefined && f.bytes.length > opts.maxBytes) throw new YapError("payload_too_large", `file ${id} exceeds the maximum inline read size of ${opts.maxBytes} bytes`);
+          read.push(id);
+          return new Uint8Array(f.bytes);
+        };
+        return {
+          id,
+          name: f.name,
+          mimeType: f.mimeType,
+          size,
+          bytes,
+          stream: async () => {
+            throw new Error("stream not expected");
+          },
+          text: async () => {
+            throw new Error("text not expected");
+          },
+        };
+      },
+      async getItems() {
+        throw new Error("getItems not expected");
+      },
+    };
+  }
+
+  const files = (): Record<string, FakeFile> => ({
+    [ID_A]: { name: "clip one.mp3", mimeType: "audio/mpeg", bytes: Buffer.from(Array.from({ length: 5000 }, (_, i) => i % 256)) },
+    [ID_B]: { name: "Stemmeprøve \"2\"; æøå.wav", mimeType: "audio/wav", bytes: Buffer.from("RIFF....WAVEfmt ") },
+    [ID_C]: { name: "notes", mimeType: "", bytes: Buffer.from("plain notes\n") },
+  });
+  const drafts = (): MockMailboxSeed => ({ name: "Drafts", attributes: ["\\Drafts"], messages: [] });
+  const draftParams = { to: "alex@example.com", bcc: "hidden@example.com", subject: "Voice test", body: "Here are the clips.\nTell me what you think." };
+
+  it("attaches one file: multipart/mixed in Drafts, flagged \\Draft, body and bytes intact", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const reader = fakeReader(files());
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: `file://${ID_A}` }, { reader });
+    expect(result).toEqual({ folder: "Drafts", uid: 1, attachments: [{ name: "clip one.mp3", mime_type: "audio/mpeg", size: 5000 }] });
+    const stored = imap.mailbox("Drafts")!.messages;
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.flags).toEqual(["\\Draft"]);
+    const msg = parseMessage(stored[0]!.raw);
+    expect(msg.contentType).toBe("multipart/mixed");
+    expect(msg.headers["bcc"]).toBe("hidden@example.com");
+    expect(msg.parts.map((p) => p.contentType)).toEqual(["text/plain", "audio/mpeg"]);
+    expect(msg.parts[0]!.bytes.toString("utf8")).toBe("Here are the clips.\r\nTell me what you think.");
+    expect(msg.parts[1]!.dispositionParams["filename"]).toBe("clip one.mp3");
+    expect(Buffer.compare(msg.parts[1]!.bytes, files()[ID_A]!.bytes)).toBe(0);
+    expect(reader.read).toEqual([ID_A]);
+  });
+
+  it("attaches several in the order given, trimming whitespace and ignoring empty entries", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const reader = fakeReader(files());
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: ` ${ID_C} , ,file://${ID_B},, file://${ID_A} ` }, { reader });
+    expect(result.attachments).toEqual([
+      { name: "notes", mime_type: "application/octet-stream", size: 12 },
+      { name: 'Stemmeprøve "2"; æøå.wav', mime_type: "audio/wav", size: 16 },
+      { name: "clip one.mp3", mime_type: "audio/mpeg", size: 5000 },
+    ]);
+    const msg = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw);
+    const fileParts = msg.parts.slice(1);
+    expect(fileParts.map((p) => p.dispositionParams["filename"])).toEqual(["notes", 'Stemmeprøve "2"; æøå.wav', "clip one.mp3"]);
+    expect(fileParts.map((p) => p.params["name"])).toEqual(["notes", 'Stemmeprøve "2"; æøå.wav', "clip one.mp3"]);
+    expect(fileParts.map((p) => p.contentType)).toEqual(["application/octet-stream", "audio/wav", "audio/mpeg"]);
+    for (const [part, id] of fileParts.map((p, i) => [p, [ID_C, ID_B, ID_A][i]!] as const)) {
+      expect(Buffer.compare(part.bytes, files()[id]!.bytes)).toBe(0);
+    }
+  });
+
+  it("leaves a draft without attachments exactly as before: one text/plain part, no attachments key, no reads", async () => {
+    for (const attachments of [undefined, "", " , "]) {
+      const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+      const reader = fakeReader(files());
+      const params = attachments === undefined ? draftParams : { ...draftParams, attachments };
+      const { result } = await run(config({ imap }), "draft", params, { reader });
+      expect(result).toEqual({ folder: "Drafts", uid: 1 });
+      const raw = imap.mailbox("Drafts")!.messages[0]!.raw;
+      expect(raw).toMatch(/\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nHere are the clips\./);
+      expect(raw).not.toContain("multipart");
+      expect(reader.resolved).toEqual([]);
+    }
+  });
+
+  it("keeps In-Reply-To and References on a reply draft with an attachment", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    await run(config({ imap }), "draft", { body: "x", reply_to_uid: "3", attachments: ID_A }, { reader: fakeReader(files()) });
+    const msg = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw);
+    expect(msg.headers["in-reply-to"]).toBe("<three@example.com>");
+    expect(msg.headers["references"]).toBe("<three@example.com>");
+    expect(msg.headers["subject"]).toBe("Re: Third");
+    expect(msg.parts).toHaveLength(2);
+  });
+
+  it("fails the whole run naming the reference when one does not resolve, appending nothing", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const reader = fakeReader(files());
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},file://${ID_MISSING}` }, { reader }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(YapError);
+    expect((error as YapError).code).toBe("not_found");
+    expect((error as Error).message).toContain(`file://${ID_MISSING}`);
+    expect((error as Error).message).toMatch(/not a file in this bundle/);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+    // Resolution happens for every reference before any bytes are read.
+    expect(reader.read).toEqual([]);
+  });
+
+  it("refuses a malformed or duplicate reference before connecting", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const reader = fakeReader(files());
+    const cfg = config({ imap });
+    const bad = await run(cfg, "draft", { ...draftParams, attachments: "item://nope" }, { reader }).catch((e: Error) => e);
+    expect(agentSafe(bad as Error)).toEqual({ agentSafe: true, code: "invalid_request" });
+    expect((bad as Error).message).toMatch(/attachment "item:\/\/nope" is not a file:\/\/\{uuid\} reference or file id/);
+    const twice = await run(cfg, "draft", { ...draftParams, attachments: `file://${ID_A}, ${ID_A.toUpperCase()}` }, { reader }).catch((e: Error) => e);
+    expect((twice as Error).message).toMatch(/is listed more than once/);
+    expect(agentSafe(twice as Error).code).toBe("invalid_request");
+    expect(reader.resolved).toEqual([]);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("caps the count at 10 files", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const reader = fakeReader(files());
+    const ids = Array.from({ length: 11 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: ids.join(",") }, { reader }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toMatch(/at most 10 files \(got 11\)/);
+    expect(reader.resolved).toEqual([]);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("caps the total at 17 MiB from the file records, before reading a byte", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const big = files();
+    big[ID_A]!.size = 10 * 1024 * 1024;
+    big[ID_B]!.size = 7 * 1024 * 1024 + 1;
+    const reader = fakeReader(big);
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B}` }, { reader }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toMatch(/attachments total 17825793 bytes; the cap is 17 MiB/);
+    expect(reader.read).toEqual([]);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("attaches a file over the reader's default 10 MiB inline limit", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const big = files();
+    big[ID_A]!.bytes = Buffer.alloc(11 * 1024 * 1024, 0x5a);
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: ID_A }, { reader: fakeReader(big) });
+    expect(result.attachments).toEqual([{ name: "clip one.mp3", mime_type: "audio/mpeg", size: 11 * 1024 * 1024 }]);
+    const part = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw).parts[1]!;
+    expect(Buffer.compare(part.bytes, big[ID_A]!.bytes)).toBe(0);
+  });
+
+  it("accepts exactly 17 MiB in all, and an empty file once the budget is spent", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const full = files();
+    full[ID_A]!.bytes = Buffer.alloc(10 * 1024 * 1024, 1);
+    full[ID_B]!.bytes = Buffer.alloc(7 * 1024 * 1024, 2);
+    full[ID_C]!.bytes = Buffer.alloc(0);
+    const reader = fakeReader(full);
+    const { result } = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B},${ID_C}` }, { reader });
+    expect(result.attachments.map((a: { size: number }) => a.size)).toEqual([10 * 1024 * 1024, 7 * 1024 * 1024, 0]);
+    expect(reader.read).toEqual([ID_A, ID_B, ID_C]);
+    const parts = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw).parts;
+    expect(parts.map((p) => p.bytes.length)).toEqual([parts[0]!.bytes.length, 10 * 1024 * 1024, 7 * 1024 * 1024, 0]);
+  });
+
+  it("stops a file whose record understates it at the cap, appending nothing", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const lying = files();
+    lying[ID_A]!.bytes = Buffer.alloc(10 * 1024 * 1024, 1);
+    lying[ID_B]!.bytes = Buffer.alloc(7 * 1024 * 1024 + 1, 2);
+    lying[ID_B]!.size = 16;
+    const reader = fakeReader(lying);
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: `${ID_A},${ID_B}` }, { reader }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toBe(`attachment "${ID_B}" takes the attachments past the 17 MiB cap`);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("refuses a filename the message cannot carry, appending nothing", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const evil = files();
+    evil[ID_A]!.name = "x.txt\r\nBcc: attacker@example.com";
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: ID_A }, { reader: fakeReader(evil) }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toMatch(/attachment filename must not contain a line break/);
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("reports the server's own text when it refuses the append for size", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]), appendLimit: 2000 });
+    const error = await run(config({ imap }), "draft", { ...draftParams, attachments: ID_A }, { reader: fakeReader(files()) }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("invalid_request");
+    expect((error as Error).message).toBe("the server refused the message: [TOOBIG] Message too large for this mailbox");
+    expect(imap.mailbox("Drafts")!.messages).toHaveLength(0);
+  });
+
+  it("keeps a pinned attachments value out of every error", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const cfg = config({ imap });
+    const pinnedRun = (attachments: string) =>
+      run(cfg, "draft", { ...draftParams, attachments }, { pinned: ["attachments"], reader: fakeReader(files()) }).catch((e: Error) => e);
+    for (const value of ["secret-not-a-ref", `file://${ID_MISSING}`]) {
+      const error = (await pinnedRun(value)) as Error;
+      expect(agentSafe(error).agentSafe).toBe(true);
+      expect(error.message).toMatch(/pinned attachment/);
+      expect(error.message).not.toContain(value);
+      expect(error.message).not.toContain(ID_MISSING);
+    }
+    // Pinned to an empty value, the service attaches nothing and reads nothing.
+    const reader = fakeReader(files());
+    const { result } = await run(cfg, "draft", { ...draftParams, attachments: "" }, { pinned: ["attachments"], reader });
+    expect(result.attachments).toBeUndefined();
+    expect(reader.resolved).toEqual([]);
+  });
+
+  it("sends the same multipart message draft builds, minus the Bcc header, with bcc still on the envelope", async () => {
+    const imap = await imapMock({ mailboxes: mailboxes([drafts()]) });
+    const smtp = await smtpMock();
+    const cfg = config({ imap, smtp });
+    const params = { ...draftParams, attachments: `${ID_A},${ID_B}` };
+    const sent = await run(cfg, "send", params, { reader: fakeReader(files()) });
+    await run(cfg, "draft", params, { reader: fakeReader(files()) });
+    expect(sent.result).toEqual({
+      accepted: true,
+      message_id: expect.stringMatching(/^<.+@example\.com>$/),
+      attachments: [
+        { name: "clip one.mp3", mime_type: "audio/mpeg", size: 5000 },
+        { name: 'Stemmeprøve "2"; æøå.wav', mime_type: "audio/wav", size: 16 },
+      ],
+    });
+    expect(smtp.messages).toHaveLength(1);
+    expect(smtp.messages[0]!.to).toEqual(["alex@example.com", "hidden@example.com"]);
+    const out = parseMessage(smtp.messages[0]!.data);
+    const draft = parseMessage(imap.mailbox("Drafts")!.messages[0]!.raw);
+    expect(out.headers["bcc"]).toBeUndefined();
+    expect(draft.headers["bcc"]).toBe("hidden@example.com");
+    const { bcc: _bcc, "message-id": _a, date: _b, "content-type": _c, ...draftHeaders } = draft.headers;
+    const { "message-id": _d, date: _e, "content-type": _f, ...sentHeaders } = out.headers;
+    expect(sentHeaders).toEqual(draftHeaders);
+    const shape = (m: typeof out) => m.parts.map((p) => ({ header: p.rawHeader, bytes: p.bytes.toString("base64") }));
+    expect(shape(out)).toEqual(shape(draft));
+  });
+
+  it("leaves send without attachments as it was: one text/plain part, the same result shape", async () => {
+    const smtp = await smtpMock();
+    const reader = fakeReader(files());
+    const { result } = await run(config({ smtp }), "send", { to: "a@example.com", subject: "s", body: "plain" }, { reader });
+    expect(Object.keys(result).sort()).toEqual(["accepted", "message_id"]);
+    expect(smtp.messages[0]!.data).toMatch(/\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nplain$/);
+    expect(reader.resolved).toEqual([]);
+  });
+
+  it("refuses a send whose attachment does not resolve without sending anything", async () => {
+    const smtp = await smtpMock();
+    const error = await run(config({ smtp }), "send", { to: "a@example.com", subject: "s", body: "b", attachments: ID_MISSING }, { reader: fakeReader(files()) }).catch((e: Error) => e);
+    expect(agentSafe(error as Error).code).toBe("not_found");
+    expect(smtp.messages).toHaveLength(0);
+  });
+
+  it("only draft and send touch the reader", async () => {
+    // The runner hands a reader to every action of a driver that declares
+    // reads; this checks the other handlers never so much as look at it.
+    const imap = await imapMock({
+      mailboxes: mailboxes([{ name: "Drafts", attributes: ["\\Drafts"], messages: [{ uid: 7, flags: ["\\Draft"], internalDate: new Date(), raw: msg({ subject: "Old" }) }] }]),
+    });
+    const cfg = config({ imap });
+    // Each call must get as far as the server, so a handler that failed early
+    // cannot pass by never reaching code that might touch the reader.
+    // attachment fetches the message's structure and then finds no part 2.
+    const calls: Array<[string, Record<string, string>, string]> = [
+      ["folders", {}, "ok"],
+      ["search", {}, "ok"],
+      ["read", { uid: "1" }, "ok"],
+      ["mark", { uid: "1", flag: "seen" }, "ok"],
+      ["delete_draft", { uid: "7" }, "ok"],
+      ["attachment", { uid: "1", part: "2" }, 'part "2" is not an attachment of message 1; take part from read\'s attachments'],
+    ];
+    for (const [action, params, expected] of calls) {
+      const ctx = createCtx(createFakeEgress());
+      let touched = false;
+      Object.defineProperty(ctx, "reader", {
+        get() {
+          touched = true;
+          return null;
+        },
+      });
+      ctx.writer = fakeWriter().writer;
+      ctx.config = cfg;
+      ctx.action = action;
+      ctx.params = params;
+      const outcome = await driver.run(ctx).then(
+        () => "ok",
+        (e: Error) => e.message,
+      );
+      expect(outcome, action).toBe(expected);
+      expect(touched, action).toBe(false);
+    }
   });
 });

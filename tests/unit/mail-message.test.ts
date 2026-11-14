@@ -1,15 +1,21 @@
+import crypto from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
   assertHeaderSafe,
+  attachmentMimeType,
+  attachmentSummary,
   buildMessage,
   encodeHeaderWord,
   isAddress,
   makeMessageId,
+  normalizeAttachment,
   normalizeLineBreaks,
   parseAddresses,
   rfc5322Date,
 } from "../../src/core/drivers/mail/message.js";
+import { parseMessage, physicalLines } from "../helpers/mail/mime.js";
 
 function headersOf(buffer: Buffer): { headers: Record<string, string>; body: string } {
   const text = buffer.toString("utf8");
@@ -178,5 +184,170 @@ describe("makeMessageId", () => {
     const b = makeMessageId("example.com");
     expect(a).toMatch(/^<[A-Za-z0-9.\-]+@example\.com>$/);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("buildMessage with attachments", () => {
+  const base = {
+    from: "me@example.com",
+    fromName: "Mé Self",
+    to: ["a@example.com"],
+    cc: ["c@example.com"],
+    bcc: ["b@example.com"],
+    subject: "Hej ærlig talt",
+    body: "line one\nline two æøå\r\n",
+    inReplyTo: "<x@example.com>",
+    references: ["<w@example.com>", "<x@example.com>"],
+    messageId: "<fixed@example.com>",
+    date: new Date("2026-11-13T12:00:00Z"),
+  };
+  /** buildMessage's output for `base` as it was before attachments existed. */
+  const GOLDEN =
+    "From: =?utf-8?B?TcOpIFNlbGY=?= <me@example.com>\r\nTo: a@example.com\r\nCc: c@example.com\r\nBcc: b@example.com\r\nSubject: =?utf-8?B?SGVqIMOmcmxpZyB0YWx0?=\r\nDate: Fri, 13 Nov 2026 12:00:00 +0000\r\nMessage-ID: <fixed@example.com>\r\nIn-Reply-To: <x@example.com>\r\nReferences: <w@example.com> <x@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nline one\r\nline two æøå\r\n";
+  const pdf = { filename: "report.pdf", mimeType: "application/pdf", bytes: new Uint8Array(crypto.randomBytes(1000)) };
+
+  it("is byte-for-byte unchanged without attachments, or with an empty list", () => {
+    expect(buildMessage(base).toString("utf8")).toBe(GOLDEN);
+    expect(buildMessage({ ...base, attachments: [] }).toString("utf8")).toBe(GOLDEN);
+  });
+
+  it("builds multipart/mixed: the same headers, the text first and unchanged, then each file in order", () => {
+    const png = { filename: "pixel.png", mimeType: "image/png", bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 255]) };
+    const raw = buildMessage({ ...base, attachments: [pdf, png] });
+    const msg = parseMessage(raw);
+    const goldenHeaders = GOLDEN.slice(0, GOLDEN.indexOf("MIME-Version"));
+    expect(raw.toString("utf8").startsWith(`${goldenHeaders}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="`)).toBe(true);
+    expect(msg.contentType).toBe("multipart/mixed");
+    expect(msg.headers["content-transfer-encoding"]).toBe("8bit");
+    expect(msg.parts).toHaveLength(3);
+    const [text, first, second] = msg.parts;
+    expect(text!.rawHeader).toBe("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit");
+    expect(text!.rawBody).toBe(normalizeLineBreaks(base.body));
+    expect(first!.contentType).toBe("application/pdf");
+    expect(first!.params["name"]).toBe("report.pdf");
+    expect(first!.disposition).toBe("attachment");
+    expect(first!.dispositionParams["filename"]).toBe("report.pdf");
+    expect(first!.encoding).toBe("base64");
+    expect(Buffer.compare(first!.bytes, Buffer.from(pdf.bytes))).toBe(0);
+    expect(second!.contentType).toBe("image/png");
+    expect(second!.dispositionParams["filename"]).toBe("pixel.png");
+    expect(Buffer.compare(second!.bytes, Buffer.from(png.bytes))).toBe(0);
+  });
+
+  it("writes base64 in lines of 76 characters", () => {
+    const msg = parseMessage(buildMessage({ ...base, attachments: [pdf] }));
+    const lines = msg.parts[1]!.rawBody.split("\r\n");
+    expect(lines.slice(0, -1).every((line) => line.length === 76)).toBe(true);
+    expect(lines.at(-1)!.length).toBeLessThanOrEqual(76);
+    expect(lines.at(-1)!.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the Bcc header off when bcc is not given (the send shape)", () => {
+    const { bcc: _bcc, ...sent } = base;
+    const raw = buildMessage({ ...sent, attachments: [pdf] }).toString("utf8");
+    expect(raw).not.toMatch(/^Bcc:/m);
+    expect(raw).toContain("In-Reply-To: <x@example.com>\r\n");
+    expect(raw).toContain("References: <w@example.com> <x@example.com>\r\n");
+  });
+
+  it("picks a boundary that does not occur in the body", () => {
+    // A body that quotes the boundary prefix many times over still cannot
+    // collide: the boundary carries 128 random bits and is checked anyway.
+    const body = Array.from({ length: 50 }, () => "--=_yap_ =_yap_").join("\n");
+    const raw = buildMessage({ ...base, body, attachments: [pdf] });
+    const msg = parseMessage(raw);
+    expect(msg.boundary).toMatch(/^=_yap_[0-9a-f]{32}$/);
+    expect(msg.parts[0]!.rawBody).toBe(normalizeLineBreaks(body));
+    expect(msg.parts[0]!.rawBody).not.toContain(msg.boundary);
+  });
+
+  it("round-trips a non-ASCII filename (RFC 2231 on filename, RFC 2047 on name)", () => {
+    const filename = "Stemmeprøve – Åse æøå 🎙.mp3";
+    const raw = buildMessage({ ...base, attachments: [{ ...pdf, filename, mimeType: "audio/mpeg" }] });
+    const part = parseMessage(raw).parts[1]!;
+    expect(part.dispositionParams["filename"]).toBe(filename);
+    expect(part.params["name"]).toBe(filename);
+    expect(part.rawHeader).toContain("filename*=utf-8''");
+    expect(part.rawHeader).toContain('name="=?utf-8?B?');
+    expect(/^[\x20-\x7e\r\n\t]*$/.test(part.rawHeader)).toBe(true);
+  });
+
+  it("round-trips names with quotes, backslashes, semicolons and control characters without breaking the header", () => {
+    for (const filename of ['say "hi"; then.txt', "back\\slash.txt", 'a";filename="evil.exe', "tab\there.txt", "bell\x07\x7f.txt", "plain; semi.txt"]) {
+      const raw = buildMessage({ ...base, attachments: [{ ...pdf, filename }] });
+      const part = parseMessage(raw).parts[1]!;
+      expect(part.dispositionParams["filename"], filename).toBe(filename);
+      expect(part.params["name"], filename).toBe(filename);
+      expect(part.disposition).toBe("attachment");
+      expect(Object.keys(part.dispositionParams)).toEqual(["filename"]);
+    }
+  });
+
+  it("keeps every header line under 998 octets for a very long name", () => {
+    for (const filename of [`${"ø".repeat(400)}.txt`, `${"a".repeat(900)}.txt`]) {
+      const raw = buildMessage({ ...base, attachments: [{ ...pdf, filename }] });
+      expect(physicalLines(raw).every((line) => Buffer.byteLength(line) <= 998)).toBe(true);
+      const part = parseMessage(raw).parts[1]!;
+      expect(part.dispositionParams["filename"]).toBe(filename);
+      expect(part.params["name"]).toBe(filename);
+    }
+    // 400 × "ø" is 2400 encoded characters: too long for one line, so continued.
+    const continued = buildMessage({ ...base, attachments: [{ ...pdf, filename: `${"ø".repeat(400)}.txt` }] }).toString("utf8");
+    expect(continued).toContain("filename*0*=utf-8''");
+    expect(continued).toContain("filename*2*=");
+  });
+
+  it("refuses a filename or mime type with CR, LF or NUL, naming the field", () => {
+    expect(() => buildMessage({ ...base, attachments: [{ ...pdf, filename: "a\r\nBcc: x@example.com" }] })).toThrow(/attachment filename must not contain a line break/);
+    expect(() => buildMessage({ ...base, attachments: [{ ...pdf, filename: "a\nb" }] })).toThrow(/attachment filename/);
+    expect(() => buildMessage({ ...base, attachments: [{ ...pdf, filename: "a\0b" }] })).toThrow(/attachment filename/);
+    expect(() => buildMessage({ ...base, attachments: [{ ...pdf, mimeType: "text/plain\r\nX-Evil: 1" }] })).toThrow(/attachment mime type must not contain a line break/);
+  });
+
+  it("falls back to application/octet-stream for a missing or invalid mime type, and drops parameters", () => {
+    const typeOf = (mimeType: string) => parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, mimeType }] })).parts[1]!.contentType;
+    expect(typeOf("")).toBe("application/octet-stream");
+    expect(typeOf("not a type")).toBe("application/octet-stream");
+    expect(typeOf('text/plain"; x="y')).toBe("application/octet-stream");
+    expect(typeOf("Text/Plain; charset=utf-8")).toBe("text/plain");
+    expect(typeOf("audio/mpeg")).toBe("audio/mpeg");
+    expect(typeOf("audio/mpeg; charset=utf-8")).toBe("audio/mpeg");
+  });
+
+  it("sends composite types as application/octet-stream: RFC 2045 forbids them in base64", () => {
+    const typeOf = (mimeType: string) => parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, mimeType }] })).parts[1]!.contentType;
+    expect(typeOf("message/rfc822")).toBe("application/octet-stream");
+    expect(typeOf("multipart/mixed; boundary=x")).toBe("application/octet-stream");
+    expect(typeOf("Message/Partial")).toBe("application/octet-stream");
+  });
+
+  it("keeps a text type's charset, so its bytes are read the way they were written", () => {
+    const part = (mimeType: string) => parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, mimeType }] })).parts[1]!;
+    const latin1 = part("text/plain; charset=ISO-8859-1");
+    expect(latin1.contentType).toBe("text/plain");
+    expect(latin1.params["charset"]).toBe("iso-8859-1");
+    expect(latin1.params["name"]).toBe(pdf.filename);
+    expect(part('text/csv; header=present; charset="windows-1252"').params["charset"]).toBe("windows-1252");
+    // An invalid charset is dropped, not passed on, and cannot add parameters.
+    const bad = part("text/plain; charset=utf 8; b=c");
+    expect(bad.params["charset"]).toBeUndefined();
+    expect(bad.params["b"]).toBeUndefined();
+    expect(part('text/plain; charset="x; name=evil"').params["charset"]).toBeUndefined();
+    expect(part("text/plain").params["charset"]).toBeUndefined();
+    expect(attachmentMimeType("text/plain; charset=utf-8")).toBe("text/plain; charset=utf-8");
+  });
+
+  it("names an empty filename 'attachment'", () => {
+    const part = parseMessage(buildMessage({ ...base, attachments: [{ ...pdf, filename: "" }] })).parts[1]!;
+    expect(part.dispositionParams["filename"]).toBe("attachment");
+  });
+
+  it("normalises once (normalizeAttachment) and describes what went on (attachmentSummary)", () => {
+    const normalized = [{ ...pdf, mimeType: "Text/Plain; charset=utf-8" }, { ...pdf, filename: "", mimeType: "" }].map(normalizeAttachment);
+    expect(() => normalizeAttachment({ ...pdf, filename: "a\r\nb" })).toThrow(/attachment filename/);
+    expect(attachmentSummary(normalized)).toEqual([
+      { name: "report.pdf", mime_type: "text/plain; charset=utf-8", size: 1000 },
+      { name: "attachment", mime_type: "application/octet-stream", size: 1000 },
+    ]);
   });
 });

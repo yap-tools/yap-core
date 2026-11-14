@@ -20,6 +20,18 @@
  * agent names, and refuses rather than store anything partial or over the
  * cap.
  *
+ * The opposite direction belongs to `draft` and `send`: their `attachments`
+ * parameter names files in the same bundle, read through the run's bundle
+ * reader (hence `reads: { files: true }`), and puts them on the message as
+ * MIME attachments. The reader resolves only finalized files of the
+ * service's own bundle and records a `file_read` on the run for each, so the
+ * driver never reaches file bytes any other way. Its authority is the
+ * caller's `run_services` on the bundle — not `read_files` — which on a
+ * `send` with a free `to` means a caller can mail any file in the bundle to
+ * an address of their choosing. That is the operator's call to make, and the
+ * switch is a pin: `pins: { attachments: "" }` removes the parameter from the
+ * service, as does pinning the recipients or not exposing `send`.
+ *
  * The last shape is why the three recipient parameters — `to`, `cc`, `bcc` —
  * are treated as one. Pins are per parameter *name*, so a pinned `to` alone
  * would leave `cc` open and let an agent route mail past it. The rule here is
@@ -41,7 +53,8 @@
  *
  * Numbers arrive as strings and are parsed and capped here (summaries ≤ 100,
  * text ≤ 100 000 chars, outbound bodies ≤ 1 MiB, search text ≤ 1000 chars,
- * attachments ≤ 25 MiB decoded);
+ * downloaded attachments ≤ 25 MiB decoded, outbound attachments ≤ 10 files
+ * and 17 MiB in all, an appended message ≤ 32 MiB);
  * dates are calendar days the way IMAP defines them; every header-bound
  * parameter goes through the injection check in message.ts before it reaches
  * a wire.
@@ -61,12 +74,23 @@ import { convert as htmlToText } from "html-to-text";
 import iconv from "iconv-lite";
 
 import { YapError } from "../../errors.js";
+import { parseFileRef } from "../../fileRefs.js";
 import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverFailCode, type DriverParamSpec, type Egress, type RunContext } from "../types.js";
 import { resolveAuth } from "./auth.js";
 import { configDoc, normalizeMailConfig, type MailConfig } from "./config.js";
 import { imapConnect, type ImapClient, type MailboxInfo, type MailCtx, type SearchCriterion } from "./imap.js";
 import { attachmentParts, partFilename, textParts, type BodyPart } from "./imap-parse.js";
-import { assertHeaderSafe, buildMessage, isAddress, makeMessageId, MAX_RECIPIENTS, parseAddresses } from "./message.js";
+import {
+  assertHeaderSafe,
+  attachmentSummary,
+  buildMessage,
+  isAddress,
+  makeMessageId,
+  MAX_RECIPIENTS,
+  normalizeAttachment,
+  parseAddresses,
+  type MessageAttachment,
+} from "./message.js";
 import { ProtocolError } from "./net.js";
 import { smtpProbe, smtpSend, type SmtpRejection, type SmtpSessionConfig } from "./smtp.js";
 
@@ -80,6 +104,14 @@ const SUMMARY_FIELD_CHARS = 512;
 const TEXT_SECTION_BYTES = 512 * 1024;
 /** The largest attachment `attachment` stores, counted after transfer decoding. */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+/** Files one outgoing message may carry. */
+const MAX_OUTBOUND_ATTACHMENTS = 10;
+/** Raw bytes of all files on one outgoing message. Base64 with its line
+ * breaks grows 17 MiB to about 24.4 MB, under the 25 MB limit common
+ * providers enforce with room for an ordinary text body and headers, so a
+ * draft that was accepted can also be sent. (Only a body near its own 1 MiB
+ * cap, on top of a full 17 MiB of files, could still pass 25 MB.) */
+const MAX_OUTBOUND_ATTACHMENT_BYTES = 17 * 1024 * 1024;
 const ONLINE_VALIDATION_TIMEOUT_MS = 20_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -124,6 +156,11 @@ const composeParams: DriverParamSpec[] = [
   { name: "bcc", description: "Bcc addresses, comma-separated — envelope only when sending, a Bcc header on a draft", required: false },
   { name: "subject", description: "Subject line (required unless replying; a reply defaults to Re: the original)", required: false },
   { name: "body", description: "Plain-text body", required: true },
+  {
+    name: "attachments",
+    description: `Files from this bundle to attach, comma-separated: each a file://{uuid} reference or a bare file id. Only files in this service's own bundle can be attached; at most ${MAX_OUTBOUND_ATTACHMENTS} files and ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB in all`,
+    required: false,
+  },
   { name: "reply_to_uid", description: "UID of the message being replied to: sets In-Reply-To/References and the Re: subject", required: false },
   { name: "folder", description: "Folder the replied-to message lives in (default INBOX)", required: false },
 ];
@@ -174,12 +211,13 @@ const actions: Record<string, DriverActionSpec> = {
     timeoutMs: 30_000,
   },
   send: {
-    description: "Send a plain-text email from the configured account, optionally as a threaded reply.",
+    description: "Send an email from the configured account, optionally as a threaded reply, optionally with files from this bundle attached.",
     params: composeParams,
     timeoutMs: 60_000,
   },
   draft: {
-    description: "Write a message into the account's Drafts folder for a human to review and send; nothing is delivered.",
+    description:
+      "Write a message into the account's Drafts folder for a human to review and send, optionally with files from this bundle attached; nothing is delivered.",
     params: composeParams,
     timeoutMs: 60_000,
   },
@@ -201,6 +239,11 @@ export function createMailDriver(): DriverDefinition {
     // action of a driver that declares writes (runs.ts), but it is a handle,
     // not a permission: the other handlers never touch it.
     writes: { files: true },
+    // The same holds for the reader, which the runner cannot scope per action
+    // either: only `draft` and `send` may touch `ctx.reader`, through
+    // `loadAttachments`, to read the files named in `attachments`. Every
+    // other handler leaves it alone (a unit test checks that).
+    reads: { files: true },
     configDoc,
 
     validateConfig(config: unknown): void {
@@ -387,6 +430,7 @@ const handlers: Record<string, Handler> = {
     const draft = composeParams_(params, ctx.pinned);
     if (draft.replyToUid !== undefined) requireBlock(config, "imap", "send with reply_to_uid", "reply_to_uid");
     if (config.save_sent) requireBlock(config, "imap", "send with save_sent", "save_sent");
+    const attachments = await loadAttachments(ctx, draft);
 
     let imap: ImapClient | null = null;
     try {
@@ -394,7 +438,7 @@ const handlers: Record<string, Handler> = {
       // Everything that can fail is settled before a byte of mail leaves:
       // the thread lookup, the Sent-folder discovery, and the message build.
       const sentFolder = config.save_sent && imap ? await discoverFolder(imap, config.sent_folder, "\\SENT", "sent", "sent_folder") : null;
-      const { message, messageId, recipients } = await composeMessage(config, draft, imap, { bccHeader: false });
+      const { message, messageId, recipients } = await composeMessage(config, draft, imap, { bccHeader: false, attachments });
       await smtpSend(ctx, await smtpConfig(ctx, config), { from: config.from, to: recipients, message }).catch((e: unknown) => {
         // The address and the reply line may name a pinned recipient: log them, tell the agent only the verdict.
         const rejections = e instanceof ProtocolError && e.step === "RCPT TO" ? e["rejections"] : undefined;
@@ -410,7 +454,7 @@ const handlers: Record<string, Handler> = {
           ctx.log(`send: delivered, but the copy to ${JSON.stringify(sentFolder)} failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-      return { accepted: true, message_id: messageId };
+      return { accepted: true, message_id: messageId, ...attachmentsResult(attachments) };
     } finally {
       if (imap) await imap.logout();
     }
@@ -419,11 +463,14 @@ const handlers: Record<string, Handler> = {
   async draft(ctx, config, params) {
     requireBlock(config, "imap", "draft");
     const draft = composeParams_(params, ctx.pinned);
+    // Read before connecting: a reference that does not resolve, or a total
+    // over the cap, fails the run before the mailbox is touched at all.
+    const attachments = await loadAttachments(ctx, draft);
     return await withImap(ctx, config, async (client) => {
       const folder = await discoverFolder(client, config.drafts_folder, "\\DRAFTS", "drafts", "drafts_folder");
-      const { message } = await composeMessage(config, draft, client, { bccHeader: true });
+      const { message } = await composeMessage(config, draft, client, { bccHeader: true, attachments });
       const { uid } = await client.append(folder, message, ["\\Draft"]);
-      return { folder, uid };
+      return { folder, uid, ...attachmentsResult(attachments) };
     });
   },
 
@@ -696,6 +743,12 @@ function overCap(label: string, size: string): AgentError {
   return new AgentError(`${label} is over the ${mib(MAX_ATTACHMENT_BYTES)} MiB limit (${size})`);
 }
 
+/** A size over a cap, in MiB, or in bytes when MiB would round it to the cap
+ * itself ("17.0 MiB; the cap is 17 MiB" says nothing). */
+function overCapSize(bytes: number, cap: number): string {
+  return Number(mib(bytes)) === Number(mib(cap)) ? `${bytes} bytes` : `${mib(bytes)} MiB`;
+}
+
 function mib(bytes: number): string {
   const value = bytes / 1024 / 1024;
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
@@ -796,6 +849,8 @@ interface Draft {
   subject: string | undefined;
   replyToUid: number | undefined;
   folder: string;
+  /** File references to attach, in order; empty for a plain message. */
+  attachments: string[];
 }
 
 /** Validates the shared send/draft parameters; the header checks run before
@@ -839,10 +894,101 @@ function composeParams_(params: Params, pinned: readonly string[]): Draft {
       // Deriving `to` from an arbitrary message would be aiming by proxy.
       throw new AgentError("recipients are fixed on this service; a reply cannot derive `to` from the original message");
     }
-    return { to, cc, bcc, body, subject, replyToUid, folder: folderOf(params) };
+    const attachments = attachmentRefs(params["attachments"], pinned.includes("attachments"));
+    return { to, cc, bcc, body, subject, replyToUid, folder: folderOf(params), attachments };
   } catch (e) {
     throw e instanceof AgentError ? e : new AgentError(e instanceof Error ? e.message : String(e));
   }
+}
+
+/** How an error names one attachment reference. A pinned list is the
+ * operator's, and like every pinned value it is never quoted back. */
+function attachmentLabel(ref: string, pinned: boolean): string {
+  return pinned ? "a pinned attachment" : `attachment ${JSON.stringify(ref.slice(0, 100))}`;
+}
+
+/**
+ * "file://a, b" → ["file://a", "b"]: split on commas, trimmed, empty entries
+ * dropped, each checked for shape (the same parser the bundle reader uses)
+ * and for not repeating another (a bare id and its file:// form are the same
+ * file). Nothing is resolved here, so a bad list costs no reads.
+ */
+function attachmentRefs(raw: string | undefined, pinned: boolean): string[] {
+  if (raw === undefined) return [];
+  const refs = raw.split(",").map((ref) => ref.trim()).filter((ref) => ref !== "");
+  if (refs.length > MAX_OUTBOUND_ATTACHMENTS) {
+    throw new AgentError(`attachments may list at most ${MAX_OUTBOUND_ATTACHMENTS} files (got ${refs.length})`);
+  }
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const id = parseFileRef(ref);
+    if (id === null) throw new AgentError(`${attachmentLabel(ref, pinned)} is not a file://{uuid} reference or file id`);
+    if (seen.has(id.toLowerCase())) throw new AgentError(`${attachmentLabel(ref, pinned)} is listed more than once`);
+    seen.add(id.toLowerCase());
+  }
+  return refs;
+}
+
+/**
+ * The files named in `attachments`, read through the run's bundle reader —
+ * the one way this driver reaches file bytes. Every reference is resolved
+ * first (together; they are independent lookups) and the total checked
+ * against the file records, so an unknown reference or an oversized request
+ * fails before a byte is read. Then each file is read with the remaining
+ * budget as its ceiling, so a record that understates its size cannot carry
+ * the total past the cap either. The reader confines this to finalized
+ * files of the run's own bundle and audits each read; its not-found becomes
+ * an error naming the reference. Any other reader failure is not about the
+ * reference (attachmentRefs already checked its shape) and passes through.
+ */
+async function loadAttachments(ctx: RunContext, draft: Draft): Promise<MessageAttachment[]> {
+  if (draft.attachments.length === 0) return [];
+  const reader = ctx.reader;
+  if (!reader) throw new Error("mail: attachments were given but the run has no file reader");
+  const pinned = ctx.pinned.includes("attachments");
+  const settled = await Promise.allSettled(draft.attachments.map((ref) => reader.readFile(ref)));
+  const files = settled.map((outcome, i) => {
+    if (outcome.status === "fulfilled") return outcome.value;
+    const e: unknown = outcome.reason;
+    if (e instanceof YapError && e.code === "not_found") {
+      throw new AgentError(`${attachmentLabel(draft.attachments[i]!, pinned)} is not a file in this bundle`, "not_found");
+    }
+    throw e;
+  });
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > MAX_OUTBOUND_ATTACHMENT_BYTES) {
+    throw new AgentError(`attachments total ${overCapSize(total, MAX_OUTBOUND_ATTACHMENT_BYTES)}; the cap is ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB`);
+  }
+  const out: MessageAttachment[] = [];
+  let remaining = MAX_OUTBOUND_ATTACHMENT_BYTES;
+  for (const [i, file] of files.entries()) {
+    const label = attachmentLabel(draft.attachments[i]!, pinned);
+    let bytes: Uint8Array;
+    try {
+      bytes = await file.bytes({ maxBytes: remaining });
+    } catch (e) {
+      if (e instanceof YapError && e.code === "payload_too_large") {
+        throw new AgentError(`${label} takes the attachments past the ${mib(MAX_OUTBOUND_ATTACHMENT_BYTES)} MiB cap`);
+      }
+      throw e;
+    }
+    remaining -= bytes.byteLength;
+    try {
+      // The header checks buildMessage would apply, run now, so a name with
+      // a line break in it (the uploader chose it) fails before any mailbox
+      // or server is touched, and as an error the caller can act on.
+      out.push(normalizeAttachment({ filename: file.name, mimeType: file.mimeType, bytes }));
+    } catch (e) {
+      throw new AgentError(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return out;
+}
+
+/** The `attachments` key of a draft or send result: present only when the
+ * message carried files, so a plain message's result keeps its old shape. */
+function attachmentsResult(attachments: readonly MessageAttachment[]): { attachments?: ReturnType<typeof attachmentSummary> } {
+  return attachments.length > 0 ? { attachments: attachmentSummary(attachments) } : {};
 }
 
 function requireParam(params: Params, name: string): string {
@@ -868,7 +1014,7 @@ async function composeMessage(
   config: MailConfig,
   draft: Draft,
   imap: ImapClient | null,
-  { bccHeader }: { bccHeader: boolean },
+  { bccHeader, attachments }: { bccHeader: boolean; attachments: readonly MessageAttachment[] },
 ): Promise<{ message: Buffer; messageId: string; recipients: string[] }> {
   let { subject, to } = draft;
   let inReplyTo: string | undefined;
@@ -915,6 +1061,7 @@ async function composeMessage(
     inReplyTo,
     references,
     messageId,
+    attachments,
   });
   return { message, messageId, recipients: [...to, ...draft.cc, ...draft.bcc] };
 }

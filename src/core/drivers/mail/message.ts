@@ -22,6 +22,18 @@
  * Headers may not carry raw UTF-8 (the body may; it is declared 8bit), so
  * non-ASCII header text becomes RFC 2047 encoded words, chunked so no header
  * line exceeds the 998-octet limit.
+ *
+ * A message with attachments is `multipart/mixed`: the text part first,
+ * exactly as a single-part message would carry it, then one base64 part per
+ * file. Without attachments the message is the single `text/plain` part it
+ * has always been, byte for byte. A filename is attacker-shaped input (it
+ * comes from whoever uploaded the file), so it goes through the same CR/LF
+ * check as every other header value and, unless it is plain printable ASCII
+ * with nothing that needs quoting, is written only in encoded form: RFC 2231
+ * on `filename*` (what current clients read) and RFC 2047 encoded words on
+ * the `name` parameter of Content-Type (what older ones fall back to). An
+ * encoded value is all `attr-char`s and `%XX`, so no quote, semicolon or
+ * control character in a name can end the parameter or the header.
  */
 import crypto from "node:crypto";
 
@@ -72,6 +84,7 @@ function base64(text: string): string {
   return Buffer.from(text, "utf8").toString("base64");
 }
 
+/** Printable ASCII only — no controls, no DEL, nothing above 126. */
 function isAscii(value: string): boolean {
   for (const char of value) {
     const code = char.codePointAt(0) ?? 0;
@@ -88,6 +101,11 @@ function isAscii(value: string): boolean {
  */
 export function encodeHeaderWord(value: string): string {
   if (isAscii(value)) return value;
+  return encodedWords(value);
+}
+
+/** `encodeHeaderWord` without the ASCII shortcut: always encoded words. */
+function encodedWords(value: string): string {
   const words: string[] = [];
   let chunk = "";
   for (const char of value) {
@@ -120,6 +138,159 @@ export function normalizeLineBreaks(text: string): string {
   return text.split(/\r\n|\r|\n/).join("\r\n");
 }
 
+/** One file to attach: its name and type as the bundle stores them, and its bytes. */
+export interface MessageAttachment {
+  filename: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
+
+const OCTET_STREAM = "application/octet-stream";
+/** RFC 6838 type and subtype names: restricted-name-chars, at most 127 each. */
+const MIME_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+
+/** A charset name as RFC 2978 allows it (mime-charset chars), short enough to be a real one. */
+const CHARSET_RE = /^[a-z0-9!#$%&'+\-^_`{}~.]{1,40}$/;
+
+/**
+ * The Content-Type written for a file: its stored type, lowercased;
+ * `application/octet-stream` when there is none, it is not a valid type, or
+ * it is a composite type (`multipart/*`, `message/*`), which RFC 2045 §6.4
+ * does not allow in base64 and whose structure the stored bytes would have
+ * to carry. Parameters are dropped except a text type's `charset`, which says
+ * how its bytes are to be read and is kept when it is a valid charset name.
+ * A line break is refused outright rather than replaced — a stored type with
+ * one in it is a sign something upstream is wrong.
+ */
+export function attachmentMimeType(value: unknown): string {
+  if (value === undefined || value === null || value === "") return OCTET_STREAM;
+  const [rawType, ...params] = assertHeaderSafe(value, "attachment mime type").split(";");
+  const type = rawType!.trim().toLowerCase();
+  if (!MIME_TYPE_RE.test(type) || type.startsWith("multipart/") || type.startsWith("message/")) return OCTET_STREAM;
+  if (!type.startsWith("text/")) return type;
+  for (const param of params) {
+    const match = /^\s*charset\s*=\s*(?:"([^"]*)"|([^\s"]*))\s*$/i.exec(param);
+    if (!match) continue;
+    const charset = (match[1] ?? match[2] ?? "").toLowerCase();
+    return CHARSET_RE.test(charset) ? `${type}; charset=${charset}` : type;
+  }
+  return type;
+}
+
+function attachmentFilename(value: unknown): string {
+  const name = assertHeaderSafe(value, "attachment filename");
+  return name === "" ? "attachment" : name;
+}
+
+/**
+ * The attachment as the message will carry it: the name checked for line
+ * breaks ("" becomes "attachment"), the type checked and normalised. Throws
+ * on a line break in either. `buildMessage` applies the same to whatever it
+ * is given; calling this first is how a caller learns of a bad name before
+ * it opens any connection.
+ */
+export function normalizeAttachment(attachment: MessageAttachment): MessageAttachment {
+  return { filename: attachmentFilename(attachment.filename), mimeType: attachmentMimeType(attachment.mimeType), bytes: attachment.bytes };
+}
+
+/** What a run reports about the files on a (normalised) message: name,
+ * type, and the raw (pre-base64) size. */
+export function attachmentSummary(attachments: readonly MessageAttachment[]): Array<{ name: string; mime_type: string; size: number }> {
+  return attachments.map((a) => ({ name: a.filename, mime_type: a.mimeType, size: a.bytes.byteLength }));
+}
+
+/** RFC 2231 attr-char: what may appear unencoded in an extended parameter value. */
+const ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/;
+/** Encoded characters per `filename*N*` section. Large on purpose: a single
+ * `filename*=` is read by more clients than continuations are, so a name is
+ * split only when it would not otherwise fit a 998-octet line. */
+const RFC2231_SECTION_CHARS = 900;
+
+/** A name that can go in a quoted-string as it is: printable ASCII with no
+ * quote or backslash (the two characters a quoted-string would have to
+ * escape, and that clients unescape inconsistently), and short enough to sit
+ * on one line. */
+function isPlainFilename(name: string): boolean {
+  return isAscii(name) && !/["\\]/.test(name) && name.length <= 200;
+}
+
+/**
+ * `filename*=utf-8''…` (RFC 2231), split into numbered `filename*N*`
+ * sections only when too long for one line. A section never splits a code point, so each one
+ * decodes on its own in clients that (wrongly) decode section by section.
+ */
+function rfc2231Filename(name: string): string {
+  const sections: string[] = [];
+  let current = "";
+  for (const char of name) {
+    let encoded = "";
+    for (const byte of Buffer.from(char, "utf8")) {
+      const c = String.fromCharCode(byte);
+      encoded += byte < 128 && ATTR_CHAR.test(c) ? c : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
+    if (current.length + encoded.length > RFC2231_SECTION_CHARS && current !== "") {
+      sections.push(current);
+      current = "";
+    }
+    current += encoded;
+  }
+  sections.push(current);
+  if (sections.length === 1) return `filename*=utf-8''${sections[0]}`;
+  return sections.map((section, i) => (i === 0 ? `filename*0*=utf-8''${section}` : `filename*${i}*=${section}`)).join(";\r\n ");
+}
+
+function attachmentPart(attachment: MessageAttachment): { header: string; body: Buffer } {
+  const { filename: name, mimeType: type, bytes } = normalizeAttachment(attachment);
+  const [typeParam, dispositionParam] = isPlainFilename(name)
+    ? [`name="${name}"`, `filename="${name}"`]
+    : [`name="${encodedWords(name)}"`, rfc2231Filename(name)];
+  const header = [
+    `Content-Type: ${type};\r\n ${typeParam}`,
+    `Content-Disposition: attachment;\r\n ${dispositionParam}`,
+    "Content-Transfer-Encoding: base64",
+  ].join("\r\n");
+  return { header, body: base64Lines(bytes) };
+}
+
+/** Raw bytes per base64 line: 57 bytes encode to exactly 76 characters. */
+const BASE64_LINE_BYTES = 57;
+/** Lines encoded per chunk, so a large file is never one giant string. */
+const BASE64_CHUNK_LINES = 1024;
+
+/**
+ * base64 in lines of 76 characters (RFC 2045 §6.8), CRLF between them, as
+ * bytes. Encoded a chunk of whole lines at a time straight into one buffer
+ * of the exact final size, so a 17 MiB attachment costs its encoded size
+ * once rather than several intermediate strings.
+ */
+function base64Lines(bytes: Uint8Array): Buffer {
+  const input = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const lines = Math.ceil(input.length / BASE64_LINE_BYTES);
+  const out = Buffer.allocUnsafe(Math.ceil(input.length / 3) * 4 + Math.max(0, lines - 1) * 2);
+  let at = 0;
+  for (let line = 0; line < lines; line += BASE64_CHUNK_LINES) {
+    const start = line * BASE64_LINE_BYTES;
+    const encoded = input.subarray(start, start + BASE64_LINE_BYTES * BASE64_CHUNK_LINES).toString("base64");
+    for (let i = 0; i < encoded.length; i += 76) {
+      if (at > 0) at += out.write("\r\n", at, "latin1");
+      at += out.write(encoded.slice(i, i + 76), at, "latin1");
+    }
+  }
+  return out;
+}
+
+/**
+ * A boundary of 128 random bits behind `=_yap_`. The `=_` pair cannot occur
+ * in base64 at all, so only the text body and the part headers need
+ * checking (and are), and a delimiter line can only ever be one of ours.
+ */
+function pickBoundary(contents: readonly string[]): string {
+  for (;;) {
+    const boundary = `=_yap_${crypto.randomBytes(16).toString("hex")}`;
+    if (!contents.some((text) => text.includes(boundary))) return boundary;
+  }
+}
+
 export interface BuildMessageOptions {
   from: string;
   fromName?: string;
@@ -135,6 +306,8 @@ export interface BuildMessageOptions {
   references?: string | string[];
   messageId?: string;
   date?: Date;
+  /** Files to attach, in order. Empty or absent: a single text/plain part. */
+  attachments?: readonly MessageAttachment[];
 }
 
 /**
@@ -142,7 +315,7 @@ export interface BuildMessageOptions {
  * dot-stuffing (smtp.ts), no trailing CRLF added.
  */
 export function buildMessage(options: BuildMessageOptions): Buffer {
-  const { from, fromName, to, cc = [], bcc = [], subject, body, inReplyTo, references, messageId, date } = options;
+  const { from, fromName, to, cc = [], bcc = [], subject, body, inReplyTo, references, messageId, date, attachments = [] } = options;
   assertAddress(from, "from");
   if (!Array.isArray(to) || to.length === 0) throw new Error("the message needs at least one recipient");
   for (const address of to) assertAddress(address, "to");
@@ -170,8 +343,22 @@ export function buildMessage(options: BuildMessageOptions): Buffer {
     ...(inReplyTo !== undefined ? [`In-Reply-To: ${inReplyTo}`] : []),
     ...(refs && refs.length > 0 ? [`References: ${refs.join(" ")}`] : []),
     "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=utf-8",
-    "Content-Transfer-Encoding: 8bit",
   ];
-  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${normalizeLineBreaks(body)}`, "utf8");
+  const textHeader = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit";
+  const text = normalizeLineBreaks(body);
+  if (attachments.length === 0) {
+    return Buffer.from(`${headers.join("\r\n")}\r\n${textHeader}\r\n\r\n${text}`, "utf8");
+  }
+  // Every part is built (and every filename and type checked) before any of
+  // it is joined, so a refused attachment leaves nothing half-assembled.
+  const files = attachments.map(attachmentPart);
+  const boundary = pickBoundary([text, ...files.map((part) => part.header)]);
+  // The text part is 8bit, so the multipart around it says so too (RFC 2045 §6.4).
+  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`, "Content-Transfer-Encoding: 8bit");
+  const chunks: Buffer[] = [Buffer.from(`${headers.join("\r\n")}\r\n\r\n--${boundary}\r\n${textHeader}\r\n\r\n${text}\r\n`, "utf8")];
+  for (const part of files) {
+    chunks.push(Buffer.from(`--${boundary}\r\n${part.header}\r\n\r\n`, "latin1"), part.body, Buffer.from("\r\n", "latin1"));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "latin1"));
+  return Buffer.concat(chunks);
 }

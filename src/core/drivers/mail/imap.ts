@@ -209,6 +209,29 @@ interface CommandResult {
   untagged: ParsedResponse[];
 }
 
+/** The largest message `append` will send. Above the driver's own caps (a
+ * 1 MiB body plus 17 MiB of attachments is about 24.3 MiB encoded), so it
+ * only ever catches a message nothing else bounded. */
+export const MAX_APPEND_BYTES = 32 * 1024 * 1024;
+
+const SIZE_CODES = new Set(["TOOBIG", "LIMIT", "OVERQUOTA"]);
+
+/**
+ * The server's own words when a tagged NO refused an APPEND for size, else
+ * null — read from the parsed reply `command()` attaches to its error. The
+ * text keeps the response code (`[TOOBIG] …`), drops anything unprintable,
+ * and is clipped: it goes to the agent.
+ */
+function sizeRefusal(e: ProtocolError): string | null {
+  const { code, replyType, replyText } = e;
+  if (replyType !== "NO") return null;
+  const text = typeof replyText === "string" ? replyText : "";
+  const sized = (typeof code === "string" && SIZE_CODES.has(code.toUpperCase())) || /too (big|large)|exceed|size limit/i.test(text);
+  if (!sized) return null;
+  const words = typeof code === "string" ? `[${code}] ${text}` : text;
+  return words.replace(/[^\x20-\x7e]/g, "").slice(0, 200).trim();
+}
+
 export class ImapClient {
   capabilities = new Set<string>();
   closed = false;
@@ -315,7 +338,12 @@ export class ImapClient {
         this.ctx.log(`imap: < ${summarise(res.raw ?? "")}`);
         this.lastTagged = res;
         if (res.type !== "OK") {
-          throw this.fail(`${stepName} failed: ${res.text || res.type}`, stepName, res.raw, { code: res.code, codeArgs: res.codeArgs });
+          throw this.fail(`${stepName} failed: ${res.text || res.type}`, stepName, res.raw, {
+            code: res.code,
+            codeArgs: res.codeArgs,
+            replyType: res.type,
+            replyText: res.text,
+          });
         }
         return { tagged: res, untagged };
       }
@@ -612,10 +640,34 @@ export class ImapClient {
     await this.command(`UID EXPUNGE ${uid}`, { step: "UID EXPUNGE" });
   }
 
+  /**
+   * APPEND the message as one literal. Two size guards: our own ceiling,
+   * checked before anything is sent (nothing else bounds what goes *out* —
+   * MAX_LITERAL_BYTES is about what comes in), and the server's, whose
+   * refusal (`[TOOBIG]`, `[LIMIT]`, `[OVERQUOTA]`, or a reply that says so in
+   * words) is passed to the agent in the server's own text, since what to
+   * do about it — fewer or smaller attachments — is the agent's call. Any
+   * other refusal stays an operator-log matter, as before.
+   */
   async append(folder: string, message: Buffer, flags: string[] = []): Promise<{ uid: number | null }> {
+    if (message.length > MAX_APPEND_BYTES) {
+      throw this.fail(
+        `the message is ${(message.length / 1024 / 1024).toFixed(1)} MiB; at most ${MAX_APPEND_BYTES / 1024 / 1024} MiB can be appended`,
+        "APPEND",
+        undefined,
+        { agent: "invalid_request" },
+      );
+    }
     const flagPart = flags.length ? ` (${flags.join(" ")})` : "";
     const line = `APPEND ${quote(utf7Encode(folder))}${flagPart}`;
-    const { tagged } = await this.command(line, { literal: message, logLine: `${line} {${message.length} bytes}` });
+    let tagged: ParsedResponse;
+    try {
+      ({ tagged } = await this.command(line, { literal: message, logLine: `${line} {${message.length} bytes}` }));
+    } catch (e) {
+      const refusal = e instanceof this.ProtocolError ? sizeRefusal(e) : null;
+      if (refusal === null) throw e;
+      throw this.fail(`the server refused the message: ${refusal}`, "APPEND", undefined, { agent: "invalid_request" });
+    }
     const appendUid = tagged.codeArgs?.[1];
     if (tagged.code === "APPENDUID" && appendUid != null) {
       return { uid: Number(str(appendUid)) };

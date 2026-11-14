@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ResolvedAuth } from "../../src/core/drivers/mail/auth.js";
-import { imapConnect, quote, type ImapClient, type ImapConnectConfig, type ImapDeps } from "../../src/core/drivers/mail/imap.js";
+import { imapConnect, MAX_APPEND_BYTES, quote, type ImapClient, type ImapConnectConfig, type ImapDeps } from "../../src/core/drivers/mail/imap.js";
 import { openLine, ProtocolError } from "../../src/core/drivers/mail/net.js";
 import { createCtx, createFakeEgress } from "../helpers/mail/egress.js";
 import { simpleMessage, startImapMock, type ImapMock, type ImapMockOptions, type MockMailboxSeed } from "../helpers/mail/imap-mock.js";
@@ -430,6 +430,28 @@ describe("imapConnect: mailbox commands", () => {
     const server = await mock({ mailboxes: seeded(), noUidplus: true });
     const { client } = await connect(server);
     expect(await client.append("INBOX/Drafts", Buffer.from("Subject: x\r\n\r\ny\r\n"), [])).toEqual({ uid: null });
+    await client.logout();
+  });
+
+  it("refuses to append a message over MAX_APPEND_BYTES without sending anything", async () => {
+    const server = await mock({ mailboxes: seeded() });
+    const { client } = await connect(server);
+    const error = await client.append("INBOX/Drafts", Buffer.alloc(MAX_APPEND_BYTES + 1, 0x61), []).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(ProtocolError);
+    expect((error as ProtocolError)["agent"]).toBe("invalid_request");
+    expect((error as Error).message).toMatch(/at most 32 MiB can be appended/);
+    expect(server.commands.some((c) => c.includes("APPEND"))).toBe(false);
+    await client.logout();
+  });
+
+  it("passes a size refusal on in the server's words, and leaves other refusals alone", async () => {
+    const server = await mock({ mailboxes: seeded(), appendLimit: 10 });
+    const { client } = await connect(server);
+    const tooBig = await client.append("INBOX/Drafts", Buffer.from("Subject: x\r\n\r\nmore than ten bytes\r\n"), []).catch((e: Error) => e);
+    expect((tooBig as ProtocolError)["agent"]).toBe("invalid_request");
+    expect((tooBig as Error).message).toBe("the server refused the message: [TOOBIG] Message too large for this mailbox");
+    const missing = await client.append("Nope", Buffer.from("x"), []).catch((e: Error) => e);
+    expect((missing as ProtocolError)["agent"]).toBeUndefined();
     await client.logout();
   });
 

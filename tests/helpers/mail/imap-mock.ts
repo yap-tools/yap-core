@@ -83,6 +83,9 @@ export interface ImapMockOptions {
   noAuthPlain?: boolean;
   /** Reject every authentication with NO. */
   authFail?: boolean;
+  /** Refuse an APPEND whose literal is larger than this, the way a server
+   * enforcing APPENDLIMIT (RFC 7889) does: NO [TOOBIG]. */
+  appendLimit?: number;
 }
 
 export interface RecordedAuth {
@@ -572,6 +575,10 @@ async function dispatch(conn: Conn, tag: string, command: string, args: Token[])
       const literal = args[i];
       if (!Buffer.isBuffer(literal)) {
         send(`${tag} BAD APPEND needs a literal`);
+        return;
+      }
+      if (opts.appendLimit !== undefined && literal.length > opts.appendLimit) {
+        send(`${tag} NO [TOOBIG] Message too large for this mailbox`);
         return;
       }
       const uid = mb.uidnext++;

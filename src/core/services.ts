@@ -63,6 +63,7 @@ import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition, DriverReads } from "./drivers/types.js";
 import { invalid, notFound, tooLarge, YapError } from "./errors.js";
+import { parseFileRef } from "./fileRefs.js";
 import { writeFileUnchecked, type FileWriteInput } from "./files.js";
 import { createItemsUnchecked, getItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
 import type { Resolver } from "./ssrf.js";
@@ -552,14 +553,11 @@ export async function deleteService(env: ServiceEnv, userId: string, serviceId: 
 
 // ---- The bundle reader ------------------------------------------------------
 
-const FILE_REF_PREFIX = "file://";
 const DRIVER_INLINE_FILE_CAP_BYTES = 10 * 1024 * 1024;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function fileIdFromRef(refOrId: string): string {
-  const ref = refOrId.trim();
-  const id = ref.startsWith(FILE_REF_PREFIX) ? ref.slice(FILE_REF_PREFIX.length) : ref;
-  if (!UUID_RE.test(id)) throw invalid("readFile expects a file://{uuid} reference or file id");
+  const id = parseFileRef(refOrId);
+  if (id === null) throw invalid("readFile expects a file://{uuid} reference or file id");
   return id;
 }
 
