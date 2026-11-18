@@ -603,11 +603,12 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "media-card",
     uri: `${UI_SCHEME_PREFIX}media-card`,
     description:
-      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card. Every kind offers a plain-text download link. Data: { kind, url, name?, mime_type?, size? }.",
+      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card. Every kind offers one plain-text download link. Data: show_file's result, flat ({ kind, url, download_url?, name?, mime_type?, size? }); a {widget, data} or {data} wrapper is unwrapped.",
     originHostable: true,
     style: `
       img { max-width: 100%; border-radius: 8px; display: block; }
-      audio { width: 100%; }
+      audio { width: 100%; display: block; }
+      .medianame { margin: 0 0 8px; overflow-wrap: anywhere; }
       /* Fit the real video's content height once metadata loads (natural ratio);
          fall back to 16:9 only for the pre-load placeholder, so the box doesn't
          start as a squat default and jump. */
@@ -621,12 +622,23 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
+        // The card's own fields. A payload without any of them may be a wrapper
+        // around the real one: show_file's whole _meta envelope passed as params
+        // ({ widget, data: {…} }) or a bare { data: {…} }. Use the inner object.
+        // Only a wrapper with no card fields of its own is unwrapped, and only a
+        // couple of levels deep.
+        function hasCardFields(x) {
+          return !!x && (x.kind != null || x.url != null || x.name != null || x.mime_type != null || x.download_url != null);
+        }
+        for (var depth = 0; depth < 3 && d && !hasCardFields(d) && typeof d.data === "object" && d.data !== null; depth++) {
+          d = d.data;
+        }
         // Host delivery can drop or thin the payload (a replayed tool-input
         // without params, a stringified envelope). An empty payload gets a
         // plain "no data" state — never the generic file row, which reads as a
         // real file named "file". A partial payload still renders as richly as
         // it can: the kind is derived from the mime type when absent.
-        if (!d || (d.kind == null && d.url == null && d.name == null && d.mime_type == null && d.download_url == null)) {
+        if (!hasCardFields(d)) {
           root.innerHTML = '<div class="card"><div class="preview-failed">No file data reached the card - re-run show_file to refresh</div></div>';
           return;
         }
@@ -651,7 +663,10 @@ export const WIDGETS: Record<string, WidgetDef> = {
           } catch (_e) {}
         }
         if (kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
-        else if (kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
+        // A player has no picture of its own, so the audio card names its file
+        // above the controls (images and videos identify themselves).
+        else if (kind === "audio") inner = '<div class="medianame">' + name + sizeNote + '</div>' +
+          '<audio controls src="' + url + '"></audio>';
         else if (kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
           '</div><div class="muted">' + esc(mime) + '</div></div></div>';

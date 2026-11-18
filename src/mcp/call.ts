@@ -317,7 +317,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   show_file: {
     description:
-      "Display a stored file or URL. Params: ref — a file://{uuid} reference or a direct http(s) URL. Returns a fresh expiring link plus a media-card widget pointer; share the link, never a durable location. On a widget-capable host, render the card with show_widget(widget=\"media-card\", params=<this result>) — show_widget carries the CSP that lets the card load the file bytes; the in-band pointer/link is the fallback for hosts that don't render widgets.",
+      "Display a stored file or URL. Params: ref — a file://{uuid} reference or a direct http(s) URL. Returns a fresh expiring link plus a media-card widget pointer; share the link, never a durable location. On a widget-capable host, render the card with show_widget(widget=\"media-card\", params=<this result>): pass this result (the same object as its _meta.data) as params, flat, not wrapped in {data: …} or the whole _meta. show_widget carries the CSP that lets the card load the file bytes; the in-band pointer/link is the fallback for hosts that don't render widgets.",
     capability: "read_files",
     params: { ref: { required: true } },
     handler: async (env, params) => {
