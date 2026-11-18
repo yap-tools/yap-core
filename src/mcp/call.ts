@@ -330,7 +330,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   upload_request: {
     description:
-      "Phase 1 of the 3-step upload lifecycle (request → upload bytes → complete). Reserves a placeholder file record and returns, in the result JSON: upload_url (short-lived, single-use — PUT the bytes there, then call upload_complete), origin_upload_url (a momentary signed upload page — give this link to a human to upload from a browser; nothing else needed), file_id, and complete_url. A dropzone widget pointer also rides in the result _meta for widget-capable hosts, but the links above work everywhere. On a widget-capable host, render the dropzone with show_widget(widget=\"upload-dropzone\", params={file_id, upload_url, complete_url}) — show_widget carries the CSP that lets the dropzone PUT bytes and finalize; otherwise hand a human origin_upload_url. Params: name (required), mime_type?, size? (declared, advisory).",
+      "Phase 1 of the 3-step upload lifecycle (request → upload bytes → complete). Reserves a placeholder file record and returns, in the result JSON: upload_url (short-lived, single-use — PUT the bytes there, then call upload_complete), origin_upload_url (a momentary signed upload page — give this link to a human to upload from a browser; nothing else needed), file_id, and complete_url. A dropzone widget pointer also rides in the result _meta for widget-capable hosts, but the links above work everywhere. On a widget-capable host, render the dropzone with show_widget(widget=\"upload-dropzone\", params=<this result's _meta.data>) — {file_id, upload_url, complete_url, name}; leave name out only to let the file take the browser's filename — show_widget carries the CSP that lets the dropzone PUT bytes and finalize; otherwise hand a human origin_upload_url. Params: name (required), mime_type?, size? (declared, advisory).",
     capability: "edit_files",
     params: { name: { required: true }, mime_type: {}, size: {} },
     handler: async (env, params) => {
@@ -350,6 +350,9 @@ export const secondTier: Record<string, SecondTierTool> = {
             // omitting it leaves every widget upload stuck in 'reserved'.
             complete_url: result.complete_url,
             origin_upload_url: result.origin_upload_url,
+            // The requested name: with it the dropzone keeps it at finalize
+            // instead of sending the browser's local filename.
+            name: filesCore.cleanFileName(String(params.name)),
           },
         },
       };
@@ -382,6 +385,15 @@ export const secondTier: Record<string, SecondTierTool> = {
         name: params.name as string | undefined,
         mime_type: params.mime_type as string | undefined,
       }),
+    }),
+  },
+  update_file: {
+    description:
+      "Rename a file (finalized or still reserved) without re-uploading it. Only the record changes: the bytes and every file://{uuid} reference to it stay as they are. Download links minted after the rename carry the new filename; a link already handed out may keep the old one until it expires. Params: id (the file id), name (required). Returns the file as list_files shows it.",
+    capability: "edit_files",
+    params: { id: { required: true }, name: { required: true } },
+    handler: async (env, params) => ({
+      result: await filesCore.updateFile(env, env.userId, String(params.id), { name: String(params.name) }),
     }),
   },
   delete_file: {

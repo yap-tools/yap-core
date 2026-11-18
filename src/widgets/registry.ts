@@ -50,6 +50,19 @@ export const TOOL_RESULT_UNWRAP_JS =
   `(typeof p.result==="object"&&p.result!==null)?p.result:null;` +
   `if(!n)break;p=n;sc=p.structuredContent;}return sc;}`;
 
+/** The upload-dropzone's finalize body, exported as source so the widget and
+ * its integration test exercise one definition. The name given to
+ * upload_request is the one that was asked for, so it wins: the browser's local
+ * filename (often a camera name or a UUID) is sent only when the widget's data
+ * carries no name. A name in the body replaces the reserved one at finalize. */
+export const UPLOAD_FINALIZE_JS = `
+  function finalizeBody(d, file) {
+    var body = { mime_type: (file && file.type) || "application/octet-stream" };
+    if (!String((d && d.name) || "").trim()) body.name = file.name;
+    return body;
+  }
+`;
+
 /** The upload-dropzone's failure classifier, exported as source so the widget
  * and its unit test exercise one definition. It keys purely on the HTTP status
  * and our structured error `code` ({ error: { code, details } }) — never on the
@@ -326,7 +339,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "upload-dropzone",
     uri: `${UI_SCHEME_PREFIX}upload-dropzone`,
     description:
-      "File-upload dropzone: lets a human pick or drop a file, streams it to the signed upload link, and finalizes the upload. Data: { file_id, upload_url, complete_url, name? }.",
+      "File-upload dropzone: lets a human pick or drop a file, streams it to the signed upload link, and finalizes the upload. Data: { file_id, upload_url, complete_url, name? }; with name set, the file keeps that name instead of the browser's filename.",
     originHostable: true,
     style: `
       .drop { border: 2px dashed rgba(128,128,128,.5); border-radius: 10px; padding: 28px; text-align: center; max-width: 560px; }
@@ -393,6 +406,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           phase.textContent = "";
         }
         ${UPLOAD_ERROR_JS}
+        ${UPLOAD_FINALIZE_JS}
         function imageExtension(type) {
           var t = String(type || "").toLowerCase();
           if (t === "image/png") return "png";
@@ -492,7 +506,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
               return fetch(d.complete_url, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ name: file.name, mime_type: file.type || "application/octet-stream" }),
+                body: JSON.stringify(finalizeBody(d, file)),
               });
             })
             .then(function (r) {

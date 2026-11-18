@@ -8,7 +8,7 @@ import { request } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { sweepOrphans } from "../../src/core/files.js";
-import { UPLOAD_ERROR_JS } from "../../src/widgets/registry.js";
+import { UPLOAD_ERROR_JS, UPLOAD_FINALIZE_JS } from "../../src/widgets/registry.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
@@ -25,6 +25,7 @@ describeEachAdapter("files", (adapter) => {
   let aliceMcp: McpTestClient;
   let bobRest: ApiClient;
   let bobId: string;
+  let bobKey: string;
   let spaceId: string;
   let bundleId: string;
 
@@ -81,6 +82,7 @@ describeEachAdapter("files", (adapter) => {
     const b = await sysadmin.post("/v1/users", { name: "Bob" });
     bobRest = apiClient(app.baseUrl, b.body.initialKey.key);
     bobId = b.body.user.id;
+    bobKey = b.body.initialKey.key;
     spaceId = (await alice.post("/v1/spaces", { name: "Files" })).body.id;
     bundleId = (await alice.post(`/v1/spaces/${spaceId}/bundles`, { name: "assets" })).body.id;
   });
@@ -323,6 +325,120 @@ describeEachAdapter("files", (adapter) => {
     const completed = await alice.post(`/v1/files/${uploaded.file_id}/complete`, {});
     expect(completed.status).toBe(200);
     expect(completed.body.size).toBe(39);
+  });
+
+  const uploadFinalized = async (name: string, body = "bytes") => {
+    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name })).body;
+    await fetch(requested.upload_url, { method: "PUT", body });
+    expect((await alice.post(`/v1/files/${requested.file_id}/complete`, {})).status).toBe(200);
+    return requested.file_id as string;
+  };
+
+  it("renames a finalized file over REST, returning it as list_files shows it", async () => {
+    const fileId = await uploadFinalized("IMG_0246.txt", "workout");
+    const renamed = await alice.patch(`/v1/files/${fileId}`, { name: "  squat-form.txt " });
+    expect(renamed.status).toBe(200);
+    const listed = (await alice.get(`/v1/bundles/${bundleId}/files`)).body.data.find((f: any) => f.id === fileId);
+    expect(renamed.body).toEqual(listed);
+    expect(listed.name).toBe("squat-form.txt"); // trimmed, as at upload
+    expect(listed.status).toBe("finalized");
+
+    // Only the record changed: the same file:// reference resolves to the same bytes.
+    const shown = await callOne(aliceMcp, "show_file", { ref: `file://${fileId}` });
+    expect(shown.result.name).toBe("squat-form.txt");
+    expect(await (await fetch(shown.result.url)).text()).toBe("workout");
+  });
+
+  it("renames over MCP with update_file; links minted afterwards carry the new filename", async () => {
+    const fileId = await uploadFinalized("4f1c9e2a.txt", "hello");
+    const renamed = await callOne(aliceMcp, "update_file", { id: fileId, name: "notes.txt" });
+    expect(renamed.ok).toBe(true);
+    expect(renamed.result).toMatchObject({ id: fileId, name: "notes.txt", status: "finalized", size: 5 });
+
+    const link = (await alice.get(`/v1/files/${fileId}/link`)).body;
+    expect(link.name).toBe("notes.txt");
+    const inline = await fetch(link.url);
+    expect(inline.headers.get("content-disposition")).toBe('inline; filename="notes.txt"');
+    const shown = await callOne(aliceMcp, "show_file", { ref: `file://${fileId}` });
+    const saved = await fetch(shown.result.download_url);
+    expect(saved.headers.get("content-disposition")).toBe('attachment; filename="notes.txt"');
+  });
+
+  it("renames a reserved file, and finalizing keeps that name", async () => {
+    const requested = (await alice.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "draft.txt" })).body;
+    const renamed = await alice.patch(`/v1/files/${requested.file_id}`, { name: "final.txt" });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.status).toBe("reserved");
+    await fetch(requested.upload_url, { method: "PUT", body: "x" });
+    const completed = await alice.post(`/v1/files/${requested.file_id}/complete`, {});
+    expect(completed.body.name).toBe("final.txt");
+  });
+
+  it("rejects invalid names on rename and leaves the old name in place", async () => {
+    const fileId = await uploadFinalized("keep.txt");
+    for (const name of ["", "   ", "a\r\nSet-Cookie: x", "dir/evil.txt", "dir\\evil.txt", "x".repeat(256)]) {
+      const res = await alice.patch(`/v1/files/${fileId}`, { name });
+      expect(res.status, JSON.stringify(name)).toBe(400);
+    }
+    expect((await alice.patch(`/v1/files/${fileId}`, {})).status).toBe(400);
+    expect((await alice.patch(`/v1/files/${fileId}`, { name: 42 })).status).toBe(400);
+    const viaMcp = await callOne(aliceMcp, "update_file", { id: fileId, name: "a/b" });
+    expect(viaMcp.ok).toBe(false);
+    expect(viaMcp.error.code).toBe("invalid_request");
+    expect((await alice.get(`/v1/files/${fileId}/link`)).body.name).toBe("keep.txt");
+    expect((await alice.patch(`/v1/files/00000000-0000-0000-0000-000000000000`, { name: "x.txt" })).status).toBe(404);
+  });
+
+  it("rename requires edit_files, over REST and MCP", async () => {
+    const fileId = await uploadFinalized("guarded.txt");
+    // A non-member cannot even see the file, as with delete.
+    expect((await bobRest.patch(`/v1/files/${fileId}`, { name: "mine.txt" })).status).toBe(404);
+    const grant = await alice.post(`/v1/bundles/${bundleId}/grants`, {
+      userId: bobId,
+      capabilities: ["read_files"],
+      effect: "allow",
+    });
+    const denied = await bobRest.patch(`/v1/files/${fileId}`, { name: "mine.txt" });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error.details.capability).toBe("edit_files");
+    const bobMcp = await connectMcp(app.baseUrl, bobKey);
+    try {
+      const viaMcp = await callOne(bobMcp, "update_file", { id: fileId, name: "mine.txt" });
+      expect(viaMcp.ok).toBe(false);
+      expect(viaMcp.error.code).toBe("forbidden");
+    } finally {
+      await bobMcp.close();
+      await alice.delete(`/v1/bundles/${bundleId}/grants/${grant.body.data[0].id}`);
+    }
+    expect((await alice.get(`/v1/files/${fileId}/link`)).body.name).toBe("guarded.txt");
+  });
+
+  it("the upload dropzone keeps the name given to upload_request", async () => {
+    // Replays the widget's own finalize body (UPLOAD_FINALIZE_JS) against the real endpoint.
+    const finalizeBody = new Function(UPLOAD_FINALIZE_JS + " return finalizeBody;")() as (
+      d: Record<string, unknown>,
+      file: { name: string; type?: string },
+    ) => Record<string, unknown>;
+    const browserFile = { name: "IMG_0246.txt", type: "text/plain" };
+    const finalizeWith = async (data: Record<string, unknown>) => {
+      await fetch(data.upload_url as string, { method: "PUT", body: "pic" });
+      const res = await fetch(data.complete_url as string, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(finalizeBody(data, browserFile)),
+      });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as any).name;
+    };
+
+    const requested = await callOne(aliceMcp, "upload_request", { name: "workout-reference.txt" });
+    expect(requested._meta.data.name).toBe("workout-reference.txt");
+    expect(await finalizeWith(requested._meta.data)).toBe("workout-reference.txt");
+
+    // Data without a name (a caller that left it out) falls back to the browser's filename.
+    const bare = await callOne(aliceMcp, "upload_request", { name: "placeholder.txt" });
+    const { name: _dropped, ...noName } = bare._meta.data;
+    expect(await finalizeWith(noName)).toBe("IMG_0246.txt");
   });
 
   it("show_file passes direct URLs through without minting", async () => {
