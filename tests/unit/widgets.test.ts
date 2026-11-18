@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -126,7 +126,36 @@ describe("widgetHtml", () => {
     expect(render).toContain(".then(firstAsyncClipboardImage)");
     expect(render).toContain('type.indexOf("image/") === 0');
     expect(render).toContain('new File([blob], "pasted-image." + imageExtension(blob.type || type)');
-    expect(render).toContain("Could not read the clipboard");
+    expect(render).toContain("This app can't read the clipboard here.");
+  });
+
+  it("declares clipboard-read as the widgets' MCP Apps permission", () => {
+    expect(WIDGET_PERMISSIONS).toEqual({ clipboardRead: {} });
+  });
+
+  it("the upload-dropzone hints how to paste, with the platform's shortcut", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("Click here, then press ");
+    expect(render).toContain('"\\u2318V" : "Ctrl+V"');
+    expect(render).toContain("/Mac|iPhone|iPad|iPod/");
+  });
+
+  it("the upload-dropzone tells a blocked clipboard apart from a declined one", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain('err.name === "NotAllowedError"');
+    expect(render).toContain('allowsFeature("clipboard-read")');
+    expect(render).toContain("This app can't read the clipboard here. Press \" + pasteKey + \" instead, or choose a file.");
+    expect(render).toContain("Paste was not allowed. Try again and allow it, or choose a file.");
+    expect(render).not.toContain("Could not read the clipboard");
+  });
+
+  it("the upload-dropzone takes focus without stealing it from the host", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    // Focus only when this document already has it, else on the first pointer entry.
+    expect(render).toContain("if (document.hasFocus()) focusZone();");
+    expect(render).toContain('document.documentElement.addEventListener("pointerenter", window.__yapFocusHandler, { once: true })');
+    expect(render).toContain('document.documentElement.removeEventListener("pointerenter", window.__yapFocusHandler)');
+    expect(render).toContain("zone.focus({ preventScroll: true })");
   });
 
   it("the upload-dropzone gives pasted clipboard files safe names", () => {
