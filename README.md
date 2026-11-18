@@ -257,7 +257,7 @@ metadata and descending only into the relevant branch:
   `create_items`, `update_items`, `delete_items`, `get_doc`, `read_docs`,
   `create_doc`, `update_doc`, `patch_doc`, `delete_doc`,
   `list_files`, `show_file`, `upload_request`, `upload_complete`, `sideload_file`,
-  `delete_file`,
+  `update_file`, `delete_file`,
   `run_service`, `get_run`, `list_runs`, `create_schedule`, `update_schedule`,
   `delete_schedule`, `list_schedules`, and the deprecated `fire_hook` alias
   (kept until 1.0). Management (gated by the matching capability): `update_space` /
@@ -413,6 +413,19 @@ be the instance's externally reachable origin (https except on loopback).
   expiring links. With S3 the bytes never touch the API layer; on local disk
   Yap serves them behind its own signed-token endpoints. Deleting a file
   deletes the blob immediately.
+
+  **Renaming** (`update_file` with `{ id, name }`, or `PATCH /v1/files/:id`
+  with `{ name }`, both gated by `edit_files`) changes only the record, on a
+  reserved or a finalized file: the bytes stay put and `file://` references
+  keep resolving, since both key on the id. The name passes the same checks
+  as at upload. Links minted after the rename download under the new name.
+  An S3 link minted before it keeps the old filename until it expires, as the
+  filename is signed into the URL; a local-disk link reads the record when
+  fetched, so it serves the new name at once. `upload_complete`'s `name` is a
+  finalize-time override only, and completing twice still conflicts.
+
+  The upload dropzone keeps the name given to `upload_request`: it sends the
+  browser's own filename at finalize only when its data carries no name.
 
   An agent holding a URL can skip the three phases: **sideloading**
   (`sideload_file`, or `POST /v1/bundles/:id/files/sideload` with
@@ -625,7 +638,17 @@ be the instance's externally reachable origin (https except on loopback).
 - **Widgets** (MCP Apps / SEP-1865) are self-contained `ui://` resources
   rendered three ways: result pointers on `call`, the generic `show_widget`
   shell, or origin-hosted pages at signed expiring URLs for hosts that can't
-  render widgets at all.
+  render widgets at all. Each widget declares its CSP and asks for
+  `clipboardRead` under `_meta.ui.permissions`, so a host that honours it lets
+  the upload dropzone's "Paste image" button read the clipboard. Ctrl/Cmd-V
+  needs no permission: the dropzone takes focus when it safely can (its
+  document already has focus, or the pointer first enters it), and says so
+  when the clipboard is blocked rather than declined. The media card takes
+  `show_file`'s result as its data, flat (`show_widget(widget="media-card",
+  params=<result>)`); a `{widget, data}` or `{data}` wrapper around it is
+  unwrapped, so passing the whole `_meta` envelope still renders. Images,
+  audio and video play inline (audio with its filename above the player),
+  and every card has exactly one Download link.
 
 ## Development
 

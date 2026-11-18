@@ -14,6 +14,19 @@
 
 export const UI_SCHEME_PREFIX = "ui://yap/";
 
+/**
+ * Browser permissions every widget asks its host for, declared as
+ * `_meta.ui.permissions` (MCP Apps / SEP-1865). A host that honours a key adds
+ * the matching Permissions Policy feature to the widget iframe's `allow`
+ * attribute; one that doesn't simply ignores it. `clipboardRead` maps to
+ * `clipboard-read`, which the dropzone's "Paste image" button needs for
+ * `navigator.clipboard.read()` inside a cross-origin iframe. The spec draft
+ * lists `clipboardWrite` but not yet `clipboardRead`; the key follows its
+ * naming so a host that adds it finds it. Ctrl/Cmd-V needs no permission (a
+ * paste event carries its own data), so it is the fallback the widget points to.
+ */
+export const WIDGET_PERMISSIONS = { clipboardRead: {} } as const;
+
 export interface WidgetDef {
   name: string;
   uri: string;
@@ -36,6 +49,19 @@ export const TOOL_RESULT_UNWRAP_JS =
   `while(!sc&&p&&g++<5){var n=(typeof p.value==="object"&&p.value!==null)?p.value:` +
   `(typeof p.result==="object"&&p.result!==null)?p.result:null;` +
   `if(!n)break;p=n;sc=p.structuredContent;}return sc;}`;
+
+/** The upload-dropzone's finalize body, exported as source so the widget and
+ * its integration test exercise one definition. The name given to
+ * upload_request is the one that was asked for, so it wins: the browser's local
+ * filename (often a camera name or a UUID) is sent only when the widget's data
+ * carries no name. A name in the body replaces the reserved one at finalize. */
+export const UPLOAD_FINALIZE_JS = `
+  function finalizeBody(d, file) {
+    var body = { mime_type: (file && file.type) || "application/octet-stream" };
+    if (!String((d && d.name) || "").trim()) body.name = file.name;
+    return body;
+  }
+`;
 
 /** The upload-dropzone's failure classifier, exported as source so the widget
  * and its unit test exercise one definition. It keys purely on the HTTP status
@@ -313,7 +339,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "upload-dropzone",
     uri: `${UI_SCHEME_PREFIX}upload-dropzone`,
     description:
-      "File-upload dropzone: lets a human pick or drop a file, streams it to the signed upload link, and finalizes the upload. Data: { file_id, upload_url, complete_url, name? }.",
+      "File-upload dropzone: lets a human pick or drop a file, streams it to the signed upload link, and finalizes the upload. Data: { file_id, upload_url, complete_url, name? }; with name set, the file keeps that name instead of the browser's filename.",
     originHostable: true,
     style: `
       .drop { border: 2px dashed rgba(128,128,128,.5); border-radius: 10px; padding: 28px; text-align: center; max-width: 560px; }
@@ -334,6 +360,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
       onData(function (d) {
         var root = document.getElementById("root");
         root.innerHTML = '<div class="drop" id="zone" tabindex="0" aria-label="Upload file dropzone"><p><strong>Drop a file or paste an image</strong> or</p>' +
+          '<p class="muted" id="hint"></p>' +
           '<p><button id="pick">Choose file</button> <button id="paste">Paste image</button></p>' +
           '<input id="file" type="file" style="display:none">' +
           '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
@@ -347,6 +374,10 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var progress = document.getElementById("progress");
         var bar = document.getElementById("bar");
         var phase = document.getElementById("phase");
+        // Only the platform's own shortcut is shown; Apple keyboards paste with Cmd.
+        var platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "");
+        var pasteKey = /Mac|iPhone|iPad|iPod/.test(platform) ? "\\u2318V" : "Ctrl+V";
+        document.getElementById("hint").textContent = "Click here, then press " + pasteKey;
         // The paste *event* needs a keyboard or context-menu gesture, which a
         // non-editable page never gets on iOS — the button covers those hosts
         // through the async clipboard API, which a plain tap may invoke (the
@@ -375,6 +406,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           phase.textContent = "";
         }
         ${UPLOAD_ERROR_JS}
+        ${UPLOAD_FINALIZE_JS}
         function imageExtension(type) {
           var t = String(type || "").toLowerCase();
           if (t === "image/png") return "png";
@@ -474,7 +506,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
               return fetch(d.complete_url, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ name: file.name, mime_type: file.type || "application/octet-stream" }),
+                body: JSON.stringify(finalizeBody(d, file)),
               });
             })
             .then(function (r) {
@@ -502,6 +534,24 @@ export const WIDGETS: Record<string, WidgetDef> = {
               if (!locked && !pick.disabled) setControls(true);
             });
         }
+        // Both a permissions-policy block (the iframe lacks allow="clipboard-read")
+        // and a declined browser prompt reject with NotAllowedError. The policy is
+        // queryable where the browser exposes it, and Chromium names it in the
+        // message; anything else is treated as the user saying no. Errors that are
+        // not NotAllowedError mean the API is unusable here, same advice as a block.
+        function clipboardBlocked(err) {
+          var policy = document.permissionsPolicy || document.featurePolicy;
+          try {
+            if (policy && policy.allowsFeature && !policy.allowsFeature("clipboard-read")) return true;
+          } catch (_e) {}
+          return /permissions? policy/i.test(String(err && err.message || ""));
+        }
+        function clipboardRefusal(err) {
+          if (err && err.name === "NotAllowedError" && !clipboardBlocked(err)) {
+            return "Paste was not allowed. Try again and allow it, or choose a file.";
+          }
+          return "This app can't read the clipboard here. Press " + pasteKey + " instead, or choose a file.";
+        }
         resetProgress();
         pick.addEventListener("click", function () { if (!busy && !locked) input.click(); });
         if (pasteBtn) pasteBtn.addEventListener("click", function () {
@@ -513,8 +563,8 @@ export const WIDGETS: Record<string, WidgetDef> = {
               if (!file) { setStatus("No image in the clipboard \\u2014 copy an image and try again."); return; }
               upload(file);
             })
-            .catch(function () {
-              setStatus("Could not read the clipboard \\u2014 allow paste access and try again.", "err");
+            .catch(function (err) {
+              setStatus(clipboardRefusal(err), "err");
             });
         });
         input.addEventListener("click", function () { input.value = ""; });
@@ -545,6 +595,20 @@ export const WIDGETS: Record<string, WidgetDef> = {
           upload(withSafeName(file));
         };
         document.addEventListener("paste", window.__yapPasteHandler);
+        // A paste only reaches this document once it has focus, and inside a host
+        // iframe it has none until clicked. Focusing the zone makes Ctrl/Cmd-V work
+        // straight away, but never at the host's expense: focus is taken at render
+        // only when this document already has it (an origin page, or a click that
+        // landed here first), otherwise on the pointer's first entry. Like the
+        // paste handler, a re-delivered render replaces the previous listener.
+        function focusZone() {
+          if (document.activeElement && document.activeElement !== document.body && document.activeElement !== zone) return;
+          try { zone.focus({ preventScroll: true }); } catch (_e) {}
+        }
+        if (window.__yapFocusHandler) document.documentElement.removeEventListener("pointerenter", window.__yapFocusHandler);
+        window.__yapFocusHandler = function () { window.__yapFocusHandler = null; focusZone(); };
+        if (document.hasFocus()) focusZone();
+        else document.documentElement.addEventListener("pointerenter", window.__yapFocusHandler, { once: true });
       });
     `,
   },
@@ -553,11 +617,12 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "media-card",
     uri: `${UI_SCHEME_PREFIX}media-card`,
     description:
-      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card. Every kind offers a plain-text download link. Data: { kind, url, name?, mime_type?, size? }.",
+      "Media card for show_file: images, audio, and video play inline; anything else gets a clean file card. Every kind offers one plain-text download link. Data: show_file's result, flat ({ kind, url, download_url?, name?, mime_type?, size? }); a {widget, data} or {data} wrapper is unwrapped.",
     originHostable: true,
     style: `
       img { max-width: 100%; border-radius: 8px; display: block; }
-      audio { width: 100%; }
+      audio { width: 100%; display: block; }
+      .medianame { margin: 0 0 8px; overflow-wrap: anywhere; }
       /* Fit the real video's content height once metadata loads (natural ratio);
          fall back to 16:9 only for the pre-load placeholder, so the box doesn't
          start as a squat default and jump. */
@@ -571,12 +636,23 @@ export const WIDGETS: Record<string, WidgetDef> = {
     render: `
       onData(function (d) {
         var root = document.getElementById("root");
+        // The card's own fields. A payload without any of them may be a wrapper
+        // around the real one: show_file's whole _meta envelope passed as params
+        // ({ widget, data: {…} }) or a bare { data: {…} }. Use the inner object.
+        // Only a wrapper with no card fields of its own is unwrapped, and only a
+        // couple of levels deep.
+        function hasCardFields(x) {
+          return !!x && (x.kind != null || x.url != null || x.name != null || x.mime_type != null || x.download_url != null);
+        }
+        for (var depth = 0; depth < 3 && d && !hasCardFields(d) && typeof d.data === "object" && d.data !== null; depth++) {
+          d = d.data;
+        }
         // Host delivery can drop or thin the payload (a replayed tool-input
         // without params, a stringified envelope). An empty payload gets a
         // plain "no data" state — never the generic file row, which reads as a
         // real file named "file". A partial payload still renders as richly as
         // it can: the kind is derived from the mime type when absent.
-        if (!d || (d.kind == null && d.url == null && d.name == null && d.mime_type == null && d.download_url == null)) {
+        if (!hasCardFields(d)) {
           root.innerHTML = '<div class="card"><div class="preview-failed">No file data reached the card - re-run show_file to refresh</div></div>';
           return;
         }
@@ -601,7 +677,10 @@ export const WIDGETS: Record<string, WidgetDef> = {
           } catch (_e) {}
         }
         if (kind === "image") inner = '<img src="' + url + '" alt="' + name + '">';
-        else if (kind === "audio") inner = '<audio controls src="' + url + '"></audio>';
+        // A player has no picture of its own, so the audio card names its file
+        // above the controls (images and videos identify themselves).
+        else if (kind === "audio") inner = '<div class="medianame">' + name + sizeNote + '</div>' +
+          '<audio controls src="' + url + '"></audio>';
         else if (kind === "video") inner = '<video controls src="' + url + '"></video>';
         else inner = '<div class="filerow"><span class="fileicon">\\ud83d\\udcc4</span><div><div>' + name + sizeNote +
           '</div><div class="muted">' + esc(mime) + '</div></div></div>';

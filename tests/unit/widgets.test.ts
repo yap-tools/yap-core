@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -126,7 +126,36 @@ describe("widgetHtml", () => {
     expect(render).toContain(".then(firstAsyncClipboardImage)");
     expect(render).toContain('type.indexOf("image/") === 0');
     expect(render).toContain('new File([blob], "pasted-image." + imageExtension(blob.type || type)');
-    expect(render).toContain("Could not read the clipboard");
+    expect(render).toContain("This app can't read the clipboard here.");
+  });
+
+  it("declares clipboard-read as the widgets' MCP Apps permission", () => {
+    expect(WIDGET_PERMISSIONS).toEqual({ clipboardRead: {} });
+  });
+
+  it("the upload-dropzone hints how to paste, with the platform's shortcut", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("Click here, then press ");
+    expect(render).toContain('"\\u2318V" : "Ctrl+V"');
+    expect(render).toContain("/Mac|iPhone|iPad|iPod/");
+  });
+
+  it("the upload-dropzone tells a blocked clipboard apart from a declined one", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain('err.name === "NotAllowedError"');
+    expect(render).toContain('allowsFeature("clipboard-read")');
+    expect(render).toContain("This app can't read the clipboard here. Press \" + pasteKey + \" instead, or choose a file.");
+    expect(render).toContain("Paste was not allowed. Try again and allow it, or choose a file.");
+    expect(render).not.toContain("Could not read the clipboard");
+  });
+
+  it("the upload-dropzone takes focus without stealing it from the host", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    // Focus only when this document already has it, else on the first pointer entry.
+    expect(render).toContain("if (document.hasFocus()) focusZone();");
+    expect(render).toContain('document.documentElement.addEventListener("pointerenter", window.__yapFocusHandler, { once: true })');
+    expect(render).toContain('document.documentElement.removeEventListener("pointerenter", window.__yapFocusHandler)');
+    expect(render).toContain("zone.focus({ preventScroll: true })");
   });
 
   it("the upload-dropzone gives pasted clipboard files safe names", () => {
@@ -165,11 +194,11 @@ describe("widgetHtml", () => {
     const html = widgetHtml("media-card", "origin", {
       kind: "audio",
       url: "https://x/song.mp3",
-      name: "up in the ceiling.mp3",
+      name: "field-recording.mp3",
     });
     const embedded = /window\.__YAP_DATA__ = (.*?);<\/script>/s.exec(html);
     expect(embedded).toBeTruthy();
-    expect(JSON.parse(embedded![1]!).name).toBe("up in the ceiling.mp3");
+    expect(JSON.parse(embedded![1]!).name).toBe("field-recording.mp3");
     expect(html).toContain("<title>yap media-card</title>");
     expect(html).toContain("document.title = displayName");
     expect(html).toContain("new MediaMetadata({ title: displayName })");
@@ -332,5 +361,61 @@ describe("widget recovery mounts in place (no nested iframe)", () => {
       expect(src.render, name).toBe(WIDGETS[name]!.render);
       expect(src.style, name).toBe(WIDGETS[name]!.style);
     }
+  });
+});
+
+describe("media-card: rendering the shapes show_widget is called with", () => {
+  // Run the card's real render source against a minimal stand-in for the
+  // bridge and DOM, and return the HTML it puts in #root. esc/safeUrl mirror
+  // the bridge's helpers closely enough for markup assertions.
+  function renderCard(params: unknown): string {
+    const root = { innerHTML: "", querySelector: () => null };
+    const doc = { title: "", getElementById: () => root };
+    const esc = (v: unknown) =>
+      String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const safeUrl = (v: unknown) => (/^https?:\/\//i.test(String(v ?? "")) ? esc(v) : "#");
+    const onData = (cb: (d: unknown) => void) => cb(params);
+    const run = new Function(
+      "onData", "document", "window", "navigator", "esc", "safeUrl", "request", "announceHeight",
+      WIDGETS["media-card"]!.render,
+    );
+    run(onData, doc, {}, {}, esc, safeUrl, () => Promise.resolve(), () => {});
+    return root.innerHTML;
+  }
+
+  // What show_file returns for an mp3 (the result itself, and its _meta.data).
+  const audio = {
+    id: "f1",
+    kind: "audio",
+    name: "field-recording.mp3",
+    mime_type: "audio/mpeg",
+    size: 11_000_000,
+    url: "https://files.example/up.mp3?sig=1",
+    download_url: "https://files.example/up.mp3?sig=1&dl=1",
+    expires_in: 3600,
+  };
+
+  function expectAudioCard(html: string) {
+    expect(html).toContain('<audio controls src="https://files.example/up.mp3?sig=1">');
+    expect(html).toContain("field-recording.mp3");
+    expect(html.match(/>Download<\/a>/g)).toHaveLength(1);
+    expect(html).not.toContain("filerow");
+  }
+
+  it("renders a flat show_file result as an audio player with its filename and one Download link", () => {
+    expectAudioCard(renderCard(audio));
+  });
+
+  it("unwraps the whole _meta envelope ({widget, data}) passed as params", () => {
+    expectAudioCard(renderCard({ widget: "ui://yap/media-card", data: audio }));
+  });
+
+  it("unwraps a bare {data} wrapper", () => {
+    expectAudioCard(renderCard({ data: audio }));
+  });
+
+  it("still shows the no-data state for an envelope with nothing inside", () => {
+    expect(renderCard({ widget: "ui://yap/media-card", data: {} })).toContain("No file data reached the card");
+    expect(renderCard({})).toContain("No file data reached the card");
   });
 });

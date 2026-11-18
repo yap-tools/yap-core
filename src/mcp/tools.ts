@@ -31,7 +31,7 @@ import * as userDocsCore from "../core/userDocs.js";
 import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
-import { UI_SCHEME_PREFIX, WIDGETS, widgetHtml } from "../widgets/registry.js";
+import { UI_SCHEME_PREFIX, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
@@ -195,8 +195,17 @@ export function registerMcpTools(server: YapServer): void {
   // _meta verbatim but types ui as { resourceUri? }; we annotate resourceUri as a
   // permitted (here unset) key so the value is assignable, and the csp rides
   // along — same trick as showWidgetMeta below, minus the resourceUri itself.
-  const callMeta: { ui: { resourceUri?: string; csp: { connectDomains: string[]; resourceDomains: string[] } } } = {
-    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains } },
+  // The spec reads permissions from the resource (below), not the tool; they
+  // are mirrored here because hosts that take the CSP from the tool may take the
+  // iframe's allow list from the same place.
+  const callMeta: {
+    ui: {
+      resourceUri?: string;
+      csp: { connectDomains: string[]; resourceDomains: string[] };
+      permissions: typeof WIDGET_PERMISSIONS;
+    };
+  } = {
+    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains }, permissions: WIDGET_PERMISSIONS },
   };
 
   // A UI resource's CSP must ride on its READ result — widget-capable hosts
@@ -210,8 +219,10 @@ export function registerMcpTools(server: YapServer): void {
   // S3 store origin when blobs are presigned off-origin — that S3 origin is
   // third-party and may not be honored by hosts that trust only the server origin
   // (e.g. Claude), the accepted tradeoff of serving file bytes direct from S3.
+  // ui.permissions asks the host to let the iframe read the clipboard (see
+  // WIDGET_PERMISSIONS); a host that grants it adds allow="clipboard-read".
   const resourceMeta = {
-    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains } },
+    ui: { csp: { connectDomains: cspDomains, resourceDomains: cspDomains }, permissions: WIDGET_PERMISSIONS },
     "openai/widgetCSP": { connect_domains: cspDomains, resource_domains: cspDomains },
   };
 
@@ -520,6 +531,8 @@ export function registerMcpTools(server: YapServer): void {
     ui: {
       resourceUri: `${UI_SCHEME_PREFIX}shell`,
       csp: { connectDomains: cspDomains, resourceDomains: cspDomains },
+      // Mirrored from the resource for the same reason as on callMeta.
+      permissions: WIDGET_PERMISSIONS,
     },
     // Flat alias: some hosts read the template link from a flat "ui/resourceUri"
     // key rather than the nested ui.resourceUri. Declaring both is cheap insurance.
@@ -528,10 +541,13 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "show_widget",
-    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those.`,
+    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those. params is the widget's data, flat: for a tool that points at a widget (show_file → media-card, upload_request → upload-dropzone), pass that tool's _meta.data as params (for show_file that is the result itself), not the whole _meta envelope and not under a data key. There is no data parameter.`,
     parameters: z.object({
       widget: z.string().describe("Widget name or ui://yap/... URI"),
-      params: z.record(z.string(), z.unknown()).optional(),
+      params: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe("The widget's data, flat: e.g. show_file's result as-is for media-card"),
     }),
     annotations: { readOnlyHint: true, title: "Show widget" },
     _meta: showWidgetMeta,

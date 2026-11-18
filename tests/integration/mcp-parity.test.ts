@@ -28,6 +28,15 @@ describe("capability coverage (drift guard)", () => {
     expect(viaCall.has("fire_hooks")).toBe(false);
   });
 
+  it("file rename: update_file mirrors PATCH /v1/files/:id under edit_files", () => {
+    const tool = secondTier.update_file;
+    expect(tool, "update_file should be in the second-tier catalog").toBeTruthy();
+    expect(tool!.capability).toBe("edit_files");
+    expect(Object.keys(tool!.params ?? {}).sort()).toEqual(["id", "name"]);
+    expect(tool!.params!.id!.required).toBe(true);
+    expect(tool!.params!.name!.required).toBe(true);
+  });
+
   it("run_services is reachable through the run family, with fire_hook only as an alias", () => {
     for (const name of ["run_service", "get_run", "list_runs"]) {
       expect(secondTier[name], `${name} should be in the second-tier catalog`).toBeTruthy();
@@ -101,6 +110,45 @@ describeEachAdapter("MCP management parity", (adapter) => {
       const del = await one(alice, tmp, { tool: "delete_space" });
       expect(del.ok).toBe(true);
       expect((await aliceRest.get(`/v1/spaces/${tmp}`)).status).toBe(404);
+    } finally {
+      await alice.close();
+      await bob.close();
+      await app.stop();
+    }
+  });
+
+  it("edit_files: a rename over MCP and over REST yield the same file, gated alike", async () => {
+    await setup();
+    try {
+      const requested = (await aliceRest.post(`/v1/bundles/${bundleId}/files/upload-request`, { name: "a.txt" })).body;
+      await fetch(requested.upload_url, { method: "PUT", body: "abc" });
+      await aliceRest.post(`/v1/files/${requested.file_id}/complete`, {});
+
+      const viaMcp = await one(alice, spaceId, {
+        bundle_id: bundleId,
+        tool: "update_file",
+        params: { id: requested.file_id, name: "b.txt" },
+      });
+      expect(viaMcp.ok).toBe(true);
+      const viaRest = await aliceRest.patch(`/v1/files/${requested.file_id}`, { name: "b.txt" });
+      expect(viaRest.status).toBe(200);
+      expect(viaRest.body).toEqual(viaMcp.result);
+      const listed = await one(alice, spaceId, { bundle_id: bundleId, tool: "list_files" });
+      expect(listed.result.data).toEqual([viaMcp.result]);
+
+      // Read-only Bob is refused over MCP, as over REST (files.test.ts).
+      await aliceRest.post(`/v1/bundles/${bundleId}/grants`, {
+        userId: bobId,
+        capabilities: ["read_files"],
+        effect: "allow",
+      });
+      const mcpDenied = await one(bob, spaceId, {
+        bundle_id: bundleId,
+        tool: "update_file",
+        params: { id: requested.file_id, name: "c.txt" },
+      });
+      expect(mcpDenied.ok).toBe(false);
+      expect(mcpDenied.error.code).toBe("forbidden");
     } finally {
       await alice.close();
       await bob.close();
