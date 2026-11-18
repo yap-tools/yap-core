@@ -654,6 +654,38 @@ export async function deleteFile(env: FileEnv, userId: string, fileId: string): 
   await db.client.delete(files).where(eq(files.id, fileId));
 }
 
+/**
+ * Renames a file, reserved or finalized. Only the record changes: the storage
+ * key carries no name and file:// references key on the id, so both survive.
+ *
+ * The download name is read whenever a link resolves to a filename. S3 bakes
+ * it into the presigned URL at mint time, so links minted before the rename
+ * keep the old filename until they expire; the local-disk download route reads
+ * the record on each fetch, so its links serve the new name straight away.
+ */
+export async function updateFile(
+  env: FileEnv,
+  userId: string,
+  fileId: string,
+  patch: { name: string },
+): Promise<FileInfo> {
+  const { db } = env;
+  const file = await getFileRow(db, fileId);
+  const ctx = await getBundleContext(db, file.bundleId);
+  await requireBundleCapability(db, userId, "edit_files", ctx);
+  const name = cleanFileName(patch.name);
+  const { files } = db.tables;
+  await db.client.update(files).set({ name }).where(eq(files.id, fileId));
+  return {
+    id: file.id,
+    name,
+    mimeType: file.mimeType,
+    size: file.size,
+    status: file.status,
+    createdAt: file.createdAt,
+  };
+}
+
 export type ShowFileKind = "image" | "audio" | "video" | "file";
 
 export function fileKind(mimeType: string): ShowFileKind {

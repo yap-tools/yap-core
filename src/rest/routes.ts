@@ -857,6 +857,15 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  app.patch(
+    "/v1/files/:id",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const body = parseBody(z.object({ name: z.string() }), await jsonBody(c));
+      return c.json(await filesCore.updateFile(fileEnv, userId, param(c, "id"), body));
+    }),
+  );
+
   app.delete(
     "/v1/files/:id",
     handle(async (c, auth) => {
