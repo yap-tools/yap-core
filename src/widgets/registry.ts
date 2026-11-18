@@ -14,6 +14,19 @@
 
 export const UI_SCHEME_PREFIX = "ui://yap/";
 
+/**
+ * Browser permissions every widget asks its host for, declared as
+ * `_meta.ui.permissions` (MCP Apps / SEP-1865). A host that honours a key adds
+ * the matching Permissions Policy feature to the widget iframe's `allow`
+ * attribute; one that doesn't simply ignores it. `clipboardRead` maps to
+ * `clipboard-read`, which the dropzone's "Paste image" button needs for
+ * `navigator.clipboard.read()` inside a cross-origin iframe. The spec draft
+ * lists `clipboardWrite` but not yet `clipboardRead`; the key follows its
+ * naming so a host that adds it finds it. Ctrl/Cmd-V needs no permission (a
+ * paste event carries its own data), so it is the fallback the widget points to.
+ */
+export const WIDGET_PERMISSIONS = { clipboardRead: {} } as const;
+
 export interface WidgetDef {
   name: string;
   uri: string;
@@ -334,6 +347,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
       onData(function (d) {
         var root = document.getElementById("root");
         root.innerHTML = '<div class="drop" id="zone" tabindex="0" aria-label="Upload file dropzone"><p><strong>Drop a file or paste an image</strong> or</p>' +
+          '<p class="muted" id="hint"></p>' +
           '<p><button id="pick">Choose file</button> <button id="paste">Paste image</button></p>' +
           '<input id="file" type="file" style="display:none">' +
           '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
@@ -347,6 +361,10 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var progress = document.getElementById("progress");
         var bar = document.getElementById("bar");
         var phase = document.getElementById("phase");
+        // Only the platform's own shortcut is shown; Apple keyboards paste with Cmd.
+        var platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "");
+        var pasteKey = /Mac|iPhone|iPad|iPod/.test(platform) ? "\\u2318V" : "Ctrl+V";
+        document.getElementById("hint").textContent = "Click here, then press " + pasteKey;
         // The paste *event* needs a keyboard or context-menu gesture, which a
         // non-editable page never gets on iOS — the button covers those hosts
         // through the async clipboard API, which a plain tap may invoke (the
@@ -502,6 +520,24 @@ export const WIDGETS: Record<string, WidgetDef> = {
               if (!locked && !pick.disabled) setControls(true);
             });
         }
+        // Both a permissions-policy block (the iframe lacks allow="clipboard-read")
+        // and a declined browser prompt reject with NotAllowedError. The policy is
+        // queryable where the browser exposes it, and Chromium names it in the
+        // message; anything else is treated as the user saying no. Errors that are
+        // not NotAllowedError mean the API is unusable here, same advice as a block.
+        function clipboardBlocked(err) {
+          var policy = document.permissionsPolicy || document.featurePolicy;
+          try {
+            if (policy && policy.allowsFeature && !policy.allowsFeature("clipboard-read")) return true;
+          } catch (_e) {}
+          return /permissions? policy/i.test(String(err && err.message || ""));
+        }
+        function clipboardRefusal(err) {
+          if (err && err.name === "NotAllowedError" && !clipboardBlocked(err)) {
+            return "Paste was not allowed. Try again and allow it, or choose a file.";
+          }
+          return "This app can't read the clipboard here. Press " + pasteKey + " instead, or choose a file.";
+        }
         resetProgress();
         pick.addEventListener("click", function () { if (!busy && !locked) input.click(); });
         if (pasteBtn) pasteBtn.addEventListener("click", function () {
@@ -513,8 +549,8 @@ export const WIDGETS: Record<string, WidgetDef> = {
               if (!file) { setStatus("No image in the clipboard \\u2014 copy an image and try again."); return; }
               upload(file);
             })
-            .catch(function () {
-              setStatus("Could not read the clipboard \\u2014 allow paste access and try again.", "err");
+            .catch(function (err) {
+              setStatus(clipboardRefusal(err), "err");
             });
         });
         input.addEventListener("click", function () { input.value = ""; });
@@ -545,6 +581,20 @@ export const WIDGETS: Record<string, WidgetDef> = {
           upload(withSafeName(file));
         };
         document.addEventListener("paste", window.__yapPasteHandler);
+        // A paste only reaches this document once it has focus, and inside a host
+        // iframe it has none until clicked. Focusing the zone makes Ctrl/Cmd-V work
+        // straight away, but never at the host's expense: focus is taken at render
+        // only when this document already has it (an origin page, or a click that
+        // landed here first), otherwise on the pointer's first entry. Like the
+        // paste handler, a re-delivered render replaces the previous listener.
+        function focusZone() {
+          if (document.activeElement && document.activeElement !== document.body && document.activeElement !== zone) return;
+          try { zone.focus({ preventScroll: true }); } catch (_e) {}
+        }
+        if (window.__yapFocusHandler) document.documentElement.removeEventListener("pointerenter", window.__yapFocusHandler);
+        window.__yapFocusHandler = function () { window.__yapFocusHandler = null; focusZone(); };
+        if (document.hasFocus()) focusZone();
+        else document.documentElement.addEventListener("pointerenter", window.__yapFocusHandler, { once: true });
       });
     `,
   },

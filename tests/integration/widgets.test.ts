@@ -84,6 +84,15 @@ describeEachAdapter("widgets", (adapter) => {
       }
     });
 
+    it("requests clipboard-read on every widget's read result, so hosts can grant the dropzone's paste button", async () => {
+      // Hosts derive the iframe's allow="clipboard-read" from _meta.ui.permissions;
+      // without it navigator.clipboard.read() depends on the host's defaults.
+      for (const name of Object.keys(WIDGETS)) {
+        const res = await aliceMcp.client.readResource({ uri: `ui://yap/${name}` });
+        expect((res.contents[0] as any)._meta?.ui?.permissions, name).toEqual({ clipboardRead: {} });
+      }
+    });
+
     it("also carries the legacy openai/widgetCSP key (snake_case) for older ChatGPT", async () => {
       const origin = new URL(app.baseUrl).origin;
       const res = await aliceMcp.client.readResource({ uri: "ui://yap/media-card" });
@@ -124,6 +133,7 @@ describeEachAdapter("widgets", (adapter) => {
       const origin = new URL(app.baseUrl).origin;
       expect(ui?.csp?.connectDomains).toContain(origin);
       expect(ui?.csp?.resourceDomains).toContain(origin);
+      expect(ui?.permissions).toEqual({ clipboardRead: {} });
     });
 
     it("an in-client widget upload finalizes using the widget data alone", async () => {
@@ -157,6 +167,7 @@ describeEachAdapter("widgets", (adapter) => {
       const origin = new URL(app.baseUrl).origin;
       expect(ui?.csp?.connectDomains).toContain(origin);
       expect(ui?.csp?.resourceDomains).toContain(origin);
+      expect(ui?.permissions).toEqual({ clipboardRead: {} });
     });
 
     it("dual-keys the shell resourceUri (nested ui.resourceUri + flat ui/resourceUri) for host-convention spread", async () => {

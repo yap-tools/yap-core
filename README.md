@@ -625,7 +625,12 @@ be the instance's externally reachable origin (https except on loopback).
 - **Widgets** (MCP Apps / SEP-1865) are self-contained `ui://` resources
   rendered three ways: result pointers on `call`, the generic `show_widget`
   shell, or origin-hosted pages at signed expiring URLs for hosts that can't
-  render widgets at all.
+  render widgets at all. Each widget declares its CSP and asks for
+  `clipboardRead` under `_meta.ui.permissions`, so a host that honours it lets
+  the upload dropzone's "Paste image" button read the clipboard. Ctrl/Cmd-V
+  needs no permission: the dropzone takes focus when it safely can (its
+  document already has focus, or the pointer first enters it), and says so
+  when the clipboard is blocked rather than declined.
 
 ## Development
 
