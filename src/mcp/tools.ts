@@ -541,10 +541,13 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "show_widget",
-    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those.`,
+    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those. params is the widget's data, flat: for a tool that points at a widget (show_file → media-card, upload_request → upload-dropzone), pass that tool's _meta.data as params (for show_file that is the result itself), not the whole _meta envelope and not under a data key. There is no data parameter.`,
     parameters: z.object({
       widget: z.string().describe("Widget name or ui://yap/... URI"),
-      params: z.record(z.string(), z.unknown()).optional(),
+      params: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe("The widget's data, flat: e.g. show_file's result as-is for media-card"),
     }),
     annotations: { readOnlyHint: true, title: "Show widget" },
     _meta: showWidgetMeta,
