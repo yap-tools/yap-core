@@ -210,7 +210,14 @@ export const services = sqliteTable(
     params: text("params").notNull().default("[]"), // JSON: declared parameter specs
     pins: text("pins").notNull().default("{}"), // JSON: driver-specific pinned targets
     actions: text("actions"), // JSON array of allowed action names; null = every action the driver declares
-    configEncrypted: text("config_encrypted").notNull(), // AES-GCM blob, never returned
+    // The whole config, AES-GCM-encrypted, never returned. Kept current on every
+    // write, so earlier releases (which read only this) still run the service.
+    configEncrypted: text("config_encrypted").notNull(),
+    // The config split by the driver's schema (src/core/serviceConfig.ts):
+    // settings as readable JSON, secrets AES-GCM-encrypted and write-only.
+    // Both null while the config is one sealed blob (a driver without a schema).
+    settings: text("settings"),
+    secretsEncrypted: text("secrets_encrypted"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

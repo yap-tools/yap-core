@@ -21,8 +21,10 @@
  *   create finalized files there. A driver declaring no writes receives `null`;
  *   a writer method for an undeclared surface rejects.
  * - Config: the decrypted service config reaches the driver only inside
- *   `run`, never any listing or agent-visible surface (mirrors hook
- *   transports).
+ *   `run`, never any agent-visible surface. With a `configSchema`, Core
+ *   stores it as settings (readable by the service's authors) plus secrets
+ *   (write-only) and merges the two back before `run`, so the driver always
+ *   receives the one whole object (see serviceConfig.ts).
  *
  * Because driver modules are plain JS from outside the type system, the shape
  * is checked structurally at load time by `validateDriverDefinition` in

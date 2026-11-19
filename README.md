@@ -450,10 +450,21 @@ be the instance's externally reachable origin (https except on loopback).
   module — the built-in `http` and `mail` drivers, or one an operator adds)
   plus the **configuration** that driver needs. The two halves have very
   different visibility: an agent sees the service's id, name, description,
-  driver, and the *callable* parameters of each action; the config — URL,
-  headers, credentials, whatever the driver's shape requires — is
-  AES-256-GCM-encrypted at rest and decrypted only in memory inside a run,
-  never returned by any surface. An author can also **pin** a parameter to a
+  driver, and the *callable* parameters of each action, never the config.
+  When the driver publishes a config schema, the config is stored in two
+  parts: **settings** (URL, hosts, account names: everything that is not a
+  secret), which the service's authors (`edit_services`) read back as
+  `settings`, and **secrets** (passwords, tokens, header values), which are
+  AES-256-GCM-encrypted at rest and write-only, so a read shows only which
+  secret paths are set (`secretsSet`). An update that sends `config`
+  replaces the settings and keeps any secret it leaves out, as long as the
+  object holding it is still there (`null` removes one), so an author can
+  edit a service without retyping its credentials.
+  A driver without a schema keeps its whole config as one encrypted blob
+  that nobody reads back. Either way the full config is decrypted only in
+  memory inside a run. Services authored before the split are split on the
+  next start; see [docs/service-config.md](docs/service-config.md). An
+  author can also **pin** a parameter to a
   fixed value at authoring time: a pinned name disappears from the listing
   entirely (an agent cannot even learn it exists, let alone what it's fixed
   to) and is merged in by the runner only after the caller's own parameters

@@ -112,7 +112,7 @@ describeEachAdapter("services", (adapter) => {
   describe("authoring (REST-only, edit_services)", () => {
     let notifyId: string;
 
-    it("creates a service whose config is never returned by any surface", async () => {
+    it("creates a service whose secrets are never returned by any surface", async () => {
       const res = await alice.post(`/v1/bundles/${bundleId}/services`, {
         name: "notify",
         description: "Send a notification",
@@ -131,7 +131,12 @@ describeEachAdapter("services", (adapter) => {
       notifyId = res.body.id;
       expect(res.body.driver).toBe("http"); // defaulted
       expect(JSON.stringify(res.body)).not.toContain("super-secret-token");
-      expect(JSON.stringify(res.body)).not.toContain("127.0.0.1");
+      // The author gets the settings back (every header value is a secret of
+      // the http driver, so only the header names show, as set secret paths).
+      expect(res.body.settings.url).toBe(`http://127.0.0.1:${targetPort}/notify?channel={{channel}}`);
+      expect(res.body.settings.headers).toEqual({});
+      expect(res.body.secretsSet).toEqual(["headers.authorization", "headers.content-type"]);
+      expect(JSON.stringify(res.body)).not.toContain("application/json");
 
       const listed = await alice.get(`/v1/bundles/${bundleId}/services`);
       expect(JSON.stringify(listed.body)).not.toContain("super-secret-token");

@@ -4,6 +4,8 @@ Every service is a driver plus a config, and the config is written once by whoev
 
 The schema is a description. It is optional, and it does not validate anything at run time: the driver's own `validateConfig` remains the one authority on what a config may contain, exactly as before. A driver without a schema is listed with `configSchema: null` and works the same way it always has.
 
+Core also uses the secret paths to store a service's config in two parts: readable settings and encrypted, write-only secrets. That is described in [service-config.md](service-config.md). Marking a field secret therefore decides who can read it back: get the list right. And because `validateConfig` then checks a config that can include secrets stored earlier by another author, its error messages must name fields, never echo values.
+
 ## The contract
 
 A driver definition may carry `configSchema`:

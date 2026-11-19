@@ -7,8 +7,18 @@
  * - Visible to any reader of the bundle: id, name, description, driver, and
  *   the *callable* parameters of each action. That is what an agent needs to
  *   compose a call and nothing more.
- * - Never returned by any surface: the config. It is AES-256-GCM-encrypted at
- *   rest with the master key and decrypted only in memory inside a run.
+ * - Never returned by any surface: the config's secrets. A driver that
+ *   publishes a config schema has its services' configs stored in two parts
+ *   (serviceConfig.ts): *settings*, every non-secret field, readable by the
+ *   service's authors (`edit_services`) and by no one else; and *secrets*,
+ *   AES-256-GCM-encrypted at rest and write-only, of which a read shows only
+ *   which paths are set. A driver without a schema keeps its whole config as
+ *   one sealed blob, readable by nobody. Either way the full config is
+ *   decrypted only in memory inside a run.
+ * - An author's config write replaces the settings and merges the secrets: a
+ *   secret the write leaves out is kept, null removes one. So an author who
+ *   reads a service's settings and sends them back edited does not wipe its
+ *   credentials.
  * - Pins are configuration, not parameters: a pinned value is stripped from
  *   every listing (an agent cannot even learn a pin's name is fixed by probing
  *   the listing) and merged in by the runner after the caller's half has been
@@ -56,9 +66,14 @@ import { z } from "zod";
 
 import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
-import { encryptSecret } from "../crypto.js";
+import { decryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
-import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
+import {
+  getBundleContext,
+  hasBundleCapability,
+  requireBundleCapability,
+  requireBundleReadAccess,
+} from "./bundles.js";
 import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition, DriverReads } from "./drivers/types.js";
@@ -66,6 +81,19 @@ import { invalid, notFound, tooLarge, YapError } from "./errors.js";
 import { parseFileRef } from "./fileRefs.js";
 import { writeFileUnchecked, type FileWriteInput } from "./files.js";
 import { createItemsUnchecked, getItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
+import {
+  applyConfigWrite,
+  blobColumns,
+  isSplit,
+  readParts,
+  secretsSet,
+  splitColumns,
+  splitConfig,
+  splitsConfig,
+  UnsplittableConfig,
+  type ConfigObject,
+  type StoredConfigColumns,
+} from "./serviceConfig.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -108,6 +136,19 @@ export interface ServiceInfo {
   actions: ServiceActionInfo[];
 }
 
+/**
+ * What a service's authors (callers holding `edit_services` on its bundle)
+ * see: the listing plus the readable half of the config. Never a secret value.
+ */
+export interface ServiceAuthorInfo extends ServiceInfo {
+  /** The config without its secrets; null while the config is one sealed
+   *  blob (its driver publishes no schema, or the boot split skipped it). */
+  settings: Record<string, unknown> | null;
+  /** The secret paths that hold a value (map keys spelled out, e.g.
+   *  `headers.Authorization`), sorted; null exactly when `settings` is. */
+  secretsSet: string[] | null;
+}
+
 export interface ServiceEnv {
   db: Db;
   config: YapConfig;
@@ -125,6 +166,8 @@ interface ServiceRow {
   pins: string;
   /** JSON array of action names, or null for every action the driver declares. */
   actions: string | null;
+  settings: string | null;
+  secretsEncrypted: string | null;
 }
 
 // ---- Validation -------------------------------------------------------------
@@ -211,10 +254,22 @@ function requireDriver(registry: DriverRegistry, name: string): DriverDefinition
  * is not already a YapError is wrapped into an `invalid_request` — an author
  * typo must not read as a server fault.
  */
-async function validateDriverConfig(env: ServiceEnv, def: DriverDefinition, config: unknown): Promise<void> {
+async function validateDriverConfig(
+  env: ServiceEnv,
+  def: DriverDefinition,
+  config: unknown,
+  kept: string[] = [],
+): Promise<void> {
+  // When stored secrets were carried into the config being checked, say so: the
+  // driver's complaint may be about a secret the author never sent this time.
+  const keptNote = kept.length
+    ? ` (checked with the stored secrets this write left out: ${kept.join(", ")}; set a secret path to null to remove it)`
+    : "";
   const wrap = (err: unknown): never => {
     if (err instanceof YapError) throw err;
-    throw invalid(`invalid config for driver "${def.name}": ${String((err as Error | undefined)?.message ?? err)}`);
+    throw invalid(
+      `invalid config for driver "${def.name}": ${String((err as Error | undefined)?.message ?? err)}${keptNote}`,
+    );
   };
   try {
     def.validateConfig(config);
@@ -232,6 +287,50 @@ async function validateDriverConfig(env: ServiceEnv, def: DriverDefinition, conf
     wrap(err);
   } finally {
     await egress.dispose();
+  }
+}
+
+/**
+ * Checks a config write and returns the columns to store. For a driver with a
+ * config schema the write is split and its secrets merged onto `stored` (see
+ * `applyConfigWrite`), and the driver checks the merged config: the one its
+ * runs will get. For a driver without one the config is checked and sealed
+ * whole, as it always was.
+ */
+async function prepareConfigWrite(
+  env: ServiceEnv,
+  def: DriverDefinition,
+  config: unknown,
+  stored: ConfigObject | null,
+): Promise<StoredConfigColumns> {
+  if (!splitsConfig(def)) {
+    await validateDriverConfig(env, def, config);
+    return blobColumns(config, env.config.masterKey);
+  }
+  let write: ReturnType<typeof applyConfigWrite>;
+  try {
+    write = applyConfigWrite(def, config, stored);
+  } catch (err) {
+    if (err instanceof UnsplittableConfig) throw invalid(`invalid config for driver "${def.name}": ${err.message}`);
+    throw err;
+  }
+  await validateDriverConfig(env, def, write.merged, write.kept);
+  return splitColumns(write, env.config.masterKey);
+}
+
+/**
+ * The secrets a config write merges onto: the stored secrets of a split
+ * service, or those of a sealed blob that splits by the driver's schema (a
+ * service the boot split has not reached). Null when there are none to keep,
+ * and when the blob cannot be read or split, in which case the write replaces
+ * the config whole, as every write did before the split.
+ */
+function storedSecrets(env: ServiceEnv, def: DriverDefinition, row: StoredConfigColumns): ConfigObject | null {
+  try {
+    if (isSplit(row)) return readParts(row, env.config.masterKey).secrets;
+    return splitConfig(def, JSON.parse(decryptSecret(row.configEncrypted, env.config.masterKey))).secrets;
+  } catch {
+    return null;
   }
 }
 
@@ -338,7 +437,7 @@ function effectiveActions(
   }));
 }
 
-function toInfo(registry: DriverRegistry, row: ServiceRow): ServiceInfo {
+function toInfo(registry: DriverRegistry, row: Omit<ServiceRow, "settings" | "secretsEncrypted">): ServiceInfo {
   const params = JSON.parse(row.params) as ServiceParamSpec[];
   const pins = JSON.parse(row.pins) as ServicePins;
   const def = registry.has(row.driver) ? registry.get(row.driver) : undefined;
@@ -349,6 +448,29 @@ function toInfo(registry: DriverRegistry, row: ServiceRow): ServiceInfo {
     driver: row.driver,
     actions: effectiveActions(def, params, pins, row.actions),
   };
+}
+
+/** The author's view of the config columns: settings and the set secret paths, never a secret. */
+function configView(
+  def: DriverDefinition | undefined,
+  columns: Pick<StoredConfigColumns, "settings" | "secretsEncrypted">,
+  masterKey: Buffer,
+): Pick<ServiceAuthorInfo, "settings" | "secretsSet"> {
+  if (columns.settings === null || columns.secretsEncrypted === null) return { settings: null, secretsSet: null };
+  try {
+    const { settings, secrets } = readParts({ configEncrypted: "", ...columns }, masterKey);
+    return { settings, secretsSet: secretsSet(def, secrets) };
+  } catch {
+    // One row whose parts cannot be read (a changed master key, say) must not
+    // fail the whole listing, nor a write that has already landed. It reads as
+    // sealed; its runs report the failure.
+    return { settings: null, secretsSet: null };
+  }
+}
+
+function toAuthorInfo(env: ServiceEnv, row: ServiceRow): ServiceAuthorInfo {
+  const def = env.registry.has(row.driver) ? env.registry.get(row.driver) : undefined;
+  return { ...toInfo(env.registry, row), ...configView(def, row, env.config.masterKey) };
 }
 
 /** Agent-visible listing: never includes the config. */
@@ -371,10 +493,37 @@ export async function listServicesUnchecked(env: ServiceEnv, bundleId: string): 
   return rows.map((row) => toInfo(env.registry, row));
 }
 
-export async function listServices(env: ServiceEnv, userId: string, bundleId: string): Promise<ServiceInfo[]> {
+/**
+ * The bundle's services for a reader. A caller holding `edit_services` there
+ * gets the author's view (settings and set secret paths); anyone else with
+ * read access gets the agent-visible listing.
+ */
+export async function listServices(
+  env: ServiceEnv,
+  userId: string,
+  bundleId: string,
+): Promise<Array<ServiceInfo | ServiceAuthorInfo>> {
   const ctx = await getBundleContext(env.db, bundleId);
   await requireBundleReadAccess(env.db, userId, ctx);
-  return listServicesUnchecked(env, bundleId);
+  if (!(await hasBundleCapability(env.db, userId, "edit_services", ctx))) return listServicesUnchecked(env, bundleId);
+  const { services } = env.db.tables;
+  const rows = await env.db.client
+    .select({
+      id: services.id,
+      bundleId: services.bundleId,
+      name: services.name,
+      description: services.description,
+      driver: services.driver,
+      params: services.params,
+      pins: services.pins,
+      actions: services.actions,
+      settings: services.settings,
+      secretsEncrypted: services.secretsEncrypted,
+    })
+    .from(services)
+    .where(eq(services.bundleId, bundleId))
+    .orderBy(asc(services.createdAt), asc(services.id));
+  return rows.map((row) => toAuthorInfo(env, row));
 }
 
 // ---- Authoring --------------------------------------------------------------
@@ -427,7 +576,7 @@ export async function createService(
     actions?: string[] | null;
     config: unknown;
   },
-): Promise<ServiceInfo> {
+): Promise<ServiceAuthorInfo> {
   const { db } = env;
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_services", ctx);
@@ -442,7 +591,7 @@ export async function createService(
   validatePins(pins, declaredNames(def, params));
   if (input.actions != null) validateActions(def, input.actions);
   const actions = input.actions == null ? null : JSON.stringify(input.actions);
-  await validateDriverConfig(env, def, input.config);
+  const columns = await prepareConfigWrite(env, def, input.config, null);
   await assertNameFree(db, bundleId, name);
 
   const { services } = db.tables;
@@ -458,11 +607,18 @@ export async function createService(
     params: JSON.stringify(params),
     pins: JSON.stringify(pins),
     actions,
-    configEncrypted: encryptSecret(JSON.stringify(input.config), env.config.masterKey),
+    ...columns,
     createdAt: now,
     updatedAt: now,
   });
-  return { id, name, description, driver, actions: effectiveActions(def, params, pins as ServicePins, actions) };
+  return {
+    id,
+    name,
+    description,
+    driver,
+    actions: effectiveActions(def, params, pins as ServicePins, actions),
+    ...configView(def, columns, env.config.masterKey),
+  };
 }
 
 export async function updateService(
@@ -477,9 +633,16 @@ export async function updateService(
     pins?: ServicePins | null;
     /** An array replaces the allowlist wholesale; null clears it (all actions). */
     actions?: string[] | null;
+    /** For a driver with a config schema: replaces the settings, merges the
+     *  secrets (left out = kept, null = removed). Otherwise replaces the config. */
     config?: unknown;
   },
-): Promise<ServiceInfo> {
+  opts: {
+    /** "replace" makes a config write replace the secrets too, as every write
+     *  did before the split; the legacy hook surface keeps that contract. */
+    secrets?: "merge" | "replace";
+  } = {},
+): Promise<ServiceAuthorInfo> {
   const { db } = env;
   const row = await getServiceRow(db, serviceId);
   const ctx = await getBundleContext(db, row.bundleId);
@@ -511,7 +674,15 @@ export async function updateService(
   // Mirrors pins: an array replaces, null clears, absent keeps the row's.
   if (Array.isArray(patch.actions)) validateActions(def!, patch.actions);
   const actions = patch.actions === undefined ? row.actions : patch.actions && JSON.stringify(patch.actions);
-  if (patch.config !== undefined) await validateDriverConfig(env, def!, patch.config);
+  const columns =
+    patch.config !== undefined
+      ? await prepareConfigWrite(
+          env,
+          def!,
+          patch.config,
+          opts.secrets === "replace" ? null : storedSecrets(env, def!, row),
+        )
+      : undefined;
   if (name !== undefined) await assertNameFree(db, row.bundleId, name, serviceId);
 
   const { services } = db.tables;
@@ -523,9 +694,7 @@ export async function updateService(
       ...(patch.params !== undefined ? { params: JSON.stringify(params) } : {}),
       ...(patch.pins !== undefined ? { pins: JSON.stringify(pins) } : {}),
       ...(patch.actions !== undefined ? { actions } : {}),
-      ...(patch.config !== undefined
-        ? { configEncrypted: encryptSecret(JSON.stringify(patch.config), env.config.masterKey) }
-        : {}),
+      ...(columns ?? {}),
       updatedAt: nowIso(),
     })
     .where(eq(services.id, serviceId));
@@ -539,6 +708,7 @@ export async function updateService(
     description: patch.description ?? row.description,
     driver: row.driver,
     actions: effectiveActions(def, params, pins as ServicePins, actions),
+    ...configView(def, columns ?? row, env.config.masterKey),
   };
 }
 

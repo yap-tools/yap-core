@@ -9,6 +9,7 @@ import { DriverLoadError, loadExternalDrivers } from "./core/drivers/load.js";
 import { upgradeLinkTargets } from "./core/linkTargets.js";
 import { sweepOrphans } from "./core/files.js";
 import { pruneRuns, recoverInterruptedRuns } from "./core/runs.js";
+import { backfillServiceConfigs } from "./core/serviceConfig.js";
 import { createDb } from "./db/index.js";
 import { createLogger } from "./logger.js";
 import { buildServer, createDriverRegistry } from "./server.js";
@@ -122,6 +123,27 @@ export async function serve(): Promise<void> {
       process.exit(1);
     }
     throw err;
+  }
+
+  // Service configs whose driver publishes a config schema are stored as
+  // readable settings plus write-only secrets. Services authored before that
+  // (or before their driver shipped a schema) are split here, after the
+  // external drivers are loaded so their schemas count. Runs on every start:
+  // split services are never touched again, and one that cannot be split is
+  // logged and left exactly as it is, still running from its sealed config.
+  try {
+    await backfillServiceConfigs(db, registry, config.masterKey, {
+      logger,
+      beforeWrite: () => takePreMigrationBackup(true),
+    });
+  } catch (err) {
+    logger.error(
+      "service config split failed — refusing to start (no sealed config is ever changed by it; " +
+        "YAP_BACKUP_BEFORE_MIGRATE=false skips its pre-migration backup)",
+      err,
+    );
+    await db.close();
+    process.exit(1);
   }
 
   // A run in flight when the process died is stranded in a non-terminal state;

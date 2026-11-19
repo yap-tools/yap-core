@@ -38,6 +38,8 @@ Nothing to install: a service with `"driver": "mail"` works on every instance. (
 
 A malformed config is rejected at authoring time naming the field. Authoring also connects, negotiates TLS, authenticates, and logs out of every configured block — so a wrong password fails when the service is authored (HTTP 400, `invalid config for driver "mail": imap: authentication failed …`), not on its first run.
 
+The driver publishes a config schema with `pass`, `oauth2.client_secret` and `oauth2.refresh_token` as secrets, so a mail service's authors can read back its hosts, addresses and `oauth2.client_id`, never a credential. A later `PATCH` that sends `config` without the credential keeps the stored one; to switch from a password to OAuth, send the `oauth2` block and `"pass": null`, and to switch back, send `pass` and no `oauth2`. See [service-config.md](service-config.md).
+
 ### Provider matrix
 
 | provider | auth | imap | smtp | notes |

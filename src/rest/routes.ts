@@ -995,6 +995,8 @@ export function registerRestRoutes(server: YapServer): void {
           pins: servicePins.nullable().optional(),
           // null clears the allowlist (every driver action); absent leaves it alone.
           actions: serviceActions.nullable().optional(),
+          // For a driver with a config schema: replaces the settings and merges
+          // the secrets (a secret left out is kept, null removes it).
           config: z.unknown().optional(),
         }),
         await jsonBody(c),
@@ -1190,12 +1192,15 @@ export function registerRestRoutes(server: YapServer): void {
       );
       const hookId = param(c, "id");
       await legacyHooks.requireLegacyHook(db, userId, hookId, "edit_services");
-      const updated = await servicesCore.updateService(serviceEnv, userId, hookId, {
-        name: body.name,
-        description: body.description,
-        params: body.params,
-        config: body.transport,
-      });
+      // The old contract: a transport replaces the whole config, headers
+      // included, so a header left out of it is gone rather than kept.
+      const updated = await servicesCore.updateService(
+        serviceEnv,
+        userId,
+        hookId,
+        { name: body.name, description: body.description, params: body.params, config: body.transport },
+        { secrets: "replace" },
+      );
       return c.json(legacyHooks.toLegacyHookView(updated));
     }),
   );

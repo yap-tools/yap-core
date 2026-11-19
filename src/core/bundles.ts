@@ -235,6 +235,16 @@ export async function requireBundleRole(db: Db, userId: string, ctx: BundleConte
   return role;
 }
 
+/** Whether the caller holds `capability` on the bundle; never throws for a denial. */
+export async function hasBundleCapability(
+  db: Db,
+  userId: string,
+  capability: string,
+  ctx: BundleContext,
+): Promise<boolean> {
+  return (await resolveCapability(db, userId, capability, bundleCapabilityCtx(ctx))).allowed;
+}
+
 /** Requires "bundle read access": at least one effective capability. */
 export async function requireBundleReadAccess(db: Db, userId: string, ctx: BundleContext): Promise<void> {
   if (!(await hasAnyCapability(db, userId, bundleCapabilityCtx(ctx)))) {

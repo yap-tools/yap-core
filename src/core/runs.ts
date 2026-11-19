@@ -16,7 +16,8 @@
  * Three secrecy rules hold the security model from hooks.ts in place:
  *
  * - The service config is decrypted only inside execution, only in memory, and
- *   never reaches a returned record.
+ *   never reaches a returned record. For a split service that means its
+ *   settings and secrets merged back into one object (serviceConfig.ts).
  * - A caller may supply only *unpinned* declared parameters; pinned values are
  *   merged in after the caller's half has been validated, so a pin can never
  *   be overridden or discovered by probing.
@@ -46,7 +47,6 @@ import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
-import { decryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
@@ -66,6 +66,7 @@ import {
   type ServiceParamSpec,
   type ServicePins,
 } from "./services.js";
+import { configForRun, type StoredConfigColumns } from "./serviceConfig.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -135,6 +136,8 @@ export interface ServiceRow {
   pins: string;
   actions: string | null;
   configEncrypted: string;
+  settings: string | null;
+  secretsEncrypted: string | null;
 }
 
 interface RunRow {
@@ -336,7 +339,9 @@ interface Job {
   action: string;
   values: Record<string, string>;
   pinnedNames: string[];
-  configEncrypted: string;
+  /** The service's stored config columns; turned into the driver's config by
+   *  `configForRun` once the run starts. */
+  storedConfig: StoredConfigColumns;
 }
 
 /**
@@ -428,7 +433,9 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
   try {
     await db.client.update(runs).set({ status: "running", startedAt: nowIso() }).where(eq(runs.id, job.runId));
     // The decrypted config exists only here, only in memory.
-    const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
+    // For a split service that is settings and secrets merged back into the
+    // one object the driver always got (serviceConfig.ts).
+    const serviceConfig: unknown = configForRun(job.storedConfig, config.masterKey);
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
     // A reader exists only when the driver declared at least one read surface;
     // individual undeclared reader methods reject on the handle itself.
@@ -658,7 +665,11 @@ export async function runService(
     action,
     values,
     pinnedNames,
-    configEncrypted: service.configEncrypted,
+    storedConfig: {
+      configEncrypted: service.configEncrypted,
+      settings: service.settings,
+      secretsEncrypted: service.secretsEncrypted,
+    },
   }).catch(
     () => {
       // `execute` funnels everything into the row and does not reject; this is

@@ -94,9 +94,9 @@ Then: `GET /v1/bundles/:id/files` (list), `GET /v1/files/:id/link` (mint expirin
 ### Services & runs
 | Method & path | Notes |
 |---|---|
-| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (only the service's *allowed* actions, each with its callable — unpinned — params); config never returned |
-| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "actions"?, "config"}`; `driver` defaults to `http` (built-ins: `http`, `mail`); `actions` is an allowlist of the driver's action names (omit = all; one allowed action becomes the implicit default); config is driver-shaped and encrypted at rest |
-| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "actions"?, "config"?}` (`pins: null` clears the pin set; `actions: null` clears the allowlist) |
+| `GET /v1/bundles/:id/services` | id, name, description, driver, actions (only the service's *allowed* actions, each with its callable — unpinned — params). A caller with `edit_services` also gets `settings` (the config minus its secrets) and `secretsSet` (the secret paths that hold a value); both null while the config is one sealed blob (driver without a config schema, or a config the boot split could not split). Secret values are never returned |
+| `POST /v1/bundles/:id/services` | **authoring is REST-only by design** — `{"name", "description"?, "driver"?, "params"?, "pins"?, "actions"?, "config"}`; `driver` defaults to `http` (built-ins: `http`, `mail`); `actions` is an allowlist of the driver's action names (omit = all; one allowed action becomes the implicit default); config is driver-shaped; split by the driver's config schema into readable settings and encrypted, write-only secrets (no schema = one encrypted blob) |
+| `PATCH/DELETE /v1/services/:id` | patch: `{"name"?, "description"?, "params"?, "pins"?, "actions"?, "config"?}` (`pins: null` clears the pin set; `actions: null` clears the allowlist; `config` replaces the settings and keeps every secret it leaves out, `null` at a secret path removes it; see `docs/service-config.md`) |
 | `POST /v1/services/:id/run` | `{"action"?, "params"?, "wait_ms"?}` → a run record; `wait_ms` clamped to `YAP_RUN_WAIT_CAP_MS` (25000 default) |
 | `GET /v1/runs/:id` | one run: status (`queued\|running\|succeeded\|failed`), the caller's params, result/error, bundle I/O trail (file/item reads and item/file writes as metadata) |
 | `GET /v1/bundles/:id/runs` | `?service=` filter, `cursor`, `limit`; newest first |

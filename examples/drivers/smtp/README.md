@@ -26,7 +26,10 @@ front of an agent.
 ## Configuration
 
 The config is written when the service is authored, encrypted at rest, and decrypted only in memory inside a
-run. No listing, no agent-visible surface, and no run record ever shows it.
+run. This driver publishes no config schema, so Core keeps the whole config as one sealed blob: no listing, no
+agent-visible surface, and no run record ever shows it. A driver that publishes one (with `pass` marked secret)
+would let the service's authors read back the other fields; see
+[docs/service-config.md](../../../docs/service-config.md).
 
 | Field    | Required | Meaning                                                                          |
 | -------- | -------- | -------------------------------------------------------------------------------- |
