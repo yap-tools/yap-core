@@ -24,6 +24,7 @@ import { z } from "zod";
 import type { YapConfig } from "../../config.js";
 import { invalid, YapError } from "../errors.js";
 import { isEgressRefusal } from "./egress.js";
+import { jsonSchemaFromZod, type DriverConfigSchema } from "./schema.js";
 import { DRIVER_API, type DriverDefinition, type Egress, type RunContext } from "./types.js";
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -33,20 +34,29 @@ const PLACEHOLDER = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
 // shape at authoring time; the TypeScript type is inferred from it so the two
 // cannot drift.
 export const httpConfigSchema = z.object({
-  url: z.string(),
-  method: z.enum(METHODS),
-  headers: z.record(z.string(), z.string()).optional(),
+  url: z.string().describe("Destination URL. {{param}} tokens may appear in the path and query, never in the host."),
+  method: z.enum(METHODS).describe("HTTP method."),
+  headers: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Request headers. Values may contain {{param}} tokens."),
   // Raw body with `{{placeholder}}` substitution and NO escaping — the author
   // owns the encoding. Use for non-JSON bodies (form-encoded, XML, text). For
   // JSON, prefer body_json, which escapes values so they cannot break or
   // inject structure.
-  body_template: z.string().optional(),
+  body_template: z
+    .string()
+    .optional()
+    .describe("Raw request body with unescaped {{param}} substitution. Not together with body_json."),
   // Structured JSON body: an arbitrary JSON value (usually an object) whose
   // string leaves may contain `{{placeholder}}` tokens. At fire time the
   // value is rebuilt and serialized with JSON.stringify, so substituted
   // values are always escaped and can never escape their string position.
   // Mutually exclusive with body_template.
-  body_json: z.unknown().optional(),
+  body_json: z
+    .unknown()
+    .optional()
+    .describe("Structured JSON body; {{param}} tokens in string leaves are substituted and escaped. Not together with body_template."),
 });
 export type HttpConfig = z.infer<typeof httpConfigSchema>;
 
@@ -105,6 +115,33 @@ function parseHttpConfig(config: unknown): HttpConfig {
   return transport;
 }
 
+/**
+ * The published config schema. Header values are the one place an http
+ * service carries credentials by design (an Authorization or API-key header),
+ * so every header value is marked secret; a token an author chooses to put in
+ * the url or body is theirs to move into a header.
+ */
+export const httpConfigSchemaInfo: DriverConfigSchema = {
+  jsonSchema: {
+    ...jsonSchemaFromZod(httpConfigSchema),
+    examples: [
+      {
+        url: "https://api.example.com/v1/notes/{{note_id}}",
+        method: "POST",
+        headers: { authorization: "Bearer <token>" },
+        body_json: { text: "{{text}}" },
+      },
+    ],
+  },
+  secrets: [
+    {
+      path: "headers.*",
+      label: "Header value",
+      description: "Every request header value is treated as secret, since that is where API keys and bearer tokens go.",
+    },
+  ],
+};
+
 /** Renders the origin the SSRF guard should vouch for, with placeholders
  * neutralized (mirrors the trick in hooks.ts's validateTransport). */
 function materializedOrigin(url: string): string {
@@ -121,6 +158,7 @@ export function createHttpDriver(config: YapConfig): DriverDefinition {
       "url, method (GET/POST/PUT/PATCH/DELETE), optional headers, and either body_template (raw, " +
       "unescaped {{param}} substitution) or body_json (structured, escaped substitution). The host " +
       "part of url must be static — no {{param}} tokens.",
+    configSchema: httpConfigSchemaInfo,
 
     validateConfig(rawConfig: unknown): void {
       parseHttpConfig(rawConfig);

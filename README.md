@@ -264,6 +264,9 @@ metadata and descending only into the relevant branch:
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
+- **`list_drivers`** → the installed service drivers, their actions, and each
+  one's config schema with its secret paths (read-only; never a service's
+  config — see [docs/driver-config-schema.md](docs/driver-config-schema.md))
 - **`help`**, **`show_widget`**, **`space_create`**, **`bundle_create`**, and
   seven user-doc tools (`list/load/get/create/update/patch/delete_user_doc`)
 
@@ -516,7 +519,16 @@ be the instance's externally reachable origin (https except on loopback).
   a driver that doesn't satisfy the contract fails at install time rather
   than in front of an agent. `yap driver remove <name>` uninstalls it; `yap
   driver list` shows what's installed, with its actions. Services then
-  reference an installed driver by name when they're authored. A driver that
+  reference an installed driver by name when they're authored. A driver may
+  also publish a **config schema**: a JSON Schema for its service config plus
+  the paths in it that hold secrets, each with a label and description.
+  `GET /v1/drivers` (and `/v1/drivers/:name`, and MCP `list_drivers`) return
+  every installed driver's contract with that schema, or `configSchema: null`
+  for a driver that has none, so a client can build a config form and know
+  which fields to mask. The built-in `http` and `mail` drivers publish one;
+  it is optional, and a driver without it works exactly as before. The
+  contract and the secret-path syntax are in
+  [docs/driver-config-schema.md](docs/driver-config-schema.md). A driver that
   declares `reads: { files: true }` receives `ctx.reader.readFile(refOrId)`,
   scoped to finalized files in the service run's bundle; `file.stream()` is
   the primary byte surface, while `file.bytes()` and `file.text()` are

@@ -24,6 +24,7 @@
 import { z } from "zod";
 
 import { invalid } from "../../errors.js";
+import { jsonSchemaFromZod, type DriverConfigSchema } from "../schema.js";
 import { isAddress } from "./message.js";
 
 export const SECURITY = ["tls", "starttls", "none"] as const;
@@ -64,13 +65,17 @@ const folderName = nonEmptyString.refine((s) => !/[\r\n\0]/.test(s), "must not c
 const endpointSchema = z
   .object(
     {
-      host: nonEmptyString.refine((h) => !/[\s/@:]/.test(h), "must be a bare hostname"),
+      host: nonEmptyString.refine((h) => !/[\s/@:]/.test(h), "must be a bare hostname").describe("Server hostname."),
       port: z
         .number({ error: "must be an integer from 1 to 65535" })
         .int("must be an integer from 1 to 65535")
         .min(1, "must be an integer from 1 to 65535")
-        .max(65535, "must be an integer from 1 to 65535"),
-      security: z.enum(SECURITY, { error: `must be one of ${SECURITY.join(", ")}` }).optional(),
+        .max(65535, "must be an integer from 1 to 65535")
+        .describe("Server port."),
+      security: z
+        .enum(SECURITY, { error: `must be one of ${SECURITY.join(", ")}` })
+        .optional()
+        .describe("tls (implicit), starttls, or none. Defaults by port: 993/465 tls, 143/587 starttls, other tls."),
     },
     { error: "must be an object with host and port" },
   )
@@ -92,10 +97,10 @@ export interface ProtocolBlock {
 const oauth2Schema = z
   .object(
     {
-      client_id: nonEmptyString,
-      client_secret: nonEmptyString,
-      refresh_token: nonEmptyString,
-      token_url: nonEmptyString,
+      client_id: nonEmptyString.describe("OAuth client id."),
+      client_secret: nonEmptyString.describe("OAuth client secret."),
+      refresh_token: nonEmptyString.describe("Long-lived refresh token the driver exchanges for access tokens."),
+      token_url: nonEmptyString.describe("The provider's https token endpoint."),
     },
     { error: "must be an object" },
   )
@@ -113,17 +118,26 @@ export type OAuth2Config = z.infer<typeof oauth2Schema>;
 
 export const mailConfigSchema = z
   .object({
-    user: nonEmptyString,
-    pass: nonEmptyString.optional(),
-    oauth2: oauth2Schema.optional(),
-    from: z.custom<string>((v) => isAddress(v), 'must be a single email address like "name@example.com"'),
-    name: nonEmptyString.refine((s) => !/[\r\n\0]/.test(s), "must not contain a line break").optional(),
-    imap: endpointSchema.optional(),
-    smtp: endpointSchema.optional(),
-    allow_plaintext_auth: optionalBoolean.transform((v) => v ?? false),
-    save_sent: optionalBoolean.transform((v) => v ?? false),
-    drafts_folder: folderName.optional(),
-    sent_folder: folderName.optional(),
+    user: nonEmptyString.describe("The account's login name, for both IMAP and SMTP."),
+    pass: nonEmptyString.optional().describe("Password or app password. Exactly one of pass and oauth2."),
+    oauth2: oauth2Schema.optional().describe("XOAUTH2 credentials, for providers with basic auth switched off. Exactly one of pass and oauth2."),
+    from: z
+      .custom<string>((v) => isAddress(v), 'must be a single email address like "name@example.com"')
+      .describe("The address mail is sent as."),
+    name: nonEmptyString
+      .refine((s) => !/[\r\n\0]/.test(s), "must not contain a line break")
+      .optional()
+      .describe("Display name shown with the from address."),
+    imap: endpointSchema.optional().describe("IMAP server. Needed for every action except send. At least one of imap and smtp."),
+    smtp: endpointSchema.optional().describe("SMTP server. Needed for send. At least one of imap and smtp."),
+    allow_plaintext_auth: optionalBoolean
+      .transform((v) => v ?? false)
+      .describe("Send credentials over a security: none connection. Lab servers only."),
+    save_sent: optionalBoolean
+      .transform((v) => v ?? false)
+      .describe("Append a copy of every sent message to the sent folder. Needs imap."),
+    drafts_folder: folderName.optional().describe("Where draft writes. Default: the folder flagged \\Drafts, else Drafts."),
+    sent_folder: folderName.optional().describe("Where save_sent copies to. Default: the folder flagged \\Sent, else Sent."),
   })
   .superRefine((config, ctx) => {
     if ((config.pass !== undefined) === (config.oauth2 !== undefined)) {
@@ -158,3 +172,67 @@ export function normalizeMailConfig(raw: unknown): MailConfig {
   }
   return parsed.data;
 }
+
+/**
+ * The published config schema. Generated from `mailConfigSchema`, with the two
+ * things zod cannot express put back by hand: `from` is a custom check (an
+ * email address), and the cross-field rules (exactly one of pass / oauth2, at
+ * least one of imap / smtp) live in a superRefine. `normalizeMailConfig` stays
+ * the authority; this is the description a client builds a form from.
+ */
+function buildMailConfigSchema(): DriverConfigSchema {
+  const generated = jsonSchemaFromZod(mailConfigSchema);
+  const properties = generated.properties as Record<string, Record<string, unknown>>;
+  properties.from = { ...properties.from, type: "string", format: "email" };
+  return {
+    jsonSchema: {
+      ...generated,
+      allOf: [
+        { oneOf: [{ required: ["pass"] }, { required: ["oauth2"] }] },
+        { anyOf: [{ required: ["imap"] }, { required: ["smtp"] }] },
+      ],
+      examples: [
+        {
+          user: "me@example.com",
+          pass: "app-password",
+          from: "me@example.com",
+          name: "Me",
+          imap: { host: "imap.example.com", port: 993 },
+          smtp: { host: "smtp.example.com", port: 465 },
+        },
+        {
+          user: "me@example.com",
+          oauth2: {
+            client_id: "client-id",
+            client_secret: "client-secret",
+            refresh_token: "refresh-token",
+            token_url: "https://oauth2.example.com/token",
+          },
+          from: "me@example.com",
+          imap: { host: "imap.example.com", port: 993 },
+          smtp: { host: "smtp.example.com", port: 587, security: "starttls" },
+          save_sent: true,
+        },
+      ],
+    },
+    secrets: [
+      {
+        path: "pass",
+        label: "Password",
+        description: "The account password, or an app password where the provider issues them (Fastmail, personal Gmail).",
+      },
+      {
+        path: "oauth2.client_secret",
+        label: "OAuth client secret",
+        description: "The secret of the OAuth client registered with the mail provider.",
+      },
+      {
+        path: "oauth2.refresh_token",
+        label: "OAuth refresh token",
+        description: "The long-lived token the driver exchanges for short-lived access tokens.",
+      },
+    ],
+  };
+}
+
+export const mailConfigSchemaInfo: DriverConfigSchema = buildMailConfigSchema();

@@ -161,6 +161,75 @@ describe("external driver loading", () => {
   });
 });
 
+describe("reading installed drivers and their config schemas", () => {
+  let app: TestApp;
+  let alice: ApiClient;
+  let aliceMcp: McpTestClient;
+
+  beforeAll(async () => {
+    app = await bootTestApp({ YAP_DRIVERS_DIR: driversDirWithEcho() });
+    const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+    const a = await sysadmin.post("/v1/users", { name: "Alice" });
+    alice = apiClient(app.baseUrl, a.body.initialKey.key);
+    aliceMcp = await connectMcp(app.baseUrl, a.body.initialKey.key);
+  });
+
+  afterAll(async () => {
+    await aliceMcp.close();
+    await app.stop();
+  });
+
+  it("lists every installed driver over REST, with schema and secret paths where published", async () => {
+    const res = await alice.get("/v1/drivers");
+    expect(res.status).toBe(200);
+    const byName = Object.fromEntries(res.body.data.map((d: any) => [d.name, d]));
+    expect(Object.keys(byName)).toEqual(["echo", "http", "mail"]);
+
+    // A driver without a schema is listed as it is: configSchema null.
+    expect(byName.echo.configSchema).toBeNull();
+    expect(byName.echo.configDoc).toBe("No configuration: {}");
+    expect(byName.echo.actions.map((a: any) => a.name)).toEqual(["echo", "shout"]);
+    expect(byName.echo.reads).toEqual({ files: false, items: false });
+
+    expect(byName.mail.configSchema.jsonSchema.type).toBe("object");
+    expect(byName.mail.configSchema.secrets.map((s: any) => s.path)).toEqual([
+      "pass",
+      "oauth2.client_secret",
+      "oauth2.refresh_token",
+    ]);
+    expect(byName.http.configSchema.secrets.map((s: any) => s.path)).toEqual(["headers.*"]);
+    for (const secret of [...byName.mail.configSchema.secrets, ...byName.http.configSchema.secrets]) {
+      expect(secret.label).toEqual(expect.any(String));
+    }
+  });
+
+  it("reads one driver by name, 404 for an unknown one", async () => {
+    const mail = await alice.get("/v1/drivers/mail");
+    expect(mail.status).toBe(200);
+    expect(mail.body.name).toBe("mail");
+    expect(mail.body.configSchema.secrets).toHaveLength(3);
+    expect((await alice.get("/v1/drivers/nope")).status).toBe(404);
+  });
+
+  it("needs a credential; the sysadmin key may read it too", async () => {
+    expect((await apiClient(app.baseUrl).get("/v1/drivers")).status).toBe(401);
+    expect((await apiClient(app.baseUrl, "not-a-key").get("/v1/drivers")).status).toBe(401);
+    const asSysadmin = await apiClient(app.baseUrl, TEST_SYSADMIN_KEY).get("/v1/drivers");
+    expect(asSysadmin.status).toBe(200);
+    expect(asSysadmin.body.data).toHaveLength(3);
+  });
+
+  it("serves the same view over MCP list_drivers, optionally narrowed by name", async () => {
+    const rest = (await alice.get("/v1/drivers")).body;
+    expect(await aliceMcp.call("list_drivers")).toEqual(rest);
+    const narrowed = await aliceMcp.call("list_drivers", { names: ["mail"] });
+    expect(narrowed.data.map((d: any) => d.name)).toEqual(["mail"]);
+    expect(narrowed.data[0].configSchema.secrets.map((s: any) => s.path)).toContain("pass");
+    const unknown: any = await aliceMcp.callRaw("list_drivers", { names: ["nope"] });
+    expect(unknown.isError).toBe(true);
+  });
+});
+
 describe("driver loading failures", () => {
   it("fails the boot when a driver declares a different driver api", async () => {
     const dir = driversDirWithEcho();

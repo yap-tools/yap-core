@@ -77,7 +77,7 @@ import { YapError } from "../../errors.js";
 import { parseFileRef } from "../../fileRefs.js";
 import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverFailCode, type DriverParamSpec, type Egress, type RunContext } from "../types.js";
 import { resolveAuth } from "./auth.js";
-import { configDoc, normalizeMailConfig, type MailConfig } from "./config.js";
+import { configDoc, mailConfigSchemaInfo, normalizeMailConfig, type MailConfig } from "./config.js";
 import { imapConnect, type ImapClient, type MailboxInfo, type MailCtx, type SearchCriterion } from "./imap.js";
 import { attachmentParts, partFilename, textParts, type BodyPart } from "./imap-parse.js";
 import {
@@ -245,6 +245,7 @@ export function createMailDriver(): DriverDefinition {
     // other handler leaves it alone (a unit test checks that).
     reads: { files: true },
     configDoc,
+    configSchema: mailConfigSchemaInfo,
 
     validateConfig(config: unknown): void {
       normalizeMailConfig(config);

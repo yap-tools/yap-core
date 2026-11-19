@@ -39,7 +39,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   configured request) and "mail" (one IMAP/SMTP account: folders, search,
   read, mark, send, draft — a service exposes only the ones it allows; draft
   leaves a reply in the Drafts folder for a human to send). Services are
-  authored over REST only (edit_services); agents run them.
+  authored over REST only (edit_services); agents run them. list_drivers
+  shows the installed drivers, their actions and, where a driver publishes
+  one, its config schema: a JSON Schema for the service config plus the
+  paths in it that hold secrets. It never shows any service's config.
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the

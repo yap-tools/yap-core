@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
+import { describeDriver } from "../core/drivers/registry.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
@@ -910,6 +911,31 @@ export function registerRestRoutes(server: YapServer): void {
       const disposition = c.req.query("download") ? "attachment" : "inline";
       c.header("content-disposition", `${disposition}; filename="${headerSafeFilename(name)}"`);
       return c.body(Readable.toWeb(stream) as ReadableStream);
+    }),
+  );
+
+  // ---- Drivers (read-only: what services can be built from) -------------------
+
+  // Any valid credential may read the installed drivers, the sysadmin key
+  // included: a driver's contract and config schema carry no service values,
+  // and a client needs them before it can author a service at all.
+  const requireAnyCredential = (auth: CredentialOutcome): void => {
+    if (auth.kind !== "sysadmin") requireUser(auth);
+  };
+
+  app.get(
+    "/v1/drivers",
+    handle(async (c, auth) => {
+      requireAnyCredential(auth);
+      return c.json({ data: registry.describeAll() });
+    }),
+  );
+
+  app.get(
+    "/v1/drivers/:name",
+    handle(async (c, auth) => {
+      requireAnyCredential(auth);
+      return c.json(describeDriver(registry.get(param(c, "name"))));
     }),
   );
 

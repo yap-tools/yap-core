@@ -33,6 +33,9 @@ import type { Readable } from "node:stream";
 import type { ErrorCode } from "../errors.js";
 import type { EditOp } from "../textEdits.js";
 import type { Egress } from "./egress.js";
+import type { DriverConfigSchema } from "./schema.js";
+
+export type { DriverConfigSchema, DriverSecretField } from "./schema.js";
 
 /**
  * The guarded egress handle: `fetch`, `connect`, `assertPublic`, and the
@@ -168,6 +171,14 @@ export interface DriverDefinition {
   writes?: DriverWrites;
   /** Operator-facing help for the config shape, shown by the CLI. */
   configDoc?: string;
+  /**
+   * Optional machine-readable config shape: a JSON Schema plus the paths in it
+   * that hold secrets (see schema.ts). Published to clients without any
+   * values, so they can build a form and know what to mask. It describes the
+   * config; `validateConfig` remains what enforces it. Omit it and the driver
+   * works exactly as before.
+   */
+  configSchema?: DriverConfigSchema;
   /** Throw an Error whose message names the offending field on invalid config. */
   validateConfig(config: unknown): void;
   /** Optional authoring-time network validation (e.g. http SSRF pre-check). */

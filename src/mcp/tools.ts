@@ -17,6 +17,7 @@ import {
   requireBundleRole,
   getBundleRow,
 } from "../core/bundles.js";
+import { describeDriver } from "../core/drivers/registry.js";
 import { YapError } from "../core/errors.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
@@ -458,6 +459,25 @@ export function registerMcpTools(server: YapServer): void {
       "Reference documentation for core Yap concepts (spaces, bundles, items, services and runs, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
     annotations: { readOnlyHint: true, title: "Help" },
     execute: async () => HELP_TEXT,
+  });
+
+  addTool({
+    name: "list_drivers",
+    description:
+      "The service drivers installed on this instance: each one's name, description, actions (with their parameters), whether it reaches the network or reads/writes bundle data, and its configSchema — a JSON Schema for the service config plus the paths in it that hold secrets (each with a label and description), or null when the driver publishes none. Never any service's config values. Read-only; useful for explaining what a service can be built from. Optional names narrows the list.",
+    parameters: z.object({ names: z.array(z.string()).min(1).optional() }),
+    annotations: { readOnlyHint: true, title: "List drivers" },
+    execute: async (args, ctx) => {
+      try {
+        sessionUser(ctx.session);
+        const drivers = args.names
+          ? args.names.map((name) => describeDriver(registry.get(name)))
+          : registry.describeAll();
+        return asJson({ data: drivers });
+      } catch (err) {
+        rethrow(err);
+      }
+    },
   });
 
   // ---- Doing work --------------------------------------------------------------
