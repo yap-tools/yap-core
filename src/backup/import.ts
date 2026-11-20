@@ -24,6 +24,8 @@ const INSERT_ORDER = [
   "files",
   "services",
   "schedules",
+  "secret_requests",
+  "service_approvals",
   "runs",
   "user_docs",
   "oauth_clients",

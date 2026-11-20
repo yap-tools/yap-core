@@ -573,9 +573,9 @@ export async function createItems(
  * because this is the same write. Only the gate moves.
  *
  * The one caller that skips the gate is the service bundle writer
- * (`createBundleWriter`): a driver's authority comes from the service an
- * operator authored over privileged REST, not from the identity of whoever
- * triggered the run, so there is no user to check `edit_items` against.
+ * (`createBundleWriter`): a driver's authority comes from the service, whose
+ * author had to hold `edit_items` to give it item writes (services.ts), not
+ * from the identity of whoever triggered the run.
  * Everything else must go through `createItems`.
  */
 export async function createItemsUnchecked(

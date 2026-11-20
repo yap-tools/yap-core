@@ -16,7 +16,8 @@
  * Three secrecy rules hold the security model from hooks.ts in place:
  *
  * - The service config is decrypted only inside execution, only in memory, and
- *   never reaches a returned record.
+ *   never reaches a returned record. For a split service that means its
+ *   settings and secrets merged back into one object (serviceConfig.ts).
  * - A caller may supply only *unpinned* declared parameters; pinned values are
  *   merged in after the caller's half has been validated, so a pin can never
  *   be overridden or discovered by probing.
@@ -46,7 +47,6 @@ import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
-import { decryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
@@ -66,6 +66,7 @@ import {
   type ServiceParamSpec,
   type ServicePins,
 } from "./services.js";
+import { configForRun, type StoredConfigColumns } from "./serviceConfig.js";
 import type { Resolver } from "./ssrf.js";
 import { newId, nowIso } from "./util.js";
 
@@ -135,6 +136,10 @@ export interface ServiceRow {
   pins: string;
   actions: string | null;
   configEncrypted: string;
+  settings: string | null;
+  secretsEncrypted: string | null;
+  /** Null while the service waits for a person's approval (serviceApprovals.ts). */
+  approvedAt: string | null;
 }
 
 interface RunRow {
@@ -315,12 +320,28 @@ function buildParams(
  * so a schedule validates its stored action and params at write time by the
  * very same computation a run does at fire time.
  */
+/**
+ * A service written over MCP stays off until a person approves it
+ * (serviceApprovals.ts). Checked here, the one gate every run and every
+ * schedule goes through, before anything else about the call: an agent that
+ * wrote the service learns it must ask for approval, not that its params are off.
+ */
+function requireApproved(service: ServiceRow): void {
+  if (service.approvedAt) return;
+  throw new YapError(
+    "forbidden",
+    `service "${service.name}" is waiting for approval: it was written or changed over MCP, and it does not run ` +
+      "until a person who holds edit_services on this bundle approves it (approval_request gives them the page)",
+  );
+}
+
 export function prepareRun(
   registry: DriverRegistry,
   service: ServiceRow,
   requestedAction: string | undefined,
   supplied: Record<string, unknown>,
 ): { def: DriverDefinition; action: string } & ReturnType<typeof buildParams> {
+  requireApproved(service);
   const def = driverFor(registry, service);
   const action = resolveAction(def, service, requestedAction);
   return { def, action, ...buildParams(def, service, action, supplied) };
@@ -336,7 +357,9 @@ interface Job {
   action: string;
   values: Record<string, string>;
   pinnedNames: string[];
-  configEncrypted: string;
+  /** The service's stored config columns; turned into the driver's config by
+   *  `configForRun` once the run starts. */
+  storedConfig: StoredConfigColumns;
 }
 
 /**
@@ -428,7 +451,9 @@ async function attempt(env: RunEnv, job: Job): Promise<Outcome> {
   try {
     await db.client.update(runs).set({ status: "running", startedAt: nowIso() }).where(eq(runs.id, job.runId));
     // The decrypted config exists only here, only in memory.
-    const serviceConfig: unknown = JSON.parse(decryptSecret(job.configEncrypted, config.masterKey));
+    // For a split service that is settings and secrets merged back into the
+    // one object the driver always got (serviceConfig.ts).
+    const serviceConfig: unknown = configForRun(job.storedConfig, config.masterKey);
     egress = job.def.egress ? createEgress(config, env.resolver, env.fetchImpl) : null;
     // A reader exists only when the driver declared at least one read surface;
     // individual undeclared reader methods reject on the handle itself.
@@ -658,7 +683,11 @@ export async function runService(
     action,
     values,
     pinnedNames,
-    configEncrypted: service.configEncrypted,
+    storedConfig: {
+      configEncrypted: service.configEncrypted,
+      settings: service.settings,
+      secretsEncrypted: service.secretsEncrypted,
+    },
   }).catch(
     () => {
       // `execute` funnels everything into the row and does not reject; this is

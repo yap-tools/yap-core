@@ -419,3 +419,22 @@ describe("media-card: rendering the shapes show_widget is called with", () => {
     expect(renderCard({})).toContain("No file data reached the card");
   });
 });
+
+describe("widgets that carry a person's input talk only to their own instance", () => {
+  for (const name of ["secret-input", "service-approve"]) {
+    it(`${name} sends to the baked-in base, never to a URL from its data`, () => {
+      const html = widgetHtml(name, "client", undefined, "https://yap.example.org/");
+      expect(html).toContain('window.__YAP_BASE__ = "https://yap.example.org"');
+      const render = WIDGETS[name]!.render;
+      expect(render).toContain("serverCall(");
+      expect(render).not.toMatch(/fetch\(d\./);
+      expect(render).not.toContain("d.submit_url");
+    });
+  }
+
+  it("caches client HTML per instance base", () => {
+    const a = widgetHtml("service-approve", "client", undefined, "https://a.example");
+    const b = widgetHtml("service-approve", "client", undefined, "https://b.example");
+    expect(a).not.toEqual(b);
+  });
+});

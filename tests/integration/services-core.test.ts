@@ -587,7 +587,14 @@ describeEachAdapter("services core", (adapter) => {
 
       const listed = await listServices(env, aliceId, bundleId);
       expect(listed.map((s) => s.name)).toContain("notify");
-      expect(listed).toEqual(await listServicesUnchecked(env, bundleId));
+      // An author's listing is the agent-visible one plus the record's params
+      // and pins, the readable settings, and who approved it when.
+      expect(
+        listed.map(({ settings: _s, secretsSet: _p, params: _r, pins: _q, approvedAt: _a, approvedBy: _b, ...rest }: any) => rest),
+      ).toEqual(
+        await listServicesUnchecked(env, bundleId),
+      );
+      expect(listed.find((s) => s.name === "notify")).toMatchObject({ settings: httpConfig, secretsSet: [], approved: true, approvedBy: aliceId });
 
       const renamed = await updateService(env, aliceId, created.id, {
         name: "  announce  ",
@@ -930,6 +937,7 @@ describeEachAdapter("services core", (adapter) => {
     it("needs the driver installed to set an allowlist", async () => {
       const { services } = app.db.tables;
       await app.db.client.insert(services).values({
+        approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
         id: "svc-no-driver",
         bundleId,
         name: "driverless",
@@ -955,6 +963,7 @@ describeEachAdapter("services core", (adapter) => {
       const { services } = app.db.tables;
       const plant = async (id: string, actions: string | null) => {
         await app.db.client.insert(services).values({
+          approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
           id,
           bundleId,
           name: id,

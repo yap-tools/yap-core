@@ -1,5 +1,5 @@
 /**
- * Services over REST: REST-only authoring, an encrypted config that never
+ * Services over REST: authoring with the whole config, an encrypted config that never
  * leaves the server, allowlisted-parameter runs through
  * `POST /v1/services/:id/run`, the SSRF guard at authoring and at run time,
  * the run budget, the run-reading routes, and the capability asymmetries.
@@ -109,10 +109,10 @@ describeEachAdapter("services", (adapter) => {
     await new Promise<void>((resolve, reject) => target.close((e) => (e ? reject(e) : resolve())));
   });
 
-  describe("authoring (REST-only, edit_services)", () => {
+  describe("authoring over REST (edit_services)", () => {
     let notifyId: string;
 
-    it("creates a service whose config is never returned by any surface", async () => {
+    it("creates a service whose secrets are never returned by any surface", async () => {
       const res = await alice.post(`/v1/bundles/${bundleId}/services`, {
         name: "notify",
         description: "Send a notification",
@@ -131,7 +131,12 @@ describeEachAdapter("services", (adapter) => {
       notifyId = res.body.id;
       expect(res.body.driver).toBe("http"); // defaulted
       expect(JSON.stringify(res.body)).not.toContain("super-secret-token");
-      expect(JSON.stringify(res.body)).not.toContain("127.0.0.1");
+      // The author gets the settings back (every header value is a secret of
+      // the http driver, so only the header names show, as set secret paths).
+      expect(res.body.settings.url).toBe(`http://127.0.0.1:${targetPort}/notify?channel={{channel}}`);
+      expect(res.body.settings.headers).toEqual({});
+      expect(res.body.secretsSet).toEqual(["headers.authorization", "headers.content-type"]);
+      expect(JSON.stringify(res.body)).not.toContain("application/json");
 
       const listed = await alice.get(`/v1/bundles/${bundleId}/services`);
       expect(JSON.stringify(listed.body)).not.toContain("super-secret-token");
@@ -155,18 +160,26 @@ describeEachAdapter("services", (adapter) => {
       expect(row.configEncrypted).not.toContain("127.0.0.1");
     });
 
-    it("service authoring is absent from the MCP surface", async () => {
+    it("MCP authoring refuses the config REST takes, because it carries a secret", async () => {
       const tools = await aliceMcp.client.listTools();
       const names = tools.tools.map((t) => t.name);
       expect(names.some((n) => /service/.test(n))).toBe(false); // no top-level service tools
-      for (const tool of ["create_service", "update_service", "delete_service"]) {
-        const result = await aliceMcp.call("call", {
-          space_id: spaceId,
-          calls: [{ bundle_id: bundleId, tool, params: {} }],
-        });
-        expect(result.results[0].ok).toBe(false);
-        expect(result.results[0].error.message).toContain("unknown tool");
-      }
+      const result = await aliceMcp.call("call", {
+        space_id: spaceId,
+        calls: [
+          {
+            bundle_id: bundleId,
+            tool: "create_service",
+            params: {
+              name: "notify-mcp",
+              settings: { url: "https://api.example.com/x", method: "POST", headers: { authorization: "Bearer t" } },
+            },
+          },
+        ],
+      });
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.message).toContain("settings.headers.authorization holds a secret value");
+      expect(result.results[0].error.message).toContain("secret_request");
     });
 
     it("requires edit_services to author", async () => {
@@ -497,6 +510,7 @@ describeEachAdapter("services", (adapter) => {
       // creation check — as if DNS changed after authoring.
       const { services } = app.db.tables;
       await app.db.client.insert(services).values({
+        approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
         id: "planted-service",
         bundleId,
         name: "rebound",
@@ -834,7 +848,8 @@ describeEachAdapter("services", (adapter) => {
       const bundle = loaded.bundles[0];
 
       const notify = bundle.services.find((s: any) => s.name === "notify");
-      expect(Object.keys(notify).sort()).toEqual(["actions", "description", "driver", "id", "name"]);
+      expect(Object.keys(notify).sort()).toEqual(["actions", "approved", "description", "driver", "id", "name"]);
+      expect(notify.approved).toBe(true);
       expect(notify.driver).toBe("http");
       expect(notify.description).toBe("Send a notification");
       expect(notify.actions.map((a: any) => a.name)).toEqual(["fire"]);
@@ -861,6 +876,7 @@ describeEachAdapter("services", (adapter) => {
     it("lists a service whose driver is not installed, with no actions and no crash", async () => {
       const { services } = app.db.tables;
       await app.db.client.insert(services).values({
+        approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
         id: "orphaned-driver-service",
         bundleId: siblingBundleId,
         name: "orphaned",

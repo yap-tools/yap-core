@@ -17,6 +17,7 @@ import {
   requireBundleRole,
   getBundleRow,
 } from "../core/bundles.js";
+import { describeDriver } from "../core/drivers/registry.js";
 import { YapError } from "../core/errors.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { listFilesUnchecked } from "../core/files.js";
@@ -101,7 +102,8 @@ function blobOrigin(blob: Extract<YapConfig["blob"], { driver: "s3" }>): string 
  * The static CSP a widget-capable host applies to the show_widget shell. A
  * widget mounts in the shell's own document, so the shell must be allowed to
  * reach every origin the registered widgets touch: media-card loads file bytes,
- * upload-dropzone PUTs bytes and POSTs the finalize call. Per-call origins
+ * upload-dropzone PUTs bytes and POSTs the finalize call, secret-input POSTs
+ * its form. Per-call origins
  * aren't knowable here — fastmcp forwards only a static, tool-level _meta (a
  * result-level _meta is rejected) — but they're fixed per deployment: the
  * server's own base URL always, plus the S3 store's origin when blobs are
@@ -238,7 +240,7 @@ export function registerMcpTools(server: YapServer): void {
       // handler spreads the load() result verbatim — the cast lets the CSP _meta
       // ride through to the read result, where the host reads it.
       load: async () => {
-        const result = { text: widgetHtml(def.name, "client"), _meta: resourceMeta };
+        const result = { text: widgetHtml(def.name, "client", undefined, config.baseUrl), _meta: resourceMeta };
         return result as { text: string };
       },
     });
@@ -460,6 +462,25 @@ export function registerMcpTools(server: YapServer): void {
     execute: async () => HELP_TEXT,
   });
 
+  addTool({
+    name: "list_drivers",
+    description:
+      "The service drivers installed on this instance: each one's name, description, actions (with their parameters), whether it reaches the network or reads/writes bundle data, and its configSchema — a JSON Schema for the service config plus the paths in it that hold secrets (each with a label and description), or null when the driver publishes none. Never any service's config values. Read-only; useful for explaining what a service can be built from. Optional names narrows the list.",
+    parameters: z.object({ names: z.array(z.string()).min(1).optional() }),
+    annotations: { readOnlyHint: true, title: "List drivers" },
+    execute: async (args, ctx) => {
+      try {
+        sessionUser(ctx.session);
+        const drivers = args.names
+          ? args.names.map((name) => describeDriver(registry.get(name)))
+          : registry.describeAll();
+        return asJson({ data: drivers });
+      } catch (err) {
+        rethrow(err);
+      }
+    },
+  });
+
   // ---- Doing work --------------------------------------------------------------
 
   const callSchema = z.object({
@@ -541,7 +562,7 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "show_widget",
-    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those. params is the widget's data, flat: for a tool that points at a widget (show_file → media-card, upload_request → upload-dropzone), pass that tool's _meta.data as params (for show_file that is the result itself), not the whole _meta envelope and not under a data key. There is no data parameter.`,
+    description: `Render any registered widget by name on a widget-capable (MCP Apps / SEP-1865) host — the statically-declared tool template (_meta.ui) is a thin shell that reads the named ui:// resource through the host and renders it with the supplied params. Registered widgets: ${Object.keys(WIDGETS).join(", ")}. On hosts that can't render widgets this just returns the widget reference as JSON; prefer the in-band links a tool already returns (e.g. upload_request's origin_upload_url) for those. params is the widget's data, flat: for a tool that points at a widget (show_file → media-card, upload_request → upload-dropzone, secret_request → secret-input, approval_request → service-approve), pass that tool's _meta.data as params (for show_file that is the result itself), not the whole _meta envelope and not under a data key. There is no data parameter.`,
     parameters: z.object({
       widget: z.string().describe("Widget name or ui://yap/... URI"),
       params: z

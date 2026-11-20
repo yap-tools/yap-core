@@ -14,7 +14,15 @@
  */
 import { MAX_TIMER_MS } from "../../config.js";
 import { invalid, notFound } from "../errors.js";
-import { DRIVER_API, type DriverActionSpec, type DriverDefinition, type DriverParamSpec } from "./types.js";
+import { validateConfigSchema, type DriverConfigSchema } from "./schema.js";
+import {
+  DRIVER_API,
+  type DriverActionSpec,
+  type DriverDefinition,
+  type DriverParamSpec,
+  type DriverReads,
+  type DriverWrites,
+} from "./types.js";
 
 /** Stable identifier used in service records and CLI (also enforced by `yap driver add`). */
 export const DRIVER_NAME = /^[a-z][a-z0-9-]{1,63}$/;
@@ -149,6 +157,9 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
   if (def.configDoc !== undefined && typeof def.configDoc !== "string") {
     throw invalid(`driver "${def.name}" configDoc must be a string when present`);
   }
+  if (def.configSchema !== undefined) {
+    validateConfigSchema(def.configSchema, `driver "${def.name}" configSchema`);
+  }
   if (typeof def.validateConfig !== "function") {
     throw invalid(`driver "${def.name}" must export a validateConfig(config) function`);
   }
@@ -161,10 +172,63 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
   for (const [name, action] of Object.entries(def.actions)) {
     validateAction(name, action);
   }
+  // A param destination must name a parameter of the actions it is for. An
+  // action declaring `params: null` takes whatever the service record says,
+  // so any name may be one of its parameters.
+  const checked = def as unknown as DriverDefinition;
+  for (const [index, destination] of (checked.configSchema?.destinations ?? []).entries()) {
+    if (destination.param === undefined) continue;
+    const at = `driver "${checked.name}" configSchema.destinations[${index}]`;
+    const names = destination.actions ?? Object.keys(checked.actions);
+    for (const name of names) {
+      if (!Object.hasOwn(checked.actions, name)) throw invalid(`${at}.actions names "${name}", which is not one of its actions`);
+    }
+    const takes = names.some((name) => {
+      const params = checked.actions[name]!.params;
+      return params === null || params.some((spec) => spec.name === destination.param);
+    });
+    if (!takes) throw invalid(`${at}.param "${destination.param}" is not a parameter of ${destination.actions ? "those actions" : "any action"}`);
+  }
   if (typeof def.run !== "function") {
     throw invalid(`driver "${def.name}" must export a run(ctx) function`);
   }
   return def as unknown as DriverDefinition;
+}
+
+/**
+ * What a client may learn about an installed driver: its contract, never a
+ * service's config. `configSchema` is null for a driver that publishes none.
+ */
+export interface DriverInfo {
+  name: string;
+  description: string;
+  egress: boolean;
+  reads: Required<DriverReads>;
+  writes: Required<DriverWrites>;
+  actions: Array<{ name: string; description: string; params: DriverParamSpec[] | null; timeoutMs: number }>;
+  configDoc: string | null;
+  configSchema: DriverConfigSchema | null;
+}
+
+/** The public view of one driver, as REST `GET /v1/drivers` and MCP `list_drivers` return it. */
+export function describeDriver(def: DriverDefinition): DriverInfo {
+  return {
+    name: def.name,
+    description: def.description,
+    egress: def.egress,
+    reads: { files: def.reads?.files === true, items: def.reads?.items === true },
+    writes: { items: def.writes?.items === true, files: def.writes?.files === true },
+    // Copied (params and schema are checked to be plain JSON at registration)
+    // so a caller that mutates the result cannot reach the live definition.
+    actions: Object.entries(def.actions).map(([name, action]) => ({
+      name,
+      description: action.description,
+      params: action.params === null ? null : action.params.map((p) => ({ ...p })),
+      timeoutMs: action.timeoutMs,
+    })),
+    configDoc: def.configDoc ?? null,
+    configSchema: def.configSchema ? (JSON.parse(JSON.stringify(def.configSchema)) as DriverConfigSchema) : null,
+  };
 }
 
 /** The set of drivers this server knows about, keyed by driver name. */
@@ -192,5 +256,10 @@ export class DriverRegistry {
   /** All registered drivers, name-sorted for stable CLI and boot output. */
   list(): DriverDefinition[] {
     return [...this.drivers.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** The public view of every driver ({@link describeDriver}), name-sorted. */
+  describeAll(): DriverInfo[] {
+    return this.list().map(describeDriver);
   }
 }

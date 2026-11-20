@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { runWithTokenAuth } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
+import { describeDriver } from "../core/drivers/registry.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import { YapError, invalid, tooLarge, unauthorized } from "../core/errors.js";
 import * as oauthCore from "../core/oauth.js";
@@ -26,6 +27,8 @@ import * as legacyHooks from "../core/legacyHooks.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as runsCore from "../core/runs.js";
 import * as schedulesCore from "../core/schedules.js";
+import * as secretRequestsCore from "../core/secretRequests.js";
+import * as serviceApprovalsCore from "../core/serviceApprovals.js";
 import * as servicesCore from "../core/services.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
@@ -913,7 +916,33 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  // ---- Services (authoring is REST-only — deliberately absent from MCP) -----------
+  // ---- Drivers (read-only: what services can be built from) -------------------
+
+  // Any valid credential may read the installed drivers, the sysadmin key
+  // included: a driver's contract and config schema carry no service values,
+  // and a client needs them before it can author a service at all.
+  const requireAnyCredential = (auth: CredentialOutcome): void => {
+    if (auth.kind !== "sysadmin") requireUser(auth);
+  };
+
+  app.get(
+    "/v1/drivers",
+    handle(async (c, auth) => {
+      requireAnyCredential(auth);
+      return c.json({ data: registry.describeAll() });
+    }),
+  );
+
+  app.get(
+    "/v1/drivers/:name",
+    handle(async (c, auth) => {
+      requireAnyCredential(auth);
+      return c.json(describeDriver(registry.get(param(c, "name"))));
+    }),
+  );
+
+  // ---- Services (authored here with the whole config, secrets included; MCP ----
+  // authors send settings only and get secrets entered through a secret form) --
 
   const serviceParamSpecs = z.array(servicesCore.serviceParamSpecSchema);
   // Pins are configuration, not parameters, and the runner String()s them
@@ -969,6 +998,8 @@ export function registerRestRoutes(server: YapServer): void {
           pins: servicePins.nullable().optional(),
           // null clears the allowlist (every driver action); absent leaves it alone.
           actions: serviceActions.nullable().optional(),
+          // For a driver with a config schema: replaces the settings and merges
+          // the secrets (a secret left out is kept, null removes it).
           config: z.unknown().optional(),
         }),
         await jsonBody(c),
@@ -983,6 +1014,19 @@ export function registerRestRoutes(server: YapServer): void {
       const userId = requireUser(auth);
       await servicesCore.deleteService(serviceEnv, userId, param(c, "id"));
       return c.json({ deleted: true });
+    }),
+  );
+
+  // A service written over MCP waits for a person. This opens the approve page
+  // for one, as MCP approval_request does; the page itself is where they decide.
+  app.post(
+    "/v1/services/:id/approval-request",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const serviceId = param(c, "id");
+      const bundleId = await servicesCore.getServiceBundleId(db, serviceId);
+      const { result } = await serviceApprovalsCore.requestApproval(serviceEnv, userId, bundleId, { service: serviceId });
+      return c.json(result, 201);
     }),
   );
 
@@ -1164,12 +1208,15 @@ export function registerRestRoutes(server: YapServer): void {
       );
       const hookId = param(c, "id");
       await legacyHooks.requireLegacyHook(db, userId, hookId, "edit_services");
-      const updated = await servicesCore.updateService(serviceEnv, userId, hookId, {
-        name: body.name,
-        description: body.description,
-        params: body.params,
-        config: body.transport,
-      });
+      // The old contract: a transport replaces the whole config, headers
+      // included, so a header left out of it is gone rather than kept.
+      const updated = await servicesCore.updateService(
+        serviceEnv,
+        userId,
+        hookId,
+        { name: body.name, description: body.description, params: body.params, config: body.transport },
+        { secrets: "replace" },
+      );
       return c.json(legacyHooks.toLegacyHookView(updated));
     }),
   );
@@ -1201,13 +1248,102 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  // ---- Secret forms (public; gated solely by the form's signed token) -----------
+  //
+  // The secret-input widget posts here, from the host's frame or from its
+  // origin page. The token is minted by secret_request for a caller holding
+  // edit_services and opens the form; saving also needs the person's access
+  // key in the body (never an OAuth token), since the agent can see the token.
+  // The core enforces the login, single use, expiry and the rest. Token and
+  // key travel in the body, so they stay out of access logs.
+
+  app.post(
+    "/v1/secret-requests/:id/submit",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(
+        z.object({ token: z.string(), values: z.record(z.string(), z.unknown()), access_key: z.string().optional() }),
+        await jsonBody(c),
+      );
+      const payload = verifyToken(body.token, config.masterKey);
+      if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
+        throw unauthorized("this form has expired or its link is not valid: ask for a new one");
+      }
+      return c.json(await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values, body.access_key));
+    }),
+  );
+
+  // The widget in a host's frame fetches the form from here before showing it:
+  // the data it was handed there came through the model.
+  app.post(
+    "/v1/secret-requests/:id/view",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(z.object({ token: z.string() }), await jsonBody(c));
+      const payload = verifyToken(body.token, config.masterKey);
+      if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
+        throw unauthorized("this form has expired or its link is not valid: ask for a new one");
+      }
+      return c.json(await secretRequestsCore.secretPageData(serviceEnv, requestId));
+    }),
+  );
+
+  // ---- Approve pages (public; the token opens the page, a login decides) ---------
+  //
+  // The service-approve widget calls these, from the host's frame or from its
+  // origin page. The token, minted by approval_request, lets it read the
+  // service as the server has it and reject it. Approving also needs a user
+  // access key in the body (never an OAuth token), whose user holds
+  // edit_services on the bundle. Token and key travel in the body.
+
+  const approvalToken = (requestId: string, token: string): void => {
+    const payload = verifyToken(token, config.masterKey);
+    if (!payload || payload.scope !== "service-approve" || payload.requestId !== requestId) {
+      throw unauthorized("this approval page has expired or its link is not valid: ask for a new one");
+    }
+  };
+
+  app.post(
+    "/v1/service-approvals/:id/view",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(z.object({ token: z.string() }), await jsonBody(c));
+      approvalToken(requestId, body.token);
+      return c.json(await serviceApprovalsCore.approvalView(serviceEnv, requestId));
+    }),
+  );
+
+  app.post(
+    "/v1/service-approvals/:id/decide",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(
+        z.object({
+          token: z.string(),
+          decision: z.enum(["approve", "reject"]),
+          access_key: z.string().optional(),
+          fingerprint: z.string().optional(),
+        }),
+        await jsonBody(c),
+      );
+      approvalToken(requestId, body.token);
+      return c.json(
+        await serviceApprovalsCore.decideApproval(serviceEnv, requestId, {
+          decision: body.decision,
+          accessKey: body.access_key,
+          fingerprint: body.fingerprint,
+        }),
+      );
+    }),
+  );
+
   // ---- Origin-hosted widget pages (outside /v1; signed expiring tokens) -----------
 
   app.get(
     "/w/:widget",
     handle(async (c) => {
       const html = await buildOriginPage(
-        { db, blob, config },
+        { db, blob, config, registry },
         param(c, "widget"),
         c.req.query("token") ?? "",
       );

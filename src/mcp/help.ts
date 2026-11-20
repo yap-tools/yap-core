@@ -38,8 +38,42 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   action needs no "action" argument. Built-in drivers: "http" (fires a
   configured request) and "mail" (one IMAP/SMTP account: folders, search,
   read, mark, send, draft — a service exposes only the ones it allows; draft
-  leaves a reply in the Drafts folder for a human to send). Services are
-  authored over REST only (edit_services); agents run them.
+  leaves a reply in the Drafts folder for a human to send). list_drivers
+  shows the installed drivers, their actions and, where a driver publishes
+  one, its config schema: a JSON Schema for the service config plus the
+  paths in it that hold secrets. It never shows any service's config.
+- **Authoring a service** (edit_services) — create_service and
+  update_service take the service's settings: its config without any secret.
+  A value at a path the driver marks secret is refused; never ask the user
+  to paste a secret into the chat either. Instead call secret_request for the
+  paths you need: it returns a one-off form (a secret-input widget, and an
+  origin_url to give the user) whose password fields go straight to the
+  server; the user saves it with their own access key, so you cannot fill
+  it in yourself. You see the paths, their labels and whether each is set, never a
+  value. The form takes one submission and expires. get_service shows an
+  author the settings, pins and secretsSet; read it before update_service,
+  whose settings replace the stored ones (a secret is kept while the object
+  holding it stays; null at a secret path removes one; changing where a
+  secret is sent, such as an http url or a mail server, drops it, and the
+  user enters it again). The driver's checks
+  run as if the missing secrets were filled in; the rest run when they are
+  entered. A driver without a config schema is authored over REST only, and
+  a driver that writes into the bundle also needs edit_items / edit_files.
+- **Approval** — a service you create over MCP is off until a person
+  approves it, because a service can send data out and you may have been
+  steered by something you read. run_service and schedules refuse it, and
+  listings show approved: false. Changing its params, pins, actions or
+  settings over MCP turns it off again; renaming it, or entering secrets
+  through secret_request, does not. Services written over REST count as
+  approved. Enter the secrets first, then call approval_request and give the
+  user its page (a service-approve widget, or origin_url): it shows where
+  data goes, the actions, params, pins, settings and which secrets are set,
+  and the person approves by logging in with one of their access keys while
+  holding edit_services. The link alone is not enough, and an OAuth token is
+  never accepted, so an agent connected over OAuth cannot approve its own
+  service. One known limit: an agent that holds a raw access key itself (a
+  key pasted into its MCP config, a script) could approve on the page with
+  it. That is discouraged, not prevented. Never ask the user for a key.
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the
@@ -61,7 +95,7 @@ A bundle holds docs, item-types (schemas with items), static files, and services
 - **User doc** — account-level guidance attached to you, available across all
   your spaces. Docs flagged autoload are returned by load at session start.
 - **Widget** — an interactive panel some results render inline (file cards,
-  upload dropzones). Delivered as ui:// resources. On a widget-capable host,
+  upload dropzones, secret forms, approve pages). Delivered as ui:// resources. On a widget-capable host,
   render with show_widget, which carries the CSP the widget needs to reach the
   server (load file bytes, PUT an upload); the in-band result metadata and
   origin-hosted links are the fallback for hosts that don't render widgets.
@@ -90,7 +124,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    a file straight from a URL, where the instance allows it — update_file to rename
    one, and delete_file),
    services (run_service, get_run, list_runs — fire_hook is a deprecated
-   alias for run_service, kept until 1.0), schedules (create_schedule,
+   alias for run_service, kept until 1.0; get_service, create_service,
+   update_service, delete_service, secret_request and approval_request for
+   authors),
+   schedules (create_schedule,
    update_schedule, delete_schedule, list_schedules), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles
    (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
@@ -104,10 +141,6 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    delete (anchor ops: splice at the raw character offset, include newlines
    yourself), replace_lines, delete_lines (1-based inclusive, line-aware).
    update_items also accepts an edits key alongside set for text properties.
-
-Service *authoring* is the one management action not available over MCP —
-defining a service's driver configuration and secrets is REST-only by design
-(edit_services); agents run services and schedule them (run_services).
 
 Run the discovery chain silently — do not narrate loading steps.
 

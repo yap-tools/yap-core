@@ -210,6 +210,7 @@ describeEachAdapter("runs", (adapter) => {
     const id = `svc-${input.name}`;
     const now = new Date().toISOString();
     await app.db.client.insert(services).values({
+      approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
       id,
       bundleId: input.bundle ?? bundleId,
       name: input.name,
@@ -441,6 +442,7 @@ describeEachAdapter("runs", (adapter) => {
         const { services } = capped.db.tables;
         const now = new Date().toISOString();
         await capped.db.client.insert(services).values({
+          approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
           id: "capped-svc",
           bundleId: bid,
           name: "sleeper",
