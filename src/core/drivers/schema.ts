@@ -32,6 +32,14 @@ export interface DriverSecretField {
   label: string;
   /** One or two sentences on what goes there and where to get it. */
   description?: string;
+  /**
+   * The settings that decide where this secret is sent: dot paths of
+   * non-secret fields (`url`, `smtp`). An update over MCP that changes any of
+   * them drops the stored secret, so it has to be entered again by a human,
+   * and an agent cannot point a credential at a server of its own. Omitted:
+   * the secret stays through any settings change.
+   */
+  boundTo?: string[];
 }
 
 export interface DriverConfigSchema {
@@ -139,6 +147,29 @@ export function validateConfigSchema(raw: unknown, field: string): DriverConfigS
     }
     if (description !== undefined && (typeof description !== "string" || description.length > MAX_DESCRIPTION)) {
       throw invalid(`${at}.description must be a string of at most ${MAX_DESCRIPTION} characters when present`);
+    }
+    const { boundTo } = entry;
+    if (boundTo !== undefined) {
+      if (!Array.isArray(boundTo)) throw invalid(`${at}.boundTo must be an array of dot paths when present`);
+      for (const bound of boundTo) {
+        if (typeof bound !== "string" || bound === "" || !bound.split(".").every((s) => SEGMENT.test(s) && s !== "*")) {
+          throw invalid(`${at}.boundTo entries must be dot paths of property names, got ${JSON.stringify(bound)}`);
+        }
+        if (!secretPathResolves(jsonSchema, bound)) {
+          throw invalid(`${at}.boundTo "${bound}" does not name a field in jsonSchema`);
+        }
+      }
+    }
+  }
+  // A binding must name a setting, not a secret: checked once every secret path is known.
+  for (const [index, entry] of (secrets as Array<Record<string, unknown>>).entries()) {
+    for (const bound of (entry.boundTo as string[] | undefined) ?? []) {
+      const b = bound.split(".");
+      const isSecret = [...seen].some((path) => {
+        const p = path.split(".");
+        return p.length <= b.length && p.every((seg, i) => seg === "*" || seg === b[i]);
+      });
+      if (isSecret) throw invalid(`${field}.secrets[${index}].boundTo "${bound}" is a secret path, not a setting`);
     }
   }
   return raw as unknown as DriverConfigSchema;

@@ -9,7 +9,9 @@
 import type { BlobStore } from "../blob/index.js";
 import type { YapConfig } from "../config.js";
 import { verifyToken } from "../crypto.js";
+import type { DriverRegistry } from "../core/drivers/registry.js";
 import { uploadPageData, viewPageData } from "../core/files.js";
+import { secretPageData } from "../core/secretRequests.js";
 import { YapError, invalid, unauthorized } from "../core/errors.js";
 import type { Db } from "../db/index.js";
 import { WIDGETS, widgetHtml } from "./registry.js";
@@ -18,6 +20,8 @@ export interface PagesEnv {
   db: Db;
   blob: BlobStore;
   config: YapConfig;
+  /** The installed drivers: the secret form reads its field labels from them. */
+  registry: DriverRegistry;
 }
 
 export async function buildOriginPage(env: PagesEnv, widgetName: string, token: string): Promise<string> {
@@ -29,6 +33,9 @@ export async function buildOriginPage(env: PagesEnv, widgetName: string, token: 
   const payload = verifyToken(token, config.masterKey);
   if (!payload || payload.scope !== "widget" || payload.widget !== widgetName) {
     throw unauthorized("invalid or expired widget token");
+  }
+  if (widgetName === "secret-input") {
+    return widgetHtml(widgetName, "origin", await secretPageData(env, String(payload.requestId ?? "")));
   }
   const fileId = String(payload.fileId ?? "");
 

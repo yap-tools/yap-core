@@ -83,6 +83,8 @@ export interface YapConfig {
   uploadTtlSeconds: number;
   downloadTtlSeconds: number;
   widgetTokenTtlSeconds: number;
+  /** How long a secret request (the one-off form for a service's secrets) stays open. */
+  secretRequestTtlSeconds: number;
   oauthAccessTokenTtlSeconds: number;
   oauthRefreshTokenTtlSeconds: number;
   oauthCodeTtlSeconds: number;
@@ -289,6 +291,7 @@ export function loadConfig(env: Env = process.env): YapConfig {
     uploadTtlSeconds: intEnv(env, "YAP_UPLOAD_TTL_SECONDS", 600),
     downloadTtlSeconds: intEnv(env, "YAP_DOWNLOAD_TTL_SECONDS", 14400),
     widgetTokenTtlSeconds: intEnv(env, "YAP_WIDGET_TOKEN_TTL_SECONDS", 600),
+    secretRequestTtlSeconds: intEnv(env, "YAP_SECRET_REQUEST_TTL_SECONDS", 600),
     oauthAccessTokenTtlSeconds: intEnv(env, "YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", 3600),
     oauthRefreshTokenTtlSeconds: intEnv(env, "YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS", 30 * 24 * 3600),
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),

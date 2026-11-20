@@ -17,7 +17,7 @@ space                (top level; spaces do not nest)
     ├── docs         (named bundle docs; autoloaded binding instructions and read-on-demand docs)
     ├── item-types   (schemas; each holds many items — this is where "todos" live)
     ├── files
-    └── services     (named, driver-backed capabilities; agents run, never define)
+    └── services     (named, driver-backed capabilities; agents run them, and author them with settings only)
 ```
 
 Autoloaded bundle docs are where binding operating instructions belong; non-autoloaded bundle docs stay available to read on demand. Outside the tree: **user docs** — account-level notes that travel with the user (optionally autoloaded). A free-form note with no bundle context → user doc. Structured data → items of an item-type inside a bundle. If several spaces or bundles could match the user's intent, ask the user rather than guessing.
@@ -87,5 +87,5 @@ All commands resolve the instance from the current directory — run them inside
 | Inventing endpoints (`/v1/notes`, `/v1/todos`) | Only the tree resources exist — see reference.md |
 | Using the sysadmin key as a user credential | Rejected. It is the operator credential: it provisions users and manages their access keys (`yap user create`, `--sysadmin`), and never reads or writes content |
 | Showing `item://<id>` / `file://<id>` values to users | Opaque references — resolve them first (get items / `GET /v1/files/<id>/link`); driver-internal file reads use `ctx.reader.readFile` only when the driver declares `reads.files`; driver item reads use `ctx.reader.getItems` only when it declares `reads.items`; driver item write-backs use `ctx.writer.createItems` / `ctx.writer.updateItems` only when it declares `writes.items`; driver file write-backs use `ctx.writer.writeFile` only when it declares `writes.files` |
-| Defining a service's driver/config via MCP or as an agent | Service authoring is deliberately REST-only; agents may only run services (`run_service`, or the deprecated `fire_hook` alias) and schedule them (`create_schedule`) |
+| Putting a password, token or API-key header into a service over MCP | Refused. `create_service` / `update_service` take settings only; call `secret_request` and give the user its form (widget or `origin_url`), so the secret goes from them straight to the server. Never ask the user to paste a secret into the chat. `get_service` shows `secretsSet`, never a value |
 | Expecting open access | Default deny. Grants resolve most-specific-wins: bundle beats space, deny beats allow |

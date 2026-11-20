@@ -260,6 +260,32 @@ export const schedules = sqliteTable(
   ],
 );
 
+/** One-off forms for entering a service's secrets (core/secretRequests.ts).
+ * An agent asks for one; the human fills it in, straight to the server. Each
+ * row is good for one submission until it expires, and dies with its service
+ * and with the user who asked for it. */
+export const secretRequests = sqliteTable(
+  "secret_requests",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    serviceId: text("service_id")
+      .notNull()
+      .references(() => services.id, { onDelete: "cascade" }),
+    paths: text("paths").notNull(), // JSON array of concrete secret paths the form asks for
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    // Set by the one submission that claims the form; null while it is open.
+    usedAt: text("used_at"),
+  },
+  (t) => [index("secret_requests_service_idx").on(t.serviceId)],
+);
+
 /** Async service invocations — the audit trail for calls and their write-backs.
  * A run outlives the service it came from (service_id goes null; service_name
  * keeps the label) but dies with its bundle. */

@@ -31,16 +31,20 @@ export default {
       examples: [{ base_url: "https://api.example.com", token: "<token>" }],
     },
     secrets: [
-      { path: "token", label: "API token", description: "Create one under Settings → API." },
+      { path: "token", label: "API token", description: "Create one under Settings → API.", boundTo: ["base_url"] },
       { path: "oauth.client_secret", label: "OAuth client secret" },
-      { path: "headers.*", label: "Header value" },
+      { path: "headers.*", label: "Header value", boundTo: ["base_url"] },
     ],
   },
 };
 ```
 
 - **`jsonSchema`** is a JSON Schema (draft 2020-12) whose root is `type: "object"`. It must be plain JSON. Put example configs under the standard `examples` keyword; use placeholders there, never real credentials, because the schema is readable by any authenticated caller.
-- **`secrets`** lists every path in the config that holds a secret: passwords, API keys, tokens, client secrets, private keys. It may be empty. Each entry has a `path`, a short `label` (up to 80 characters) for a form field, and an optional `description` (up to 500 characters).
+- **`secrets`** lists every path in the config that holds a secret: passwords, API keys, tokens, client secrets, private keys. It may be empty. Each entry has a `path`, a short `label` (up to 80 characters) for a form field, an optional `description` (up to 500 characters), and an optional `boundTo`.
+
+### Bindings
+
+`boundTo` lists the settings that decide where the secret is sent: dot paths of non-secret fields, such as the URL a token goes to or the server a password logs in to. When a service is updated over MCP and any of them changes, the stored secret is dropped, and a human has to enter it again through a secret form ([mcp-service-authoring.md](mcp-service-authoring.md)). That way an agent, which never sees a secret, cannot send one to a server of its own either. A binding to an object (`smtp`) covers everything inside it. Each entry must resolve in `jsonSchema` and must not be a secret path. A secret without `boundTo` survives every settings change, so a driver should bind every secret that leaves the server. REST updates are not affected.
 
 ### Secret paths
 
@@ -77,7 +81,7 @@ Each entry:
   "configDoc": "user: the account's login name …",  // the free-text help, or null
   "configSchema": {                                 // or null
     "jsonSchema": { "type": "object", "properties": { … }, "examples": [ … ] },
-    "secrets": [{ "path": "pass", "label": "Password", "description": "…" }]
+    "secrets": [{ "path": "pass", "label": "Password", "description": "…", "boundTo": ["imap", "smtp", "allow_plaintext_auth"] }]
   }
 }
 ```
@@ -88,7 +92,7 @@ Each entry:
 
 | driver | secret paths | notes |
 |---|---|---|
-| `http` | `headers.*` | Header values are where an http service carries credentials by design (an `Authorization` or API-key header), so every header value is marked. The url and body are not: a token belongs in a header. |
-| `mail` | `pass`, `oauth2.client_secret`, `oauth2.refresh_token` | `oauth2.client_id`, the hosts and the addresses are settings, not secrets. The schema also carries the rules zod keeps in a refinement: exactly one of `pass` / `oauth2` (`oneOf`), at least one of `imap` / `smtp` (`anyOf`), and `from` as an email address. |
+| `http` | `headers.*`, bound to `url` | Header values are where an http service carries credentials by design (an `Authorization` or API-key header), so every header value is marked. The url and body are not: a token belongs in a header. |
+| `mail` | `pass`, bound to `imap`, `smtp`, `allow_plaintext_auth`; `oauth2.client_secret` and `oauth2.refresh_token`, bound to those and `oauth2.token_url` | `oauth2.client_id`, the hosts and the addresses are settings, not secrets. The schema also carries the rules zod keeps in a refinement: exactly one of `pass` / `oauth2` (`oneOf`), at least one of `imap` / `smtp` (`anyOf`), and `from` as an email address. |
 
 Both publish `examples` that their own `validateConfig` accepts; the test suite checks this, and that every secret path resolves.

@@ -45,15 +45,15 @@ reads back to its authors as
 
 | Caller | Sees |
 |---|---|
-| Holds `edit_services` on the bundle | id, name, description, driver, actions, plus `settings` and `secretsSet`. Returned by `GET /v1/bundles/:id/services` and by the create and update calls. |
-| Any other reader of the bundle, and every agent over MCP (`load_bundle`) | id, name, description, driver and actions, as before. No settings: they can carry a destination host or an account name, which an agent running the service does not need. |
+| Holds `edit_services` on the bundle | id, name, description, driver, actions, plus the record's `params` and `pins`, `settings` and `secretsSet`. Returned by `GET /v1/bundles/:id/services`, by MCP `get_service`, and by the create and update calls on both surfaces. |
+| Any other reader of the bundle, and `load_bundle` for everyone | id, name, description, driver and actions, as before. No settings: they can carry a destination host or an account name, which an agent running the service does not need. |
 | Nobody | A secret's value. It leaves the database only inside a run, in memory. |
 
 `settings` and `secretsSet` are `null` when the config is one sealed blob: the driver has no schema, or the boot split (below) left the service alone.
 
 ## Writing a config
 
-`POST /v1/bundles/:id/services` and `PATCH /v1/services/:id` take `config` as before: the full config object, secrets and all.
+`POST /v1/bundles/:id/services` and `PATCH /v1/services/:id` take `config` as before: the full config object, secrets and all. Over MCP, `create_service` and `update_service` take the same object as `settings`, without the secrets: a value at a secret path is refused there, and secrets are entered through a secret form instead. See [mcp-service-authoring.md](mcp-service-authoring.md).
 
 For a driver with a schema, a `PATCH` with `config` works like this:
 

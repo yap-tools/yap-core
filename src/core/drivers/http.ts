@@ -138,6 +138,8 @@ export const httpConfigSchemaInfo: DriverConfigSchema = {
       path: "headers.*",
       label: "Header value",
       description: "Every request header value is treated as secret, since that is where API keys and bearer tokens go.",
+      // The headers go wherever the url points, so a new url needs them entered again.
+      boundTo: ["url"],
     },
   ],
 };

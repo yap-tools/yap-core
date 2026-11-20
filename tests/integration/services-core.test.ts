@@ -587,8 +587,9 @@ describeEachAdapter("services core", (adapter) => {
 
       const listed = await listServices(env, aliceId, bundleId);
       expect(listed.map((s) => s.name)).toContain("notify");
-      // An author's listing is the agent-visible one plus the readable settings.
-      expect(listed.map(({ settings: _s, secretsSet: _p, ...rest }: any) => rest)).toEqual(
+      // An author's listing is the agent-visible one plus the record's params
+      // and pins and the readable settings.
+      expect(listed.map(({ settings: _s, secretsSet: _p, params: _r, pins: _q, ...rest }: any) => rest)).toEqual(
         await listServicesUnchecked(env, bundleId),
       );
       expect(listed.find((s) => s.name === "notify")).toMatchObject({ settings: httpConfig, secretsSet: [] });

@@ -721,6 +721,89 @@ export const WIDGETS: Record<string, WidgetDef> = {
       });
     `,
   },
+
+  "secret-input": {
+    name: "secret-input",
+    uri: `${UI_SCHEME_PREFIX}secret-input`,
+    description:
+      "One-off form for a service's secrets: a password field per requested secret path, with the driver's label and description. It POSTs the values straight to the server with its own signed token, so they never pass through the host or the model, then shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ service_name, fields: [{ path, label, description?, set }], submit_url, token }).",
+    originHostable: true,
+    style: `
+      form { display: block; }
+      .field { display: block; margin: 0 0 14px; }
+      .field .label { display: block; font-weight: 600; }
+      .field .muted { display: block; }
+      .field input { display: block; width: 100%; margin-top: 6px; font: inherit; color: inherit; padding: 7px 10px;
+                     border-radius: var(--border-radius-small, 8px); border: 1px solid var(--yap-border); background: var(--yap-bg); }
+      .done { font-weight: 600; }
+      button:disabled { opacity: .6; cursor: default; }
+    `,
+    render: `
+      onData(function (d) {
+        // Once saved, stay saved: a host re-delivering the result must not
+        // bring back a form whose token is already spent.
+        if (window.__yapSecretSaved) return;
+        var root = document.getElementById("root");
+        var fields = (d && Array.isArray(d.fields)) ? d.fields : [];
+        if (!d || !d.submit_url || !d.token || fields.length === 0) {
+          root.innerHTML = '<div class="card muted">No form data reached this widget. Ask for a new secret form.</div>';
+          return;
+        }
+        var html = '<form class="card" id="secret-form" autocomplete="off" novalidate>' +
+          '<p><strong>' + esc(d.service_name) + '</strong></p>' +
+          '<p class="muted">Each value goes straight to the server. Nobody can read it back afterwards, the assistant included.</p>';
+        for (var i = 0; i < fields.length; i++) {
+          var f = fields[i] || {};
+          html += '<label class="field" for="secret-' + i + '"><span class="label">' + esc(f.label || f.path) + '</span>' +
+            '<span class="muted">' + esc(f.path) + (f.set ? ' (already set: leave blank to keep it)' : '') + '</span>' +
+            (f.description ? '<span class="muted">' + esc(f.description) + '</span>' : '') +
+            '<input type="password" id="secret-' + i + '" autocomplete="new-password" spellcheck="false" autocapitalize="off"></label>';
+        }
+        html += '<p><button type="submit" id="secret-save">Save</button></p><p class="err" id="secret-msg" role="alert"></p></form>';
+        root.innerHTML = html;
+        var form = document.getElementById("secret-form");
+        var save = document.getElementById("secret-save");
+        var msg = document.getElementById("secret-msg");
+        function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          var values = {};
+          var count = 0;
+          for (var i = 0; i < fields.length; i++) {
+            var v = document.getElementById("secret-" + i).value;
+            if (v) { values[fields[i].path] = v; count++; }
+          }
+          if (count === 0) { say("Fill in at least one field."); return; }
+          save.disabled = true;
+          say("");
+          fetch(d.submit_url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token: d.token, values: values }),
+          }).then(function (res) {
+            return res.text().then(function (text) {
+              if (res.ok) {
+                window.__yapSecretSaved = true;
+                root.innerHTML = '<div class="card done">Saved</div>';
+                requestAnimationFrame(announceHeight);
+                return;
+              }
+              var message = "Saving failed. Ask for a new secret form and try again.";
+              try {
+                var body = JSON.parse(text);
+                if (body && body.error && body.error.message) message = String(body.error.message);
+              } catch (_e) {}
+              save.disabled = false;
+              say(message);
+            });
+          }).catch(function () {
+            save.disabled = false;
+            say("Could not reach the server. Check the connection and try again.");
+          });
+        });
+      });
+    `,
+  },
 };
 
 function escapeForInlineJson(json: string): string {

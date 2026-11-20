@@ -27,6 +27,7 @@ import * as legacyHooks from "../core/legacyHooks.js";
 import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as runsCore from "../core/runs.js";
 import * as schedulesCore from "../core/schedules.js";
+import * as secretRequestsCore from "../core/secretRequests.js";
 import * as servicesCore from "../core/services.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
@@ -939,7 +940,8 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
-  // ---- Services (authoring is REST-only — deliberately absent from MCP) -----------
+  // ---- Services (authored here with the whole config, secrets included; MCP ----
+  // authors send settings only and get secrets entered through a secret form) --
 
   const serviceParamSpecs = z.array(servicesCore.serviceParamSpecSchema);
   // Pins are configuration, not parameters, and the runner String()s them
@@ -1232,13 +1234,36 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  // ---- Secret forms (public; gated solely by the form's signed token) -----------
+  //
+  // The secret-input widget posts here, from the host's frame or from its
+  // origin page. The token is minted by secret_request for a caller holding
+  // edit_services; the core enforces single use, expiry and the rest. The body
+  // carries the token rather than the URL, so it stays out of access logs.
+
+  app.post(
+    "/v1/secret-requests/:id/submit",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(
+        z.object({ token: z.string(), values: z.record(z.string(), z.unknown()) }),
+        await jsonBody(c),
+      );
+      const payload = verifyToken(body.token, config.masterKey);
+      if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
+        throw unauthorized("this form has expired or its link is not valid: ask for a new one");
+      }
+      return c.json(await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values));
+    }),
+  );
+
   // ---- Origin-hosted widget pages (outside /v1; signed expiring tokens) -----------
 
   app.get(
     "/w/:widget",
     handle(async (c) => {
       const html = await buildOriginPage(
-        { db, blob, config },
+        { db, blob, config, registry },
         param(c, "widget"),
         c.req.query("token") ?? "",
       );

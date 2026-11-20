@@ -180,7 +180,7 @@ local dev.
 | `YAP_DRIVERS_DIR` | `./drivers` | Installed service drivers, one package folder each; loaded at startup |
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | File size cap (uploads and sideloads) |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
-| `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` | 600 / 14400 / 600 | Link/token lifetimes |
+| `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` / `YAP_SECRET_REQUEST_TTL_SECONDS` | 600 / 14400 / 600 / 600 | Link/token lifetimes; the last is how long a secret form stays open |
 | `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
@@ -260,7 +260,9 @@ metadata and descending only into the relevant branch:
   `update_file`, `delete_file`,
   `run_service`, `get_run`, `list_runs`, `create_schedule`, `update_schedule`,
   `delete_schedule`, `list_schedules`, and the deprecated `fire_hook` alias
-  (kept until 1.0). Management (gated by the matching capability): `update_space` /
+  (kept until 1.0). Service authoring (`edit_services`): `get_service`,
+  `create_service`, `update_service`, `delete_service` and `secret_request`.
+  Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
@@ -273,13 +275,14 @@ metadata and descending only into the relevant branch:
 **Surface parity:** every per-resource role capability — content and container
 (`manage_space`, `manage_roles`, `edit_bundles`, …) — is exercisable from
 either surface; REST and MCP are two transports over one capability-checked
-core. Two things stay REST-only by design: **service authoring** (defining a
-service's driver, configuration, and secrets is too sensitive for an
-agent-driven surface — agents may run services but never define them) and
-**operator/account actions**
-that aren't role capabilities (user provisioning via the sysadmin key, and
-access-key management). The REST API under `/v1` also remains the full
-management plane.
+core. Service authoring is on both, with one difference: over MCP an agent
+sends a service's **settings only**, and its secrets reach the server through
+a one-off form a human fills in, so they never pass through the agent (see
+[docs/mcp-service-authoring.md](docs/mcp-service-authoring.md)). What stays
+REST-only is the **operator/account actions** that aren't role capabilities
+(user provisioning via the sysadmin key, and access-key management), and
+authoring a service on a driver without a config schema. The REST API under
+`/v1` also remains the full management plane.
 
 ## Items & schemas
 
@@ -460,6 +463,18 @@ be the instance's externally reachable origin (https except on loopback).
   replaces the settings and keeps any secret it leaves out, as long as the
   object holding it is still there (`null` removes one), so an author can
   edit a service without retyping its credentials.
+  **Agents author services too**, over MCP: `create_service` and
+  `update_service` take the settings, refuse any value at a secret path, and
+  check the config as if the missing secrets were filled in; `secret_request`
+  then hands the user a one-off form (an MCP widget, or a signed page) whose
+  password fields post straight to the server. The form takes one
+  submission, closes if the service's config changes, and expires after `YAP_SECRET_REQUEST_TTL_SECONDS` (default
+  600). An MCP update that changes where a secret is sent (an http `url`, a
+  mail server: the secret's `boundTo` in the driver's schema) drops that
+  secret, so an agent cannot point a credential at a server of its own.
+  `get_service` shows an author the settings, pins and `secretsSet`.
+  The whole flow is in
+  [docs/mcp-service-authoring.md](docs/mcp-service-authoring.md).
   A driver without a schema keeps its whole config as one encrypted blob
   that nobody reads back. Either way the full config is decrypted only in
   memory inside a run. Services authored before the split are split on the
@@ -549,7 +564,10 @@ be the instance's externally reachable origin (https except on loopback).
   `writes: { items: true }`
   receives `ctx.writer.createItems(itemTypeName, values)` and
   `ctx.writer.updateItems(updates)`, scoped to the run bundle and validated by
-  the normal item layer. `updateItems` uses the same update shape as the
+  the normal item layer. A run writes with the service's authority, not the
+  runner's, so creating or changing a service on a driver that declares
+  `writes.items` needs `edit_items` on the bundle as well as `edit_services`,
+  and `writes.files` needs `edit_files`. `updateItems` uses the same update shape as the
   REST/MCP item update APIs: an array of `{id, set?, edits?}`. A driver that
   declares `writes: { files: true }` receives `ctx.writer.writeFile({ name,
   mimeType?, bytes })`, which writes a finalized file into the run bundle and
@@ -610,8 +628,8 @@ be the instance's externally reachable origin (https except on loopback).
   there can disable or delete it. Agents schedule over MCP with the
   `create_schedule`, `update_schedule`, `delete_schedule` and `list_schedules`
   call tools, which apply the same validation and rules as REST; `load_bundle`
-  shows schedules next to services to holders of `run_services`. Services
-  themselves are still authored over REST only.
+  shows schedules next to services to holders of `run_services`. Authoring
+  the services themselves needs `edit_services`.
 
   On each tick the scheduler goes through the same `run_service` path as any
   other caller, with `source: schedule`. `run_services` is re-checked for the
@@ -672,6 +690,11 @@ be the instance's externally reachable origin (https except on loopback).
   unwrapped, so passing the whole `_meta` envelope still renders. Images,
   audio and video play inline (audio with its filename above the player),
   and every card has exactly one Download link.
+  The secret input (`secret_request`'s pointer) shows one password field per
+  requested secret path, posts the values straight to
+  `POST /v1/secret-requests/:id/submit` with its own signed token, and then
+  shows "Saved" and nothing else; its origin page is
+  `/w/secret-input?token=…`.
 
 ## Development
 

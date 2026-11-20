@@ -220,16 +220,21 @@ function buildMailConfigSchema(): DriverConfigSchema {
         path: "pass",
         label: "Password",
         description: "The account password, or an app password where the provider issues them (Fastmail, personal Gmail).",
+        // Sent to the IMAP and SMTP servers, in the clear when plaintext auth is allowed.
+        boundTo: ["imap", "smtp", "allow_plaintext_auth"],
       },
       {
         path: "oauth2.client_secret",
         label: "OAuth client secret",
         description: "The secret of the OAuth client registered with the mail provider.",
+        // Sent to the token endpoint; the access tokens it buys go to the mail servers.
+        boundTo: ["oauth2.token_url", "imap", "smtp", "allow_plaintext_auth"],
       },
       {
         path: "oauth2.refresh_token",
         label: "OAuth refresh token",
         description: "The long-lived token the driver exchanges for short-lived access tokens.",
+        boundTo: ["oauth2.token_url", "imap", "smtp", "allow_plaintext_auth"],
       },
     ],
   };

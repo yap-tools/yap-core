@@ -20,6 +20,8 @@ import * as itemsCore from "../core/items.js";
 import * as legacyHooks from "../core/legacyHooks.js";
 import * as runsCore from "../core/runs.js";
 import * as schedulesCore from "../core/schedules.js";
+import * as secretRequestsCore from "../core/secretRequests.js";
+import * as servicesCore from "../core/services.js";
 import * as spacesCore from "../core/spaces.js";
 import type { PropertyConfig } from "../core/propertyConfig.js";
 import { YapError } from "../core/errors.js";
@@ -527,9 +529,102 @@ export const secondTier: Record<string, SecondTierTool> = {
     }),
   },
 
+  // ---- Service authoring (edit_services) -----------------------------------------
+  // Settings only: a secret value is refused, and secrets reach the server
+  // through secret_request's one-off form, typed in by a human. Driver checks
+  // that need a secret wait until it is entered (see services.ts).
+  get_service: {
+    description:
+      "Read one service in full: id, name, description, driver, actions, plus — for a caller holding edit_services on the bundle — the record's params, pins, settings (the config without its secrets) and secretsSet (which secret paths hold a value; never a value). Anyone else gets the listing view load_bundle shows. settings and secretsSet are null when the service keeps its config as one sealed secret (a driver without a config schema), which can only be changed over REST. Read a service with this before update_service. Params: id (the service's name or id).",
+    capability: "(bundle read access)",
+    params: idParam,
+    handler: async (env, params) => ({
+      result: await servicesCore.getService(env, env.userId, env.bundleId, String(params.id)),
+    }),
+  },
+  create_service: {
+    description:
+      'Create a service in the bundle from one of the installed drivers (list_drivers shows each one\'s actions and config schema). Params: name, driver? (default "http"), description?, params? (parameter specs [{name, description?, required?}] — for http, the {{placeholders}} its template uses), pins? ({param: fixed scalar}, hidden from runners), actions? (allowlist of the driver\'s action names; omit for all), settings (the driver\'s config WITHOUT any secret: a value at a path the driver marks secret is refused). Secrets are never sent here: after creating, call secret_request so the user types them into a one-off form that goes straight to the server. The driver\'s config checks run now with the missing secrets treated as filled in; checks that need the real secrets run when they are entered. A driver without a config schema cannot be authored over MCP. A driver that writes items or files into the bundle also needs edit_items / edit_files. Returns the service as get_service shows it. Example: {name: "notify", driver: "http", params: [{name: "text", required: true}], settings: {url: "https://api.example.com/notify", method: "POST", headers: {}, body_json: {text: "{{text}}"}}}, then secret_request {id: "notify", paths: ["headers.authorization"]}.',
+    capability: "edit_services",
+    params: {
+      name: { required: true },
+      driver: {},
+      description: {},
+      params: {},
+      pins: {},
+      actions: {},
+      settings: { required: true },
+    },
+    handler: async (env, params) => ({
+      // Passed through untyped: the core says what is wrong with each.
+      result: await servicesCore.createService(
+        env,
+        env.userId,
+        env.bundleId,
+        {
+          name: params.name as string,
+          driver: params.driver as string | undefined,
+          description: params.description as string | undefined,
+          params: params.params as servicesCore.ServiceParamSpec[] | undefined,
+          pins: params.pins as servicesCore.ServicePins | undefined,
+          actions: params.actions as string[] | null | undefined,
+          config: params.settings,
+        },
+        { authoring: "mcp" },
+      ),
+    }),
+  },
+  update_service: {
+    description:
+      "Change a service. Params: id (name or id), and any of name, description, params (replaces the specs), pins (replaces the set; null clears it), actions (replaces the allowlist; null = every action), settings. settings replaces the stored settings whole, so send what get_service returned, edited: a secret is kept as long as the object holding it is still in the settings, and dropping that object drops its secrets; null at a secret path removes that secret. Changing a setting a secret is bound to (where it is sent: an http url, a mail server — see boundTo in list_drivers) drops that secret too, and the user enters it again through secret_request. A secret value is refused, as on create_service: change a secret with secret_request. A service whose config is one sealed secret cannot be changed over MCP. Returns the service as get_service shows it.",
+    capability: "edit_services",
+    params: { id: { required: true }, name: {}, description: {}, params: {}, pins: {}, actions: {}, settings: {} },
+    handler: async (env, params) => {
+      const serviceId = await servicesCore.resolveServiceId(env.db, env.bundleId, String(params.id));
+      return {
+        result: await servicesCore.updateService(
+          env,
+          env.userId,
+          serviceId,
+          {
+            name: params.name as string | undefined,
+            description: params.description as string | undefined,
+            params: params.params as servicesCore.ServiceParamSpec[] | undefined,
+            pins: params.pins as servicesCore.ServicePins | null | undefined,
+            actions: params.actions as string[] | null | undefined,
+            config: params.settings,
+          },
+          { authoring: "mcp" },
+        ),
+      };
+    },
+  },
+  delete_service: {
+    description:
+      "Delete a service, with its schedules and its open secret forms. Its past runs stay in the run log. Params: id (the service's name or id).",
+    capability: "edit_services",
+    params: idParam,
+    handler: async (env, params) => {
+      const serviceId = await servicesCore.resolveServiceId(env.db, env.bundleId, String(params.id));
+      await servicesCore.deleteService(env, env.userId, serviceId);
+      return { result: { deleted: true } };
+    },
+  },
+  secret_request: {
+    description:
+      "Ask the user for a service's secrets through a one-off form, so they go from the human straight to the server and never through you. Params: id (the service's name or id), paths? (the secret paths to ask for; omit for the ones the service still lacks, e.g. [\"pass\"] for a mail service on a password, or its two oauth2 secrets for one with an oauth2 block; a map path is named with its key, e.g. [\"headers.authorization\"] for http). Returns request_id, the fields (path, label, description, and whether each is already set — never a value), expires_in, and origin_url — a signed page with the form: give this link to the user. A secret-input widget pointer rides in _meta for widget-capable hosts: render it with show_widget(widget=\"secret-input\", params=<this result's _meta.data>). The form takes one successful submission and expires like an upload link; submitting sets the listed paths only. Afterwards, get_service's secretsSet shows what is set. Needs edit_services.",
+    capability: "edit_services",
+    params: { id: { required: true }, paths: {} },
+    handler: async (env, params) => {
+      const { result, form } = await secretRequestsCore.requestSecrets(env, env.userId, env.bundleId, {
+        service: String(params.id),
+        paths: params.paths,
+      });
+      return { result, _meta: { widget: "ui://yap/secret-input", data: { ...form } } };
+    },
+  },
+
   // ---- Management (parity with the REST management plane) -----------------------
-  // Service authoring (edit_services) is deliberately absent — defining a
-  // service's driver configuration and secrets stays REST-only by design.
 
   // manage_space (space-scoped)
   update_space: {

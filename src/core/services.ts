@@ -30,11 +30,20 @@
  *   the driver declares, which is what every service authored before the
  *   column existed means.
  *
- * Authoring is privileged (`edit_services`) and, in practice, REST-only —
- * agents run services but never define them. That asymmetry is what lets the
- * bundle writer below skip the `edit_items` check: an operator authoring a
- * service over privileged REST *is* the grant, so a driver that declared
- * `writes.items` writes with the service's authority rather than the caller's.
+ * Authoring is gated by `edit_services` and happens on two surfaces. Over
+ * REST an author sends the whole config, secrets included. Over MCP an agent
+ * sends the settings only (`authoring: "mcp"`): a secret value in them is
+ * refused, a driver without a config schema cannot be authored there at all,
+ * and the secrets are entered by a human through a one-off form
+ * (secretRequests.ts), so they never pass through the agent.
+ *
+ * A run writes to its bundle with the service's authority, not the runner's:
+ * the bundle writer below skips the `edit_items` / `edit_files` check. That
+ * holds because the author vouched for those writes: creating or changing a
+ * service whose driver declares `writes.items` needs `edit_items` on the
+ * bundle, and `writes.files` needs `edit_files`, on both surfaces. Holding
+ * `edit_services` alone is not enough to give a service write access the
+ * author does not have.
  *
  * Authoring-time validation is deliberately strict, because everything it
  * rejects would otherwise fail (or silently misbehave) much later, at fire
@@ -61,7 +70,7 @@ import { Buffer } from "node:buffer";
 import type { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 
 import type { BlobStore } from "../blob/index.js";
@@ -77,15 +86,18 @@ import {
 import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition, DriverReads } from "./drivers/types.js";
-import { invalid, notFound, tooLarge, YapError } from "./errors.js";
+import { forbidden, invalid, notFound, tooLarge, YapError } from "./errors.js";
 import { parseFileRef } from "./fileRefs.js";
 import { writeFileUnchecked, type FileWriteInput } from "./files.js";
 import { createItemsUnchecked, getItemsUnchecked, updateItemsUnchecked, type ItemUpdateInput } from "./items.js";
 import {
   applyConfigWrite,
   blobColumns,
+  dropMovedSecrets,
   isSplit,
+  pendingSecretCandidates,
   readParts,
+  secretValuesIn,
   secretsSet,
   splitColumns,
   splitConfig,
@@ -141,6 +153,12 @@ export interface ServiceInfo {
  * see: the listing plus the readable half of the config. Never a secret value.
  */
 export interface ServiceAuthorInfo extends ServiceInfo {
+  /** The parameter specs stored on the service record (what `params` was set to). */
+  params: ServiceParamSpec[];
+  /** The pinned values: configuration an author set, stripped from every
+   *  agent-facing listing. Returned so an author can change them without
+   *  wiping the ones already there (a write replaces the set whole). */
+  pins: ServicePins;
   /** The config without its secrets; null while the config is one sealed
    *  blob (its driver publishes no schema, or the boot split skipped it). */
   settings: Record<string, unknown> | null;
@@ -260,22 +278,94 @@ async function validateDriverConfig(
   config: unknown,
   kept: string[] = [],
 ): Promise<void> {
-  // When stored secrets were carried into the config being checked, say so: the
-  // driver's complaint may be about a secret the author never sent this time.
-  const keptNote = kept.length
-    ? ` (checked with the stored secrets this write left out: ${kept.join(", ")}; set a secret path to null to remove it)`
-    : "";
-  const wrap = (err: unknown): never => {
-    if (err instanceof YapError) throw err;
-    throw invalid(
-      `invalid config for driver "${def.name}": ${String((err as Error | undefined)?.message ?? err)}${keptNote}`,
-    );
-  };
+  const wrap = (err: unknown): never => configError(def, err, keptNote(kept));
   try {
     def.validateConfig(config);
   } catch (err) {
     wrap(err);
   }
+  await validateOnline(env, def, config, wrap);
+}
+
+/** When stored secrets were carried into the config being checked, say so: the
+ * driver's complaint may be about a secret the author never sent this time. */
+function keptNote(kept: string[]): string {
+  return kept.length
+    ? ` (checked with the stored secrets this write left out: ${kept.join(", ")}; set a secret path to null to remove it)`
+    : "";
+}
+
+function configError(def: DriverDefinition, err: unknown, note: string): never {
+  // A driver's own YapError (the http SSRF guard, the mail driver's field
+  // check) keeps its code and wording; the note is only added to it.
+  if (err instanceof YapError) throw note ? new YapError(err.code, `${err.message}${note}`, err.details) : err;
+  throw invalid(`invalid config for driver "${def.name}": ${String((err as Error | undefined)?.message ?? err)}${note}`);
+}
+
+/**
+ * Which of a config's missing secrets it needs to be valid, by the driver's
+ * offline check alone. Empty when the config is valid as it is. Otherwise the
+ * check is run with placeholders where secrets go (see
+ * `pendingSecretCandidates`), and the first way of filling them in that the
+ * driver accepts is the answer. Throws the driver's refusal, saying which
+ * secrets were treated as filled in, when no way works.
+ *
+ * The config as it is comes first on purpose: a mail service with a complete
+ * `oauth2` block never has a `pass`, and must not count as lacking one.
+ */
+export function neededSecrets(def: DriverDefinition, config: ConfigObject, kept: string[] = []): string[] {
+  let asIs: unknown;
+  try {
+    def.validateConfig(config);
+    return [];
+  } catch (err) {
+    asIs = err;
+  }
+  const { pending, candidates } = pendingSecretCandidates(def, config);
+  if (pending.length === 0) return configError(def, asIs, keptNote(kept));
+  let firstError: unknown;
+  for (const candidate of candidates) {
+    if (candidate.filled.length === 0) continue; // the config as it is, already tried
+    try {
+      def.validateConfig(candidate.config);
+      return candidate.filled;
+    } catch (err) {
+      firstError ??= err;
+    }
+  }
+  return configError(
+    def,
+    firstError ?? asIs,
+    `${keptNote(kept)} (checked as if the secrets not set yet were filled in: ${pending.join(", ")})`,
+  );
+}
+
+/**
+ * Checks a config some of whose secrets may not be set yet: they come later,
+ * through a secret request. Returns the secrets it still needs.
+ *
+ * The driver's offline check runs at once (`neededSecrets`). Its online check
+ * may need the real secrets to mean anything (the mail driver logs in), so it
+ * runs only once the config needs none: at authoring when nothing is missing,
+ * otherwise on the secret-form submission that completes it.
+ */
+export async function validatePendingConfig(
+  env: ServiceEnv,
+  def: DriverDefinition,
+  config: ConfigObject,
+  kept: string[] = [],
+): Promise<string[]> {
+  const needed = neededSecrets(def, config, kept);
+  if (needed.length === 0) await validateOnline(env, def, config, (err) => configError(def, err, keptNote(kept)));
+  return needed;
+}
+
+async function validateOnline(
+  env: ServiceEnv,
+  def: DriverDefinition,
+  config: unknown,
+  wrap: (err: unknown) => never,
+): Promise<void> {
   if (!def.validateConfigOnline) return;
   // The online check needs a guarded door of its own — this is where the http
   // driver's authoring-time SSRF pre-check happens. The handle is ours, so it
@@ -302,20 +392,88 @@ async function prepareConfigWrite(
   def: DriverDefinition,
   config: unknown,
   stored: ConfigObject | null,
+  authoring: Authoring = "rest",
+  /** For an MCP update: the stored settings, so secrets bound to a setting that changes are dropped. */
+  previousSettings?: ConfigObject,
 ): Promise<StoredConfigColumns> {
   if (!splitsConfig(def)) {
+    // Not reachable over MCP: requireMcpAuthorable refuses a schemaless driver first.
     await validateDriverConfig(env, def, config);
     return blobColumns(config, env.config.masterKey);
   }
   let write: ReturnType<typeof applyConfigWrite>;
   try {
+    if (authoring === "mcp") {
+      refuseSecretValues(def, config);
+      // An agent cannot see a secret, but it could send one somewhere else by
+      // changing where it goes: a secret bound to a changed setting is dropped
+      // and has to be entered again through a secret form.
+      if (stored && previousSettings) stored = dropMovedSecrets(def, previousSettings, config, stored).secrets;
+    }
     write = applyConfigWrite(def, config, stored);
   } catch (err) {
     if (err instanceof UnsplittableConfig) throw invalid(`invalid config for driver "${def.name}": ${err.message}`);
     throw err;
   }
-  await validateDriverConfig(env, def, write.merged, write.kept);
+  if (authoring === "mcp") await validatePendingConfig(env, def, write.merged, write.kept);
+  else await validateDriverConfig(env, def, write.merged, write.kept);
   return splitColumns(write, env.config.masterKey);
+}
+
+/**
+ * Which surface a write comes from. "rest": the whole config, secrets and all,
+ * checked whole. "mcp": settings only; a secret value in them is refused and
+ * secrets not set yet are allowed, to be entered through a secret request.
+ */
+export type Authoring = "rest" | "mcp";
+
+/** Over MCP a secret never travels with the settings: refuse any that does. */
+function refuseSecretValues(def: DriverDefinition, settings: unknown): void {
+  const found = secretValuesIn(def, settings);
+  if (found.length === 0) return;
+  throw invalid(
+    `settings.${found[0]} holds a secret value (driver "${def.name}" marks ${found.length === 1 ? "it" : `${found.join(", ")}`} secret). ` +
+      "Secrets are never sent through MCP: leave them out (null removes a stored one) and call secret_request, " +
+      "which gives the user a one-off form that sends them straight to the server.",
+  );
+}
+
+/**
+ * The MCP authoring rule for a driver: it must publish a config schema, since
+ * the schema is what tells settings from secrets. A driver without one keeps
+ * its services' config as one sealed secret, authored over REST only.
+ */
+function requireMcpAuthorable(def: DriverDefinition): void {
+  if (def.configSchema !== undefined) return;
+  throw invalid(
+    `driver "${def.name}" publishes no config schema, so its services keep their whole config as one sealed ` +
+      "secret and can only be authored over REST",
+  );
+}
+
+/**
+ * A run writes to its bundle with the service's authority (see the bundle
+ * writer), so whoever creates or changes a service vouches for those writes
+ * and must hold the matching capability on the bundle themselves.
+ */
+export async function requireWriteCapabilities(
+  db: Db,
+  userId: string,
+  def: DriverDefinition,
+  ctx: Awaited<ReturnType<typeof getBundleContext>>,
+): Promise<void> {
+  const needs: Array<["items" | "files", "edit_items" | "edit_files"]> = [
+    ["items", "edit_items"],
+    ["files", "edit_files"],
+  ];
+  for (const [surface, capability] of needs) {
+    if (def.writes?.[surface] !== true) continue;
+    if (await hasBundleCapability(db, userId, capability, ctx)) continue;
+    throw forbidden(
+      `driver "${def.name}" writes ${surface} into the bundle when it runs, so authoring its services needs ` +
+        `${capability} on the bundle as well as edit_services`,
+    );
+  }
 }
 
 /**
@@ -470,7 +628,12 @@ function configView(
 
 function toAuthorInfo(env: ServiceEnv, row: ServiceRow): ServiceAuthorInfo {
   const def = env.registry.has(row.driver) ? env.registry.get(row.driver) : undefined;
-  return { ...toInfo(env.registry, row), ...configView(def, row, env.config.masterKey) };
+  return {
+    ...toInfo(env.registry, row),
+    params: JSON.parse(row.params) as ServiceParamSpec[],
+    pins: JSON.parse(row.pins) as ServicePins,
+    ...configView(def, row, env.config.masterKey),
+  };
 }
 
 /** Agent-visible listing: never includes the config. */
@@ -526,9 +689,46 @@ export async function listServices(
   return rows.map((row) => toAuthorInfo(env, row));
 }
 
+/**
+ * Resolves a service reference within one bundle, id first, then name (the
+ * order runs use, so the two stay interchangeable). Returns the row's id.
+ */
+export async function resolveServiceId(db: Db, bundleId: string, ref: string): Promise<string> {
+  const wanted = ref.trim();
+  if (!wanted) throw invalid("no service specified: pass the service name or id");
+  const { services } = db.tables;
+  for (const column of [services.id, services.name]) {
+    const rows = await db.client
+      .select({ id: services.id })
+      .from(services)
+      .where(and(eq(services.bundleId, bundleId), eq(column, wanted)));
+    if (rows[0]) return rows[0].id;
+  }
+  throw notFound("service", wanted);
+}
+
+/**
+ * One service of a bundle, by name or id. A caller holding `edit_services`
+ * there gets the author's view (params, pins, settings and set secret paths,
+ * never a secret value); anyone else with read access gets the listing view,
+ * as `listServices` gives them.
+ */
+export async function getService(
+  env: ServiceEnv,
+  userId: string,
+  bundleId: string,
+  ref: string,
+): Promise<ServiceInfo | ServiceAuthorInfo> {
+  const ctx = await getBundleContext(env.db, bundleId);
+  await requireBundleReadAccess(env.db, userId, ctx);
+  const row = await getServiceRow(env.db, await resolveServiceId(env.db, bundleId, ref));
+  if (!(await hasBundleCapability(env.db, userId, "edit_services", ctx))) return toInfo(env.registry, row);
+  return toAuthorInfo(env, row);
+}
+
 // ---- Authoring --------------------------------------------------------------
 
-async function getServiceRow(db: Db, serviceId: string) {
+export async function getServiceRow(db: Db, serviceId: string) {
   const { services } = db.tables;
   const rows = await db.client.select().from(services).where(eq(services.id, serviceId));
   if (rows.length === 0) throw notFound("service", serviceId);
@@ -574,10 +774,13 @@ export async function createService(
     pins?: ServicePins;
     /** Which of the driver's actions this service exposes; absent or null = all. */
     actions?: string[] | null;
+    /** The whole config over REST; the settings only over MCP. */
     config: unknown;
   },
+  opts: { authoring?: Authoring } = {},
 ): Promise<ServiceAuthorInfo> {
   const { db } = env;
+  const authoring = opts.authoring ?? "rest";
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_services", ctx);
 
@@ -585,13 +788,15 @@ export async function createService(
   if (!name) throw invalid("service name is required");
   const driver = input.driver?.trim() || DEFAULT_DRIVER;
   const def = requireDriver(env.registry, driver);
+  if (authoring === "mcp") requireMcpAuthorable(def);
+  await requireWriteCapabilities(db, userId, def, ctx);
   const params = input.params ?? [];
   validateParamSpecs(params);
   const pins = (input.pins ?? {}) as Record<string, unknown>;
   validatePins(pins, declaredNames(def, params));
   if (input.actions != null) validateActions(def, input.actions);
   const actions = input.actions == null ? null : JSON.stringify(input.actions);
-  const columns = await prepareConfigWrite(env, def, input.config, null);
+  const columns = await prepareConfigWrite(env, def, input.config, null, authoring);
   await assertNameFree(db, bundleId, name);
 
   const { services } = db.tables;
@@ -617,6 +822,8 @@ export async function createService(
     description,
     driver,
     actions: effectiveActions(def, params, pins as ServicePins, actions),
+    params,
+    pins: pins as ServicePins,
     ...configView(def, columns, env.config.masterKey),
   };
 }
@@ -641,8 +848,12 @@ export async function updateService(
     /** "replace" makes a config write replace the secrets too, as every write
      *  did before the split; the legacy hook surface keeps that contract. */
     secrets?: "merge" | "replace";
+    /** "mcp": `config` holds settings only (see `Authoring`), and a service
+     *  whose config is one sealed secret cannot be changed at all. */
+    authoring?: Authoring;
   } = {},
 ): Promise<ServiceAuthorInfo> {
+  const authoring = opts.authoring ?? "rest";
   const { db } = env;
   const row = await getServiceRow(db, serviceId);
   const ctx = await getBundleContext(db, row.bundleId);
@@ -660,6 +871,17 @@ export async function updateService(
         `only its name and description can be changed`,
     );
   }
+  if (authoring === "mcp") {
+    if (!def) throw invalid(`service "${row.name}" needs the "${row.driver}" driver, which is not installed on this server`);
+    requireMcpAuthorable(def);
+    if (!isSplit(row)) {
+      throw invalid(
+        `service "${row.name}" keeps its config as one sealed secret (it could not be split into settings and ` +
+          "secrets), so it can only be changed over REST",
+      );
+    }
+  }
+  if (def) await requireWriteCapabilities(db, userId, def, ctx);
 
   const name = patch.name !== undefined ? patch.name.trim() : undefined;
   if (name !== undefined && !name) throw invalid("service name cannot be empty");
@@ -681,11 +903,23 @@ export async function updateService(
           def!,
           patch.config,
           opts.secrets === "replace" ? null : storedSecrets(env, def!, row),
+          authoring,
+          authoring === "mcp" ? readParts(row, env.config.masterKey).settings : undefined,
         )
       : undefined;
   if (name !== undefined) await assertNameFree(db, row.bundleId, name, serviceId);
 
-  const { services } = db.tables;
+  const { services, secretRequests } = db.tables;
+  if (columns) {
+    // A config change closes the service's open secret forms: a form was
+    // handed to a human for the service as it was, and must not deliver a
+    // secret to wherever the change points it. Closed before the write, so a
+    // submission that reads the new config finds its form gone (it checks
+    // again after reading; see secretRequests.ts).
+    await db.client
+      .delete(secretRequests)
+      .where(and(eq(secretRequests.serviceId, serviceId), isNull(secretRequests.usedAt)));
+  }
   await db.client
     .update(services)
     .set({
@@ -708,6 +942,8 @@ export async function updateService(
     description: patch.description ?? row.description,
     driver: row.driver,
     actions: effectiveActions(def, params, pins as ServicePins, actions),
+    params,
+    pins: pins as ServicePins,
     ...configView(def, columns ?? row, env.config.masterKey),
   };
 }
@@ -903,8 +1139,9 @@ export interface ScopedBundleWriter extends BundleWriter {
  * Validation is not relaxed for drivers: `createItemsUnchecked`,
  * `updateItemsUnchecked`, and `writeFileUnchecked` run every check the gated
  * paths run. Only the edit capability check is absent, because a run uses
- * service authority — the operator who authored the service over privileged
- * REST is the grant.
+ * service authority: whoever created or last changed the service held
+ * `edit_items` / `edit_files` for each surface its driver declares (see
+ * `requireWriteCapabilities`), and that is the grant.
  */
 export function createBundleWriter(
   db: Db,

@@ -84,6 +84,15 @@ describe("built-in driver config schemas", () => {
     expect(validate({ ...base, pass: "p", from: "not an address" })).toBe(false);
   });
 
+  it("binds each built-in secret to the settings that decide where it goes", () => {
+    const http = builtIns.find((d) => d.name === "http")!;
+    expect(http.configSchema!.secrets[0]!.boundTo).toEqual(["url"]);
+    const mail = builtIns.find((d) => d.name === "mail")!;
+    const bound = Object.fromEntries(mail.configSchema!.secrets.map((s) => [s.path, s.boundTo]));
+    expect(bound.pass).toEqual(["imap", "smtp", "allow_plaintext_auth"]);
+    expect(bound["oauth2.refresh_token"]).toContain("oauth2.token_url");
+  });
+
   it("http marks every header value", () => {
     const http = builtIns.find((d) => d.name === "http")!.configSchema!;
     expect(http.secrets.map((s) => s.path)).toEqual(["headers.*"]);
@@ -188,6 +197,27 @@ describe("configSchema on the driver contract", () => {
       "a non-string description",
       { jsonSchema: goodSchema.jsonSchema, secrets: [{ path: "token", label: "T", description: 3 }] },
       /secrets\[0\]\.description must be a string/,
+    ],
+    [
+      "a boundTo that is not an array",
+      { jsonSchema: goodSchema.jsonSchema, secrets: [{ path: "token", label: "T", boundTo: "auth" }] },
+      /secrets\[0\]\.boundTo must be an array/,
+    ],
+    [
+      "a boundTo the schema does not declare",
+      { jsonSchema: goodSchema.jsonSchema, secrets: [{ path: "token", label: "T", boundTo: ["url"] }] },
+      /boundTo "url" does not name a field/,
+    ],
+    [
+      "a boundTo that is itself a secret",
+      {
+        jsonSchema: goodSchema.jsonSchema,
+        secrets: [
+          { path: "token", label: "T", boundTo: ["auth.key"] },
+          { path: "auth.key", label: "K" },
+        ],
+      },
+      /boundTo "auth\.key" is a secret path/,
     ],
   ];
   for (const [name, configSchema, message] of bad) {

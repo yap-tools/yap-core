@@ -33,6 +33,7 @@ import { decryptSecret, encryptSecret } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import type { YapLogger } from "../logger.js";
 import type { DriverRegistry } from "./drivers/registry.js";
+import type { DriverSecretField } from "./drivers/schema.js";
 import type { DriverDefinition } from "./drivers/types.js";
 
 export type ConfigObject = Record<string, unknown>;
@@ -233,6 +234,157 @@ export function applyConfigWrite(
   }
   const kept = secretsSet(def, secrets).filter((path) => !touched.has(path));
   return { settings, secrets, merged: mergeConfig(settings, secrets), kept };
+}
+
+// ---- Secrets that do not come with the config --------------------------------
+
+/**
+ * The secret paths that hold a value in `config`, with map keys spelled out.
+ * An author writing over MCP sends settings only; any of these in what they
+ * sent means a secret was about to pass through the agent, and the write is
+ * refused. Throws `UnsplittableConfig` like `splitConfig`.
+ */
+export function secretValuesIn(def: DriverDefinition, config: unknown): string[] {
+  if (!isPlainObject(config)) throw new UnsplittableConfig("config must be a JSON object");
+  return leavesOf(config, def)
+    .leaves.filter((leaf) => leaf.value !== null && leaf.value !== undefined)
+    .map((leaf) => leaf.path.join("."))
+    .sort();
+}
+
+/** The schema's secret field a concrete path falls under (`headers.authorization`
+ * under `headers.*`), or undefined when the path is not a secret path. */
+export function secretFieldFor(def: DriverDefinition, path: string): DriverSecretField | undefined {
+  const segments = path.split(".");
+  if (segments.some((s) => !/^[A-Za-z0-9_-]+$/.test(s))) return undefined;
+  return def.configSchema?.secrets.find((field) => {
+    const pattern = field.path.split(".");
+    return pattern.length === segments.length && pattern.every((p, i) => p === "*" || p === segments[i]);
+  });
+}
+
+/** The value at a dot path of plain objects, or undefined. */
+function valueAt(node: ConfigObject, path: string[]): unknown {
+  let at: unknown = node;
+  for (const key of path) {
+    if (!isPlainObject(at)) return undefined;
+    at = own(at, key);
+  }
+  return at;
+}
+
+/**
+ * The stored secrets an MCP settings write must drop because a setting they
+ * are bound to (`boundTo` in the driver's schema) changes: the url an http
+ * header goes to, the servers a mail password goes to. Compares the stored
+ * settings with the settings in `config` (the write, secrets left out), and
+ * returns the secrets with those removed plus the paths removed. A secret
+ * whose field declares no binding is kept.
+ */
+export function dropMovedSecrets(
+  def: DriverDefinition,
+  previousSettings: ConfigObject,
+  config: unknown,
+  secrets: ConfigObject,
+): { secrets: ConfigObject; dropped: string[] } {
+  if (!isPlainObject(config)) throw new UnsplittableConfig("config must be a JSON object");
+  const nextSettings = leavesOf(config, def).rest;
+  const out = clone(secrets);
+  const dropped: string[] = [];
+  for (const leaf of leavesOf(secrets, def).leaves) {
+    const field = secretFieldFor(def, leaf.path.join("."));
+    const moved = (field?.boundTo ?? []).some((bound) => {
+      const path = bound.split(".");
+      return !isDeepStrictEqual(valueAt(previousSettings, path), valueAt(nextSettings, path));
+    });
+    if (moved) {
+      deleteAt(out, leaf.path);
+      dropped.push(leaf.path.join("."));
+    }
+  }
+  return { secrets: out, dropped: dropped.sort() };
+}
+
+/** Stands in for a secret nobody has entered yet, while a config is checked. */
+export const PENDING_SECRET = "<secret not set yet>";
+
+/**
+ * The secrets a config still lacks: every secret path without `*` that holds
+ * no value, inside an object the config has (the root always counts). A map
+ * path (`headers.*`) names no key, so it never counts as missing.
+ */
+function missingSecrets(def: DriverDefinition, config: ConfigObject): string[][] {
+  const out: string[][] = [];
+  for (const segments of secretPaths(def)) {
+    if (segments.includes("*")) continue;
+    const parent = segments.slice(0, -1);
+    if (!objectAt(config, parent)) continue;
+    let node: unknown = config;
+    for (const key of parent) node = own(node as ConfigObject, key);
+    const value = own(node as ConfigObject, segments[segments.length - 1]!);
+    if (value === null || value === undefined) out.push(segments);
+  }
+  return out;
+}
+
+/**
+ * The configs to check a write against when some of its secrets are not set
+ * yet, because they are entered later through a secret request. Each candidate
+ * fills a different set of the missing secrets with `PENDING_SECRET`:
+ *
+ * 1. only those inside a nested object the author included (`oauth2.*` when
+ *    an `oauth2` block was sent), and
+ * 2. every missing one, the top-level ones too (`pass`).
+ *
+ * The write is valid when the driver accepts either: the config can be made
+ * whole by entering secrets. Two candidates and not one because a driver may
+ * take one of several credentials (mail: `pass` or an `oauth2` block), and
+ * filling both would break its own "exactly one" rule. `pending` lists the
+ * missing paths; empty means the config is already whole and is checked as it
+ * is, online check included.
+ */
+export function pendingSecretCandidates(
+  def: DriverDefinition,
+  config: ConfigObject,
+): { pending: string[]; candidates: Array<{ config: ConfigObject; filled: string[] }> } {
+  const missing = missingSecrets(def, config);
+  if (missing.length === 0) return { pending: [], candidates: [{ config, filled: [] }] };
+  const fill = (paths: string[][]) => {
+    const out = clone(config);
+    for (const path of paths) setAt(out, path, PENDING_SECRET);
+    return { config: out, filled: paths.map((p) => p.join(".")) };
+  };
+  const nested = missing.filter((path) => path.length > 1);
+  const candidates = [fill(nested), fill(missing)].filter(
+    (c, i, all) => i === 0 || c.filled.length !== all[0]!.filled.length,
+  );
+  return { pending: missing.map((p) => p.join(".")).sort(), candidates };
+}
+
+/**
+ * What a secret form's submission does to a split service: each value is set
+ * at its path in the secrets, and the objects that hold it are added to the
+ * settings where they are missing (as empty objects), so the stored settings
+ * keep the shape a split leaves and an author who sends them back keeps the
+ * secret. Every other secret and setting stays as it was.
+ */
+export function setSecrets(
+  settings: ConfigObject,
+  secrets: ConfigObject,
+  values: Record<string, string>,
+): { settings: ConfigObject; secrets: ConfigObject; merged: ConfigObject } {
+  const nextSettings = clone(settings);
+  const nextSecrets = clone(secrets);
+  for (const [path, value] of Object.entries(values)) {
+    const segments = path.split(".");
+    let node = nextSettings;
+    for (const key of segments.slice(0, -1)) {
+      if (!isPlainObject(own(node, key))) setOwn(node, key, {});
+      node = node[key] as ConfigObject;
+    }
+    setAt(nextSecrets, segments, value);
+  }
+  return { settings: nextSettings, secrets: nextSecrets, merged: mergeConfig(nextSettings, nextSecrets) };
 }
 
 // ---- Stored columns --------------------------------------------------------

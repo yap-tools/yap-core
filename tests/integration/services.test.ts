@@ -1,5 +1,5 @@
 /**
- * Services over REST: REST-only authoring, an encrypted config that never
+ * Services over REST: authoring with the whole config, an encrypted config that never
  * leaves the server, allowlisted-parameter runs through
  * `POST /v1/services/:id/run`, the SSRF guard at authoring and at run time,
  * the run budget, the run-reading routes, and the capability asymmetries.
@@ -109,7 +109,7 @@ describeEachAdapter("services", (adapter) => {
     await new Promise<void>((resolve, reject) => target.close((e) => (e ? reject(e) : resolve())));
   });
 
-  describe("authoring (REST-only, edit_services)", () => {
+  describe("authoring over REST (edit_services)", () => {
     let notifyId: string;
 
     it("creates a service whose secrets are never returned by any surface", async () => {
@@ -160,18 +160,26 @@ describeEachAdapter("services", (adapter) => {
       expect(row.configEncrypted).not.toContain("127.0.0.1");
     });
 
-    it("service authoring is absent from the MCP surface", async () => {
+    it("MCP authoring refuses the config REST takes, because it carries a secret", async () => {
       const tools = await aliceMcp.client.listTools();
       const names = tools.tools.map((t) => t.name);
       expect(names.some((n) => /service/.test(n))).toBe(false); // no top-level service tools
-      for (const tool of ["create_service", "update_service", "delete_service"]) {
-        const result = await aliceMcp.call("call", {
-          space_id: spaceId,
-          calls: [{ bundle_id: bundleId, tool, params: {} }],
-        });
-        expect(result.results[0].ok).toBe(false);
-        expect(result.results[0].error.message).toContain("unknown tool");
-      }
+      const result = await aliceMcp.call("call", {
+        space_id: spaceId,
+        calls: [
+          {
+            bundle_id: bundleId,
+            tool: "create_service",
+            params: {
+              name: "notify-mcp",
+              settings: { url: "https://api.example.com/x", method: "POST", headers: { authorization: "Bearer t" } },
+            },
+          },
+        ],
+      });
+      expect(result.results[0].ok).toBe(false);
+      expect(result.results[0].error.message).toContain("settings.headers.authorization holds a secret value");
+      expect(result.results[0].error.message).toContain("secret_request");
     });
 
     it("requires edit_services to author", async () => {
