@@ -365,13 +365,15 @@ yap api POST /v1/keys '{"name": "reader", "scope": {"role": "read-only"}}'
 A scope limits what a key can do, never where: `spaces` and `bundles` are
 refused. To limit where a machine acts, give it its own user with grants only
 where it needs them. A scoped key, at any role, cannot manage keys or
-connected apps, and the pages where a person decides for themself (the OAuth
+connected apps. The pages where a person decides for themself (the OAuth
 consent screen, connected apps, a service's secret form and its approve page)
-refuse it, and a service it writes waits for a person even over REST, where
-a full key's write counts as its author's approval. So an agent holding a
-scoped key can write a service but never approve it. `create_spaces` needs a scoped `admin` key. Key listings show each
-key's `scope` (`null` for a full key), and `whoami` reports the calling key's
-as `keyScope`.
+refuse it, and a service it writes waits for a person even over REST, where a
+full key's write counts as its author's approval. So an agent holding a
+scoped key can write a service but never approve it. Creating spaces needs a
+scoped `admin` key. Key listings show each key's `scope` (`null` for a full
+key), and `whoami` reports the calling key's as `keyScope`. A schedule made
+with a scoped key runs as its owner and outlives the key; revoking the key
+does not stop it.
 
 ### Reading your own permissions
 
@@ -510,10 +512,10 @@ be the instance's externally reachable origin (https except on loopback).
   there in what it does or where data goes, until someone approves it.
   `approval_request` gives them a one-off page (widget or signed link) that
   shows the service as the server has it, where data goes first, and
-  approves it once they log in with a user access key and hold
-  `edit_services`; the link alone, an OAuth token and the sysadmin key are
-  not enough. Services written over REST, and every service from before,
-  count as approved, and listings show `approved`. Entering a secret
+  approves it once they log in with a full user access key and hold
+  `edit_services`; the link alone, an OAuth token, a scoped key and the
+  sysadmin key are not enough. Services written over REST with a full key,
+  and every service from before, count as approved, and listings show `approved`. Entering a secret
   through the form keeps the approval. Details, and the known limit for an
   agent that holds a raw access key, in
   [docs/service-approval.md](docs/service-approval.md).

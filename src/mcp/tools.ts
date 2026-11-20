@@ -598,7 +598,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "space_create",
     description:
-      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces; whoami shows that). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
+      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces, and a scoped access key only at role admin; whoami shows both). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
     parameters: z.object({
       name: z.string(),
       description: z.string().optional(),

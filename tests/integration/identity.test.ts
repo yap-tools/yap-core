@@ -206,6 +206,7 @@ describeEachAdapter("identity & keys", (adapter) => {
           expect(res.status).toBe(403);
           expect(res.body.error.code).toBe("forbidden");
           expect(res.body.error.message).toContain("scoped");
+          expect(res.body.error.details.decidedBy).toBe("key_scope");
         }
         // Still alive: none of those revoked it.
         expect((await as.get("/v1/whoami")).status).toBe(200);

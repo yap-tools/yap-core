@@ -97,7 +97,9 @@ export function assertCanManageCredentials(): void {
   const auth = currentScope();
   if (!auth) return;
   if (auth.source === "key") {
-    throw forbidden("this access key is scoped: managing keys and connected apps needs an unscoped key or an OAuth login");
+    throw forbidden("this access key is scoped: managing keys and connected apps needs an unscoped key or an admin OAuth login", {
+      decidedBy: "key_scope",
+    });
   }
   if (auth.scope.role !== "admin") {
     throw forbidden(
@@ -111,7 +113,8 @@ export function assertCanManageCredentials(): void {
 export function assertAccountWrite(): void {
   const auth = currentScope();
   if (auth && auth.scope.role === "read-only") {
-    throw forbidden(auth.source === "key" ? "this access key is read-only" : "this authorization is read-only");
+    if (auth.source === "key") throw forbidden("this access key is read-only", { decidedBy: "key_scope" });
+    throw forbidden("this authorization is read-only");
   }
 }
 

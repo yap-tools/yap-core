@@ -1036,12 +1036,12 @@ export async function updateService(
       ...(approval ?? {}),
       updatedAt: nowIso(),
     })
-    // Over MCP the approval decision above was made against the row as read,
-    // so the write lands only on that row: a write in between (another
-    // update, an approval) fails this one rather than letting it keep an
-    // approval given to something else.
+    // Over MCP, and for a scoped key, the approval decision above was made
+    // against the row as read, so the write lands only on that row: a write
+    // in between (another update, an approval) fails this one rather than
+    // letting it keep an approval given to something else.
     .where(
-      authoring === "mcp"
+      authoring === "mcp" || scopedKey
         ? and(eq(services.id, serviceId), eq(services.updatedAt, row.updatedAt), eq(services.configEncrypted, row.configEncrypted))
         : eq(services.id, serviceId),
     )
