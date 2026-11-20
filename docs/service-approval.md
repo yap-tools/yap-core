@@ -16,10 +16,12 @@ Two columns on the service: `approved_at` (when a person last approved it as it 
 | A secret entered through a secret form (which needs the person's login) | unchanged |
 | Create over REST (`POST /v1/bundles/:id/services`) | approved, by the author |
 | Update over REST that sends `config` | approved, by the author |
+| Create, or update that sends `config`, over REST with a scoped access key | waiting |
+| Update over REST with a scoped access key that changes params, pins or actions | waiting again (renaming or re-describing keeps it) |
 | Update over REST without `config` | unchanged |
 | Services that existed before migration 0015 | approved (backfilled with their `updated_at`) |
 
-A REST author sends the whole config, secrets included, so their write is their approval. The MCP comparison is of what an approval covers: params, pins, the allowlist, settings, and the list of set secret paths. Sending back exactly what `get_service` returned changes none of them. A secret dropped because the setting it is bound to moved (`boundTo`) changes the list, so that write also puts the service back to waiting.
+A REST author sends the whole config, secrets included, so their write is their approval. A scoped access key is a machine standing in for its user, never the user in person, so its REST write is held to the MCP rule: a create, any write of the config, or a change to params, pins or actions waits for a person. The MCP comparison is of what an approval covers: params, pins, the allowlist, settings, and the list of set secret paths. Sending back exactly what `get_service` returned changes none of them. A secret dropped because the setting it is bound to moved (`boundTo`) changes the list, so that write also puts the service back to waiting.
 
 Listings say where a service stands: `approved` (true or false) in every service listing, including `load_bundle` and `get_service` for a runner, and `approvedAt` / `approvedBy` in the author's view (REST listing to `edit_services` holders, MCP `get_service`).
 
@@ -77,7 +79,7 @@ Both are public routes gated by the page's own signed token, sent in the body so
 
 ### Who may approve
 
-- **A login, not the link.** Approve needs a user access key in the body, checked by `pageLogin` (`src/core/keys.ts`), the same login the OAuth consent screen and the connected-apps page use. The sysadmin key is refused (an operator credential, not a person). An OAuth access token is refused, so an agent connected over OAuth, which holds a token and never the key, cannot approve its own service.
+- **A login, not the link.** Approve needs a user access key in the body, checked by `pageLogin` (`src/core/keys.ts`), the same login the OAuth consent screen and the connected-apps page use. The sysadmin key is refused (an operator credential, not a person). An OAuth access token is refused, so an agent connected over OAuth, which holds a token and never the key, cannot approve its own service. A scoped access key is refused at any role, admin included ("This key is limited. Log in with a full key."), so an agent given a scoped key cannot approve its own service either.
 - **The right person.** The key's user must hold `edit_services` on the bundle, plus `edit_items` / `edit_files` for a driver that writes into it, as an author must: approving is vouching for the service.
 - **Refusals leave the page open.** A missing or wrong key (401), a user without the capability (403) or a stale page (409) change nothing, and the same page can be used again.
 
@@ -85,7 +87,7 @@ Core has no delegated login of its own; where a client logs a person in some oth
 
 ### Known limit
 
-An agent that holds a raw access key itself (a key pasted into its MCP configuration, a script that runs with one) can open the page and approve with that key, and enter secrets on a form with it. That is discouraged, not prevented. Passkeys and a separate approval key were considered and not taken. The MCP help says this plainly.
+An agent that holds a full (unscoped) access key itself (a key pasted into its MCP configuration, a script that runs with one) can open the page and approve with that key, and enter secrets on a form with it. That is discouraged, not prevented. The way to prevent it is to give the agent a scoped key instead (`POST /v1/keys` with `{"scope": {"role": ...}}`): even a scoped `admin` key, which masks no capability, is refused here and on the secret form. Passkeys and a separate approval key were considered and not taken. The MCP help says this plainly.
 
 ### Approving what was shown
 

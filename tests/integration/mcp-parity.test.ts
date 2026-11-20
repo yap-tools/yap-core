@@ -84,6 +84,64 @@ describeEachAdapter("MCP management parity", (adapter) => {
     bundleId = (await aliceRest.post(`/v1/spaces/${spaceId}/bundles`, { name: "b" })).body.id;
   }
 
+  it("a scoped access key is clamped over MCP exactly as over REST, and whoami says so", async () => {
+    await setup();
+    const sessions: McpTestClient[] = [];
+    const scoped = async (role: string) => {
+      const minted = await aliceRest.post("/v1/keys", { name: `mcp-${role}`, scope: { role } });
+      expect(minted.status, JSON.stringify(minted.body)).toBe(201);
+      const session = await connectMcp(app.baseUrl, minted.body.key);
+      sessions.push(session);
+      return session;
+    };
+    try {
+      await aliceRest.post(`/v1/bundles/${bundleId}/item-types`, {
+        name: "note",
+        properties: [{ name: "title", datatype: "text", required: true }],
+      });
+      await aliceRest.post(`/v1/bundles/${bundleId}/items`, { itemType: "note", items: [{ title: "seed" }] });
+
+      const reader = await scoped("read-only");
+      expect((await reader.call("whoami")).keyScope).toEqual({ role: "read-only" });
+      expect("keyScope" in (await alice.call("whoami"))).toBe(false);
+      const loaded = (await reader.call("load_bundle", { bundle_ids: [bundleId] })).bundles[0];
+      expect(loaded.role).toEqual(["read_files", "read_items"]);
+      const read = await one(reader, spaceId, { bundle_id: bundleId, tool: "query_items", params: { item_type: "note" } });
+      expect(read.ok, JSON.stringify(read)).toBe(true);
+      const writes = [
+        { tool: "create_items", params: { item_type: "note", items: [{ title: "no" }] } },
+        { tool: "create_doc", params: { name: "no" } },
+        { tool: "update_bundle", params: { name: "no" } },
+        { tool: "create_service", params: { name: "no", settings: { url: "https://example.com/x", method: "GET" } } },
+        { tool: "grant_role", params: { user_id: bobId, capabilities: ["read_items"], effect: "allow" } },
+      ];
+      for (const write of writes) {
+        const res = await one(reader, spaceId, { bundle_id: bundleId, ...write });
+        expect(res.ok, write.tool).toBe(false);
+        expect(res.error.code, write.tool).toBe("forbidden");
+      }
+      await expect(reader.call("space_create", { name: "no" })).rejects.toThrow(/forbidden/);
+      await expect(reader.call("bundle_create", { space_id: spaceId, name: "no" })).rejects.toThrow(/forbidden/);
+      await expect(reader.call("create_user_doc", { name: "no", content: "x" })).rejects.toThrow(/forbidden/);
+
+      const member = await scoped("member");
+      const created = await one(member, spaceId, { bundle_id: bundleId, tool: "create_items", params: { item_type: "note", items: [{ title: "yes" }] } });
+      expect(created.ok, JSON.stringify(created)).toBe(true);
+      const grant = await one(member, spaceId, { bundle_id: bundleId, tool: "grant_role", params: { user_id: bobId, capabilities: ["read_items"], effect: "allow" } });
+      expect(grant.ok).toBe(false);
+      expect(grant.error.code).toBe("forbidden");
+      await expect(member.call("space_create", { name: "no" })).rejects.toThrow(/forbidden/);
+
+      const admin = await scoped("admin");
+      expect((await admin.call("space_create", { name: "Scoped admin's" })).name).toBe("Scoped admin's");
+    } finally {
+      for (const session of sessions) await session.close();
+      await alice.close();
+      await bob.close();
+      await app.stop();
+    }
+  });
+
   it("manage_space: owner can update/`delete the space over MCP; a non-member cannot", async () => {
     await setup();
     try {

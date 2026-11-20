@@ -98,6 +98,7 @@ export async function cmdResource(target: Target, group: string, argv: string[])
       desc: { type: "boolean" },
       limit: { type: "string" },
       description: { type: "string" },
+      role: { type: "string" },
     },
     allowPositionals: true,
   });
@@ -115,9 +116,15 @@ export async function cmdResource(target: Target, group: string, argv: string[])
       return console.log("deleted");
 
     case "keys list":
-      return out(await call(target, "GET", "/v1/keys", target.userKey()), ["id", "name", "issuer", "createdAt"]);
+      return out(await call(target, "GET", "/v1/keys", target.userKey()), ["id", "name", "issuer", "scope.role", "createdAt"]);
     case "keys create":
-      return printJson(await call(target, "POST", "/v1/keys", target.userKey(), { name: need(args[0], "key name") }));
+      // --role mints a scoped key: that role's mask over the user's authority, fixed for the key's life.
+      return printJson(
+        await call(target, "POST", "/v1/keys", target.userKey(), {
+          name: need(args[0], "key name"),
+          ...(values.role ? { scope: { role: values.role } } : {}),
+        }),
+      );
     case "keys rotate":
       return printJson(await call(target, "POST", `/v1/keys/${need(args[0], "key id")}/rotate`, target.userKey()));
     case "keys delete":

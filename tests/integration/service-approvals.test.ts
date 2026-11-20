@@ -253,6 +253,76 @@ describeEachAdapter("service approvals", (adapter) => {
       expect((await run("oauth-written", oauthMcp)).ok).toBe(false);
     });
 
+    it("an agent holding a scoped admin key can write a service and ask, but not approve it or enter its secrets", async () => {
+      // Scoped admin masks no capability, but a scoped key is never the person.
+      const minted = await alice.post("/v1/keys", { name: "agent", scope: { role: "admin" } });
+      expect(minted.status, JSON.stringify(minted.body)).toBe(201);
+      const scopedKey = minted.body.key as string;
+      const agent = await connectMcp(app.baseUrl, scopedKey);
+      try {
+        const res = await one(agent, "create_service", { name: "scoped-written", params, pins: { slot: "k" }, settings: settings() });
+        expect(res.ok, JSON.stringify(res)).toBe(true);
+        expect(res.result.approved).toBe(false);
+
+        const secret = await one(agent, "secret_request", { id: "scoped-written", paths: ["headers.authorization"] });
+        expect(secret.ok, JSON.stringify(secret)).toBe(true);
+        const submit = await anon().post(`/v1/secret-requests/${secret.result.request_id}/submit`, {
+          token: secret._meta.data.token,
+          values: { "headers.authorization": HEADER_SECRET },
+          access_key: scopedKey,
+        });
+        expect(submit.status).toBe(401);
+        expect(submit.body.error.message).toBe("This key is limited. Log in with a full key.");
+
+        const req = await one(agent, "approval_request", { id: "scoped-written" });
+        expect(req.ok, JSON.stringify(req)).toBe(true);
+        const { request_id, token } = req._meta.data;
+        const view = await anon().post(`/v1/service-approvals/${request_id}/view`, { token });
+        const attempt = await anon().post(`/v1/service-approvals/${request_id}/decide`, {
+          token,
+          decision: "approve",
+          access_key: scopedKey,
+          fingerprint: view.body.fingerprint,
+        });
+        expect(attempt.status).toBe(401);
+        expect(attempt.body.error.message).toBe("This key is limited. Log in with a full key.");
+        expect((await run("scoped-written", agent)).ok).toBe(false);
+        // The page stays open for the person, whose full key approves it.
+        expect((await decide({ request_id, token, fingerprint: view.body.fingerprint }, { decision: "approve", access_key: aliceKey })).status).toBe(200);
+      } finally {
+        await agent.close();
+      }
+    });
+
+    it("a scoped key's REST write waits for a person, where a full key's write is its approval", async () => {
+      const scoped = apiClient(app.baseUrl, (await alice.post("/v1/keys", { name: "rest-agent", scope: { role: "member" } })).body.key);
+      const config = { url: `http://127.0.0.1:${targetPort}/notify/{{slot}}`, method: "POST", headers: {}, body_json: { text: "{{text}}" } };
+      const created = await scoped.post(`/v1/bundles/${bundleId}/services`, { name: "rest-scoped", params, pins: { slot: "r" }, config });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      expect(created.body.approved).toBe(false);
+      expect((await run("rest-scoped")).ok).toBe(false);
+
+      await approve("rest-scoped");
+      const rewritten = await scoped.patch(`/v1/services/${created.body.id}`, { config });
+      expect(rewritten.status, JSON.stringify(rewritten.body)).toBe(200);
+      expect(rewritten.body.approved).toBe(false);
+
+      // Without a config, a change to what it does waits too; a rename does not.
+      await approve("rest-scoped");
+      expect((await scoped.patch(`/v1/services/${created.body.id}`, { description: "renamed" })).body.approved).toBe(true);
+      for (const change of [{ pins: { slot: "elsewhere" } }, { params: [...params, { name: "extra" }] }]) {
+        expect((await alice.patch(`/v1/services/${created.body.id}`, { config })).body.approved).toBe(true);
+        const res = await scoped.patch(`/v1/services/${created.body.id}`, change);
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        expect(res.body.approved, JSON.stringify(change)).toBe(false);
+      }
+
+      // The same write with Alice's full key is her approval.
+      const byAlice = await alice.patch(`/v1/services/${created.body.id}`, { config });
+      expect(byAlice.body.approved).toBe(true);
+      expect((await run("rest-scoped")).ok).toBe(true);
+    });
+
     it("reject leaves the service off and uses the page up", async () => {
       await create("rejected");
       const page = await openPage("rejected");

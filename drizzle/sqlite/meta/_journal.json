@@ -113,6 +113,13 @@
       "when": 1795166198887,
       "tag": "0015_service_approvals",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1795196840070,
+      "tag": "0016_key_scope",
+      "breakpoints": true
     }
   ]
 }

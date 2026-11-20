@@ -110,4 +110,78 @@ describeEachAdapter("REST role reporting", (adapter) => {
     expect((await api.get(`/v1/spaces/${workId}/bundles`)).body.data.every((b: any) => b.role.length > 0)).toBe(true);
     expect((await api.get(`/v1/spaces/${alicePersonalId}/bundles`)).body.data).toEqual([]);
   });
+
+  describe("a scoped access key", () => {
+    const scopedKey = async (role: string) => {
+      const res = await alice.post("/v1/keys", { name: `rest-${role}`, scope: { role } });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return apiClient(app.baseUrl, res.body.key);
+    };
+    let itemType: string;
+
+    beforeAll(async () => {
+      itemType = "note";
+      const created = await alice.post(`/v1/bundles/${sharedBundleId}/item-types`, {
+        name: itemType,
+        properties: [{ name: "title", datatype: "text", required: true }],
+      });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      await alice.post(`/v1/bundles/${sharedBundleId}/items`, { itemType, items: [{ title: "seed" }] });
+    });
+
+    const expectKeyScopeDenial = (res: { status: number; body: any }) => {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error.details.decidedBy).toBe("key_scope");
+    };
+
+    it("read-only: reports the masked role, reads, and is refused every write", async () => {
+      const api = await scopedKey("read-only");
+      expect((await api.get(`/v1/spaces/${alicePersonalId}`)).body.role).toEqual(["read_files", "read_items"]);
+      expect((await api.get(`/v1/bundles/${sharedBundleId}`)).body.role).toEqual(["read_files", "read_items"]);
+      const items = await api.get(`/v1/bundles/${sharedBundleId}/items?itemType=${itemType}`);
+      expect(items.status).toBe(200);
+      expect(items.body.data.length).toBeGreaterThan(0);
+      expect((await api.get(`/v1/bundles/${sharedBundleId}/files`)).status).toBe(200);
+
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/items`, { itemType, items: [{ title: "no" }] }));
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/docs`, { name: "no" }));
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/files/upload-request`, { name: "x.txt", mimeType: "text/plain" }));
+      expectKeyScopeDenial(await api.post(`/v1/spaces/${workId}/bundles`, { name: "no" }));
+      expectKeyScopeDenial(await api.patch(`/v1/bundles/${sharedBundleId}`, { name: "renamed" }));
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/grants`, { userId: bobId, capabilities: ["read_items"], effect: "allow" }));
+      expect((await api.post("/v1/spaces", { name: "no" })).status).toBe(403);
+      expect((await api.post("/v1/user-docs", { name: "no", content: "x" })).status).toBe(403);
+    });
+
+    // member is the same mask as an OAuth token's member role: every content
+    // capability (services included) plus create_bundles / edit_bundles.
+    it("member: edits content, services and bundles, never roles or spaces", async () => {
+      const api = await scopedKey("member");
+      const role = (await api.get(`/v1/bundles/${sharedBundleId}`)).body.role;
+      expect(role).toContain("edit_items");
+      expect(role).toContain("edit_bundles");
+      expect(role).toContain("edit_services");
+      expect(role).not.toContain("manage_roles");
+      expect(role).not.toContain("manage_space");
+
+      expect((await api.post(`/v1/bundles/${sharedBundleId}/items`, { itemType, items: [{ title: "yes" }] })).status).toBe(201);
+      expect((await api.post(`/v1/bundles/${sharedBundleId}/docs`, { name: "member-doc" })).status).toBe(201);
+      const bundle = await api.post(`/v1/spaces/${workId}/bundles`, { name: "member-made" });
+      expect(bundle.status).toBe(201);
+      expect((await api.patch(`/v1/bundles/${bundle.body.id}`, { name: "member-renamed" })).status).toBe(200);
+
+      expectKeyScopeDenial(await api.patch(`/v1/spaces/${workId}`, { name: "renamed" }));
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/grants`, { userId: bobId, capabilities: ["read_items"], effect: "allow" }));
+      const space = await api.post("/v1/spaces", { name: "no" });
+      expect(space.status).toBe(403);
+      expect(space.body.error.details.decidedBy).toBe("key_scope");
+    });
+
+    it("never widens the user: a scoped admin key on Bob's account still sees only his grants", async () => {
+      const minted = await bob.post("/v1/keys", { name: "bob-admin", scope: { role: "admin" } });
+      const api = apiClient(app.baseUrl, minted.body.key);
+      expect((await api.get(`/v1/bundles/${sharedBundleId}`)).body.role).toEqual(["edit_items", "read_items"]);
+      expect((await api.get(`/v1/bundles/${privateBundleId}`)).status).toBe(404);
+    });
+  });
 });

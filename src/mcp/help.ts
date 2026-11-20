@@ -69,11 +69,12 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   user its page (a service-approve widget, or origin_url): it shows where
   data goes, the actions, params, pins, settings and which secrets are set,
   and the person approves by logging in with one of their access keys while
-  holding edit_services. The link alone is not enough, and an OAuth token is
-  never accepted, so an agent connected over OAuth cannot approve its own
-  service. One known limit: an agent that holds a raw access key itself (a
-  key pasted into its MCP config, a script) could approve on the page with
-  it. That is discouraged, not prevented. Never ask the user for a key.
+  holding edit_services. The link alone is not enough, and an OAuth token or
+  a scoped access key is never accepted, so an agent connected over OAuth or
+  with a scoped key cannot approve its own service. One known limit: an
+  agent that holds a full access key itself (a key pasted into its MCP
+  config, a script) could approve on the page with it. That is discouraged,
+  not prevented. Never ask the user for a key.
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the

@@ -17,10 +17,11 @@
  *   actions with their parameters, pins, settings, and which secret paths are
  *   set (names only). In a host's frame the widget fetches that view itself,
  *   with the page's own signed token, from the instance it was served by.
- * - Approve needs a login: a user access key, through the same `pageLogin` the
- *   OAuth consent screen uses. The signed token alone is not enough, and an
- *   OAuth token is refused, so an agent connected over OAuth cannot approve.
- *   An agent holding a raw access key itself can; that is discouraged, not
+ * - Approve needs a login: an unscoped user access key, through the same
+ *   `pageLogin` the OAuth consent screen uses. The signed token alone is not
+ *   enough, and an OAuth token or a scoped key is refused, so an agent
+ *   connected over OAuth or given a scoped key cannot approve. An agent
+ *   holding a full access key itself can; that is discouraged, not
  *   prevented. The approver must hold `edit_services` on the bundle, and, for
  *   a driver that writes into it, `edit_items` / `edit_files`: approving is
  *   vouching for the service as an author does.
@@ -43,7 +44,7 @@ import { signToken } from "../crypto.js";
 import { getBundleContext, hasBundleCapability, requireBundleCapability } from "./bundles.js";
 import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
-import { pageLogin } from "./keys.js";
+import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "./keys.js";
 import { isSplit, readParts, secretsSet, type ConfigObject } from "./serviceConfig.js";
 import {
   allowedActions,
@@ -319,10 +320,11 @@ export async function approvalPageData(env: ServiceEnv, requestId: string): Prom
   return { request_id: requestId, token: pageToken(env.config, requestId, remaining), view, fingerprint };
 }
 
-const LOGIN_REFUSED: Record<string, string> = {
+const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
   missing: "Enter your access key to approve.",
   sysadmin: "The sysadmin key cannot approve a service: enter one of your user access keys.",
   "oauth-token": "An app's token cannot approve a service: enter one of your user access keys.",
+  "scoped-key": SCOPED_KEY_LOGIN_REFUSED,
   invalid: "That access key is invalid or revoked.",
 };
 
@@ -364,7 +366,7 @@ export async function decideApproval(
   if (input.decision !== "approve") throw invalid('decision must be "approve" or "reject"');
 
   const login = await pageLogin(db, config.sysadminKey, typeof input.accessKey === "string" ? input.accessKey : "");
-  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]!);
+  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, login.userId, "edit_services", ctx))) {
     throw forbidden("approving a service needs edit_services on its bundle, which this account does not hold");

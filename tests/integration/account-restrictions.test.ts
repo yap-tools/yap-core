@@ -285,6 +285,34 @@ describeEachAdapter("account restrictions", (adapter) => {
     expect((await user.client.post("/v1/keys", { name: "laptop" })).status).toBe(201);
   });
 
+  // ---- Scoped access keys -------------------------------------------------------
+
+  it("a scoped key: create_spaces follows its role, manage_keys is never there, and denials still apply", async () => {
+    const user = await newUser("ScopedAccount");
+    const scoped = async (role: string) =>
+      apiClient(app.baseUrl, (await user.client.post("/v1/keys", { name: role, scope: { role } })).body.key);
+    const admin = await scoped("admin");
+    const member = await scoped("member");
+    const reader = await scoped("read-only");
+
+    expect((await admin.post("/v1/spaces", { name: "By scoped admin" })).status).toBe(201);
+    for (const narrow of [member, reader]) expect((await narrow.post("/v1/spaces", { name: "Nope" })).status).toBe(403);
+    for (const any of [admin, member, reader]) {
+      const res = await any.get("/v1/keys");
+      expect(res.status).toBe(403);
+      expect(res.body.error.message).toContain("scoped");
+    }
+
+    // The operator's denial binds a scoped admin key too, from the next call on.
+    expect((await restrict(user.id, ["create_spaces"])).status).toBe(200);
+    expectDenied(await admin.post("/v1/spaces", { name: "Nope" }), "create_spaces");
+    // ...and the sysadmin lane can still issue and revoke scoped keys for the user.
+    const issued = await sysadmin.post(`/v1/users/${user.id}/keys`, { name: "op-scoped", scope: { role: "read-only" } });
+    expect(issued.status).toBe(201);
+    expect(issued.body.scope).toEqual({ role: "read-only" });
+    expect((await sysadmin.delete(`/v1/users/${user.id}/keys/${issued.body.id}`)).status).toBe(200);
+  });
+
   // ---- OAuth tokens -----------------------------------------------------------
 
   it("an admin-scoped OAuth token cannot bypass restrictions, including one issued before they were set", async () => {

@@ -22,7 +22,7 @@ import {
 } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
-import { assertCanManageCredentials, TOKEN_ROLES, type TokenAuth, type TokenScope } from "./authScope.js";
+import { assertCanManageCredentials, isTokenRole, type TokenAuth, type TokenScope } from "./authScope.js";
 import { notFound } from "./errors.js";
 import { newId, nowIso } from "./util.js";
 
@@ -62,7 +62,7 @@ export function parseScopeParam(raw: string | undefined | null): TokenScope {
   for (const entry of (raw ?? "").split(/\s+/).filter(Boolean)) {
     if (entry.startsWith("role:")) {
       const role = entry.slice("role:".length);
-      if ((TOKEN_ROLES as readonly string[]).includes(role)) roles.push(role as TokenScope["role"]);
+      if (isTokenRole(role)) roles.push(role);
     } else if (entry.startsWith("space:")) {
       spaces.push(entry.slice("space:".length));
     } else if (entry.startsWith("bundle:")) {
@@ -351,7 +351,7 @@ export async function authenticateToken(db: Db, presented: string): Promise<Toke
   const row = rows[0];
   if (!row || row.kind !== "access" || row.revokedAt || isExpired(row.expiresAt)) return null;
   await db.client.update(oauthGrants).set({ lastUsedAt: nowIso() }).where(eq(oauthGrants.id, row.grantId));
-  return { userId: row.userId, grantId: row.grantId, scope: JSON.parse(row.scope) };
+  return { source: "token", userId: row.userId, grantId: row.grantId, scope: JSON.parse(row.scope) };
 }
 
 // ---- Grant management (the "connected apps" view) ---------------------------

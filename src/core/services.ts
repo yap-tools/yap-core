@@ -42,7 +42,9 @@
  * agent can be steered by something it read. An MCP create leaves it waiting;
  * an MCP update that changes what it does or where data goes puts it back to
  * waiting; a REST write counts as approved, since its author sent the whole
- * config. Entering secrets through the form leaves the approval as it is. The
+ * config — unless it came with a scoped access key, which is a machine
+ * standing in for its user and never their approval, so it is held to the
+ * MCP rule (and any config it sends waits too). Entering secrets through the form leaves the approval as it is. The
  * runner refuses a service that waits (runs.ts, `prepareRun`), so a run and a
  * schedule both do.
  *
@@ -95,6 +97,7 @@ import {
 import { createEgress } from "./drivers/egress.js";
 import { PARAM_NAME, type DriverRegistry } from "./drivers/registry.js";
 import type { BundleReader, BundleWriter, DriverDefinition, DriverReads } from "./drivers/types.js";
+import { onScopedKey } from "./authScope.js";
 import { forbidden, invalid, notFound, tooLarge, YapError } from "./errors.js";
 import { parseFileRef } from "./fileRefs.js";
 import { writeFileUnchecked, type FileWriteInput } from "./files.js";
@@ -831,9 +834,11 @@ export async function createService(
   const id = newId();
   const description = input.description ?? "";
   // Written over REST, the author sent the whole config and is the approval.
-  // Written over MCP, it waits for a person (serviceApprovals.ts).
-  const approvedAt = authoring === "rest" ? now : null;
-  const approvedBy = authoring === "rest" ? userId : null;
+  // Written over MCP, or with a scoped key, it waits for a person
+  // (serviceApprovals.ts).
+  const approves = authoring === "rest" && !onScopedKey();
+  const approvedAt = approves ? now : null;
+  const approvedBy = approves ? userId : null;
   await db.client.insert(services).values({
     id,
     bundleId,
@@ -987,13 +992,18 @@ export async function updateService(
   // which secrets are set) puts it back to waiting for a person; renaming it,
   // or sending back what is already stored, does not. Over REST, a write
   // that sends the config is the author's own approval, as a REST create is.
+  // A scoped key is never the person: over REST it is held to the MCP rule,
+  // and any config it sends puts the service back to waiting too (it may
+  // replace a secret's value, which the comparison cannot see).
+  const scopedKey = onScopedKey();
   let approval: { approvedAt: string | null; approvedBy: string | null } | undefined;
-  if (authoring === "mcp") {
+  if ((authoring === "mcp" || scopedKey) && def) {
     const before = approvalShape(def, { params: JSON.parse(row.params), pins: JSON.parse(row.pins), actions: row.actions }, row, env.config.masterKey);
     const after = approvalShape(def, { params, pins, actions }, columns ?? row, env.config.masterKey);
     if (before !== after) approval = { approvedAt: null, approvedBy: null };
-  } else if (patch.config !== undefined) {
-    approval = { approvedAt: nowIso(), approvedBy: userId };
+  }
+  if (authoring === "rest" && patch.config !== undefined) {
+    approval = scopedKey ? { approvedAt: null, approvedBy: null } : { approvedAt: nowIso(), approvedBy: userId };
   }
 
   const { services, secretRequests, serviceApprovals } = db.tables;

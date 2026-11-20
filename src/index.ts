@@ -49,7 +49,7 @@ Drivers (service backends installed into this instance):
 Manage (over the instance API, authenticated via .yap/credentials.json):
   user create <name>                  Create a user (sysadmin lane); saves the CLI credential
   api <METHOD> </path> [body|-] [--sysadmin]   Raw API passthrough — the full /v1 surface
-  users list|delete                   keys list|create|rotate|delete
+  users list|delete                   keys list|create [--role r]|rotate|delete
   spaces list|show|create|delete      bundles list <spaceId> | show <id>
   items query <bundleId> --type t [--filters json] | get <bundleId> <ids>
   connections list | revoke <id>      (--json on any list for raw output)

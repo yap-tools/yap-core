@@ -25,10 +25,10 @@
  * The scheduler writes only the columns it owns (`last_*`, and `enabled` on a
  * capability loss), so an edit landing mid-tick is never overwritten.
  *
- * Every fire runs outside any request's token scope (`runOutsideTokenAuth`):
- * jobs are armed while a schedule edit is being handled, and a timer inherits
- * the async context it was created in, so without it the owner would be judged
- * against the editor's token.
+ * Every fire runs outside any request's scope (`runOutsideScope`): jobs are
+ * armed while a schedule edit is being handled, and a timer inherits the async
+ * context it was created in, so without it the owner would be judged against
+ * the editor's token or scoped key.
  *
  * Missed ticks are not caught up: a job armed at boot or on reload simply
  * waits for its next time. And one scheduler per database is the operator's
@@ -40,7 +40,7 @@ import { eq } from "drizzle-orm";
 import { Cron } from "croner";
 
 import type { YapLogger } from "../logger.js";
-import { runOutsideTokenAuth } from "./authScope.js";
+import { runOutsideScope } from "./authScope.js";
 import { getBundleContext, requireBundleCapability } from "./bundles.js";
 import { YapError } from "./errors.js";
 import { IN_FLIGHT, runService, type RunEnv } from "./runs.js";
@@ -151,7 +151,7 @@ export function createScheduler(env: RunEnv & { logger?: YapLogger }): Scheduler
   }
 
   function fire(id: string, job?: Cron): Promise<FireOutcome> {
-    return runOutsideTokenAuth(async () => {
+    return runOutsideScope(async () => {
       if (firing.has(id)) {
         await setRow(id, { lastSkippedAt: nowIso() });
         return { kind: "skipped" } as const;

@@ -14,7 +14,7 @@
 import { and, eq, inArray, or } from "drizzle-orm";
 
 import type { Db } from "../db/index.js";
-import { currentTokenAuth, type TokenScope } from "./authScope.js";
+import { currentScope, type TokenScope } from "./authScope.js";
 import { forbidden } from "./errors.js";
 
 export const CONTENT_CAPABILITIES = [
@@ -62,7 +62,7 @@ export type Decision =
   | { allowed: true; decidedBy: "personal_owner" }
   | { allowed: boolean; decidedBy: { grantId: string; level: "bundle" | "space"; effect: Effect } }
   | { allowed: false; decidedBy: "default_deny" }
-  | { allowed: false; decidedBy: "token_scope" };
+  | { allowed: false; decidedBy: "token_scope" | "key_scope" };
 
 /** Capability masks behind the spec's named roles. Admin is the absence of a
  * mask: full delegation, clamped only by the user's live grants. */
@@ -73,10 +73,11 @@ const ROLE_MASKS: Record<string, readonly string[] | null> = {
 };
 
 /**
- * Does the request's token scope (if any) permit this capability on this
- * resource? Evaluated ahead of grant resolution AND ahead of the
- * personal-owner shortcut — a read-only token stays read-only even in the
- * holder's own personal space. `allowed = liveGrants ∧ mask ∧ restriction`.
+ * Does the request's scope (if any — an OAuth token's or a scoped access
+ * key's) permit this capability on this resource? Evaluated ahead of grant
+ * resolution AND ahead of the personal-owner shortcut — a read-only token or
+ * key stays read-only even in the holder's own personal space.
+ * `allowed = liveGrants ∧ mask ∧ restriction`; a key scope has no restriction.
  */
 export function scopeAllows(scope: TokenScope, capability: string, ctx: CapabilityContext): boolean {
   const cap = normalizeCapability(capability);
@@ -126,9 +127,9 @@ export async function resolveCapability(
   ctx: CapabilityContext,
 ): Promise<Decision> {
   const cap = normalizeCapability(capability);
-  const tokenScope = currentTokenAuth()?.scope;
-  if (tokenScope && !scopeAllows(tokenScope, cap, ctx)) {
-    return { allowed: false, decidedBy: "token_scope" };
+  const scoped = currentScope();
+  if (scoped && !scopeAllows(scoped.scope, cap, ctx)) {
+    return { allowed: false, decidedBy: scoped.source === "key" ? "key_scope" : "token_scope" };
   }
   if (ctx.space.personal && ctx.space.ownerId === userId) {
     return { allowed: true, decidedBy: "personal_owner" };
@@ -174,7 +175,7 @@ export async function effectiveCapabilities(
   userId: string,
   ctx: CapabilityContext,
 ): Promise<string[]> {
-  const tokenScope = currentTokenAuth()?.scope;
+  const tokenScope = currentScope()?.scope;
   if (ctx.space.personal && ctx.space.ownerId === userId) {
     return KNOWN_CAPABILITIES.filter((cap) => !tokenScope || scopeAllows(tokenScope, cap, ctx)).sort();
   }

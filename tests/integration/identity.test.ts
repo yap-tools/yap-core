@@ -142,6 +142,99 @@ describeEachAdapter("identity & keys", (adapter) => {
     });
   });
 
+  describe("scoped access keys (self)", () => {
+    let full: ApiClient;
+    let userId: string;
+
+    beforeAll(async () => {
+      const created = await sysadmin.post("/v1/users", { name: "Scoper" });
+      userId = created.body.user.id;
+      full = apiClient(app.baseUrl, created.body.initialKey.key);
+    });
+
+    const mint = async (role: string, name = role) => {
+      const res = await full.post("/v1/keys", { name, scope: { role } });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body as { id: string; key: string; scope: unknown };
+    };
+
+    it("mints a key with a fixed role scope, shown on the key and in the listing", async () => {
+      const minted = await mint("read-only", "reader");
+      expect(minted.scope).toEqual({ role: "read-only" });
+      const list = (await full.get("/v1/keys")).body.data;
+      expect(list.find((k: any) => k.id === minted.id).scope).toEqual({ role: "read-only" });
+      // Unscoped keys report scope null.
+      expect(list.filter((k: any) => k.id !== minted.id).every((k: any) => k.scope === null)).toBe(true);
+    });
+
+    it("accepts every role, admin included, and refuses anything else", async () => {
+      for (const role of ["admin", "member", "read-only"]) expect((await mint(role)).scope).toEqual({ role });
+      for (const scope of [{ role: "owner" }, {}, "member", ["member"], { role: "member", capabilities: ["read_items"] }]) {
+        const res = await full.post("/v1/keys", { name: "bad", scope });
+        expect(res.status, JSON.stringify(scope)).toBe(400);
+      }
+    });
+
+    it("refuses spaces and bundles: a key scope limits what, never where", async () => {
+      for (const scope of [{ role: "member", spaces: ["s1"] }, { role: "member", bundles: ["b1"] }]) {
+        const res = await full.post("/v1/keys", { name: "located", scope });
+        expect(res.status).toBe(400);
+        expect(res.body.error.message).toContain("never where");
+      }
+    });
+
+    it("whoami reports the calling key's scope, and nothing extra for a full key", async () => {
+      const reader = await mint("read-only", "who");
+      const me = (await apiClient(app.baseUrl, reader.key).get("/v1/whoami")).body;
+      expect(me.keyScope).toEqual({ role: "read-only" });
+      expect(me.id).toBe(userId);
+      expect("keyScope" in (await full.get("/v1/whoami")).body).toBe(false);
+    });
+
+    it("a scoped key cannot create, list, rotate or revoke keys, at any role", async () => {
+      for (const role of ["admin", "member", "read-only"]) {
+        const scoped = await mint(role, `manager-${role}`);
+        const as = apiClient(app.baseUrl, scoped.key);
+        const refusals = [
+          await as.post("/v1/keys", { name: "wider" }),
+          await as.post("/v1/keys", { name: "same", scope: { role } }),
+          await as.get("/v1/keys"),
+          await as.post(`/v1/keys/${scoped.id}/rotate`),
+          await as.delete(`/v1/keys/${scoped.id}`),
+        ];
+        for (const res of refusals) {
+          expect(res.status).toBe(403);
+          expect(res.body.error.code).toBe("forbidden");
+          expect(res.body.error.message).toContain("scoped");
+        }
+        // Still alive: none of those revoked it.
+        expect((await as.get("/v1/whoami")).status).toBe(200);
+      }
+    });
+
+    it("an unscoped key rotates a scoped key into one with the same scope, and revokes it", async () => {
+      const scoped = await mint("member", "rotated");
+      const rotated = await full.post(`/v1/keys/${scoped.id}/rotate`);
+      expect(rotated.status).toBe(200);
+      expect(rotated.body.scope).toEqual({ role: "member" });
+      expect((await apiClient(app.baseUrl, rotated.body.key).get("/v1/whoami")).body.keyScope).toEqual({ role: "member" });
+      expect((await full.delete(`/v1/keys/${rotated.body.id}`)).status).toBe(200);
+      expect((await apiClient(app.baseUrl, rotated.body.key).get("/v1/whoami")).status).toBe(401);
+    });
+
+    it("a full key can revoke itself even when it is the user's last full key", async () => {
+      const created = await sysadmin.post("/v1/users", { name: "LockDown" });
+      const only = apiClient(app.baseUrl, created.body.initialKey.key);
+      const scoped = (await only.post("/v1/keys", { name: "machine", scope: { role: "read-only" } })).body;
+      expect((await only.delete(`/v1/keys/${created.body.initialKey.id}`)).status).toBe(200);
+      expect((await only.get("/v1/whoami")).status).toBe(401);
+      // The scoped key keeps working, and still cannot manage keys.
+      const machine = apiClient(app.baseUrl, scoped.key);
+      expect((await machine.get("/v1/whoami")).status).toBe(200);
+      expect((await machine.post("/v1/keys", { name: "back-in" })).status).toBe(403);
+    });
+  });
+
   describe("MCP authentication", () => {
     it("rejects missing and invalid keys, and the sysadmin key, on /mcp", async () => {
       const post = (auth?: string, qs = "") =>

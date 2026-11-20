@@ -5,9 +5,11 @@
  * by the OAuth integration suite, which drives both transports through this
  * module.
  */
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { bearerToken, resolveCredential } from "../../src/core/credential.js";
+import { bearerToken, resolveCredential, scopeOf } from "../../src/core/credential.js";
+import { issueKeyForUser } from "../../src/core/keys.js";
 import { createUser } from "../../src/core/users.js";
 import { OAUTH_ACCESS_TOKEN_PREFIX } from "../../src/crypto.js";
 import { createDb, type Db } from "../../src/db/index.js";
@@ -57,6 +59,30 @@ describe("resolveCredential", () => {
 
   it("resolves a live access key to its user", async () => {
     expect(await resolveCredential(db, config, accessKey)).toEqual({ kind: "user", userId });
+  });
+
+  it("an unscoped key runs with no scope context", async () => {
+    expect(scopeOf(await resolveCredential(db, config, accessKey))).toBeUndefined();
+  });
+
+  it("a scoped key carries the key context to run under: its id and scope", async () => {
+    const scoped = await issueKeyForUser(db, userId, "agent", { role: "read-only" });
+    const outcome = await resolveCredential(db, config, scoped.key);
+    expect(outcome).toEqual({
+      kind: "user",
+      userId,
+      keyAuth: { source: "key", userId, keyId: scoped.id, scope: { role: "read-only" } },
+    });
+    expect(scopeOf(outcome)).toEqual({ source: "key", userId, keyId: scoped.id, scope: { role: "read-only" } });
+  });
+
+  it("fails closed on a stored scope it cannot read: the key does not authenticate", async () => {
+    const scoped = await issueKeyForUser(db, userId, "corrupt", { role: "member" });
+    const { accessKeys } = db.tables;
+    for (const stored of ['{"role":"root"}', "not json", "null", '{"role":"member","spaces":["s"]}']) {
+      await db.client.update(accessKeys).set({ scope: stored }).where(eq(accessKeys.id, scoped.id));
+      expect(await resolveCredential(db, config, scoped.key), stored).toEqual({ kind: "invalid-key" });
+    }
   });
 
   it("reports an unknown key as invalid-key", async () => {

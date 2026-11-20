@@ -335,7 +335,7 @@ array). Example: `{"property": "tags", "op": "has_all", "value": ["x", "y"]}`.
 
 ## Permissions
 
-Capability-based. Access keys authenticate identity only; **roles** (sets of
+Capability-based. Access keys authenticate identity; **roles** (sets of
 capabilities such as `read_items`, `edit_items`, `edit_docs`, `read_files`,
 `edit_files`, `run_services`, `edit_services`, `manage_roles`) are granted on
 spaces and bundles as explicit **allow/deny rows**. (The pre-services names
@@ -349,6 +349,30 @@ run services in one bundle and not its sibling, with the deciding row
 auditable either way. Personal spaces accept no grants; their owner
 implicitly holds all capabilities.
 
+### Scoped access keys
+
+An access key can carry a fixed **scope** that narrows its user's authority,
+for a key handed to a machine or an agent: `{"role": "read-only"}`,
+`"member"` or `"admin"`, the same role masks an OAuth token gets. What the key
+may do is the user's grants intersected with the mask; it never adds
+anything. The scope is set when the key is created and cannot change:
+
+```sh
+yap keys create agent --role member
+yap api POST /v1/keys '{"name": "reader", "scope": {"role": "read-only"}}'
+```
+
+A scope limits what a key can do, never where: `spaces` and `bundles` are
+refused. To limit where a machine acts, give it its own user with grants only
+where it needs them. A scoped key, at any role, cannot manage keys or
+connected apps, and the pages where a person decides for themself (the OAuth
+consent screen, connected apps, a service's secret form and its approve page)
+refuse it, and a service it writes waits for a person even over REST, where
+a full key's write counts as its author's approval. So an agent holding a
+scoped key can write a service but never approve it. `create_spaces` needs a scoped `admin` key. Key listings show each
+key's `scope` (`null` for a full key), and `whoami` reports the calling key's
+as `keyScope`.
+
 ### Reading your own permissions
 
 Every space and bundle that REST returns (`GET /v1/spaces`,
@@ -359,7 +383,7 @@ it, computed by the same core function MCP uses for `role` on `load`,
 never omitted and may be empty. A space's `role` counts space-level rows only:
 a user holding just a bundle grant sees `[]` on the space and the granted set
 on the bundle. For an OAuth token, the token's role scope and any `space:` /
-`bundle:` limits are already applied. Account-level restrictions are a
+`bundle:` limits are already applied, and for a scoped access key its role. Account-level restrictions are a
 separate set, reported as `deniedCapabilities` on `whoami`.
 
 ### Account-level restrictions
@@ -398,8 +422,8 @@ identity service. Access keys stay the root credential; tokens are
 delegations of a key, issued through authorization code + PKCE with dynamic
 client registration (RFC 7591) and discovery (RFC 8414/9728), so a compliant
 MCP client connects with a standard authorize prompt and zero manual config.
-The authorize screen — served by Core itself — authenticates by access key
-(Core has no passwords) and binds the grant to that key: revoking the key
+The authorize screen — served by Core itself — authenticates by a full
+(unscoped) access key (Core has no passwords) and binds the grant to that key: revoking the key
 revokes every delegation made with it. Tokens are opaque, hashed at rest,
 short-lived, and renewed by rotating refresh tokens (reuse kills the grant).
 

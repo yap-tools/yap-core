@@ -6,7 +6,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-import { runWithTokenAuth, type TokenScope } from "../../src/core/authScope.js";
+import { runWithScope, type TokenAuth, type TokenScope } from "../../src/core/authScope.js";
 import { scopeAllows } from "../../src/core/capabilities.js";
 import { formatScope, parseScopeParam, redirectUriMatches } from "../../src/core/oauth.js";
 import { verifyPkceS256 } from "../../src/crypto.js";
@@ -82,13 +82,13 @@ describe("scopeAllows (the token clamp)", () => {
     expect(scopeAllows(scope, "read_items", { space: { ...space, id: "sp2" }, bundleId: "b1" })).toBe(false);
   });
 
-  it("runWithTokenAuth exposes the auth to the wrapped function only", async () => {
-    const auth = { userId: "u1", grantId: "g1", scope: { role: "member" } as TokenScope };
-    const { currentTokenAuth } = await import("../../src/core/authScope.js");
-    expect(currentTokenAuth()).toBeUndefined();
-    const seen = runWithTokenAuth(auth, () => currentTokenAuth());
+  it("runWithScope exposes the auth to the wrapped function only", async () => {
+    const auth: TokenAuth = { source: "token", userId: "u1", grantId: "g1", scope: { role: "member" } as TokenScope };
+    const { currentScope } = await import("../../src/core/authScope.js");
+    expect(currentScope()).toBeUndefined();
+    const seen = runWithScope(auth, () => currentScope());
     expect(seen).toBe(auth);
-    expect(currentTokenAuth()).toBeUndefined();
+    expect(currentScope()).toBeUndefined();
   });
 });
 

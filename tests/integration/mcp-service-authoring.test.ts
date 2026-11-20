@@ -342,6 +342,29 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
         expect(res.error.details?.capability, tool).toBe("edit_services");
       }
     });
+
+    it("refuses authoring to a read-only scoped key of the author herself, and reads only the listing view", async () => {
+      const minted = await alice.post("/v1/keys", { name: "reader", scope: { role: "read-only" } });
+      const reader = await connectMcp(app.baseUrl, minted.body.key);
+      try {
+        for (const [tool, params] of [
+          ["create_service", { name: "readers", settings: httpSettings() }],
+          ["update_service", { id: "notify", description: "mine now" }],
+          ["delete_service", { id: "notify" }],
+          ["secret_request", { id: "notify", paths: ["headers.authorization"] }],
+        ] as const) {
+          const res = await one(reader, tool, params);
+          expect(res.ok, tool).toBe(false);
+          expect(res.error.code, tool).toBe("forbidden");
+          expect(res.error.details?.decidedBy, tool).toBe("key_scope");
+        }
+        const view = await one(reader, "get_service", { id: "notify" });
+        expect(view.ok, JSON.stringify(view)).toBe(true);
+        expect(view.result.settings).toBeUndefined();
+      } finally {
+        await reader.close();
+      }
+    });
   });
 
   describe("secret_request and its form", () => {
