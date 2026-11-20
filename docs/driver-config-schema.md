@@ -35,16 +35,27 @@ export default {
       { path: "oauth.client_secret", label: "OAuth client secret" },
       { path: "headers.*", label: "Header value", boundTo: ["base_url"] },
     ],
+    destinations: [{ label: "API", setting: "base_url" }],
   },
 };
 ```
 
 - **`jsonSchema`** is a JSON Schema (draft 2020-12) whose root is `type: "object"`. It must be plain JSON. Put example configs under the standard `examples` keyword; use placeholders there, never real credentials, because the schema is readable by any authenticated caller.
 - **`secrets`** lists every path in the config that holds a secret: passwords, API keys, tokens, client secrets, private keys. It may be empty. Each entry has a `path`, a short `label` (up to 80 characters) for a form field, an optional `description` (up to 500 characters), and an optional `boundTo`.
+- **`destinations`** (optional) lists where a service on this driver sends data, for the approve page and the secret form to show first ([service-approval.md](service-approval.md)).
 
 ### Bindings
 
 `boundTo` lists the settings that decide where the secret is sent: dot paths of non-secret fields, such as the URL a token goes to or the server a password logs in to. When a service is updated over MCP and any of them changes, the stored secret is dropped, and a human has to enter it again through a secret form ([mcp-service-authoring.md](mcp-service-authoring.md)). That way an agent, which never sees a secret, cannot send one to a server of its own either. A binding to an object (`smtp`) covers everything inside it. Each entry must resolve in `jsonSchema` and must not be a secret path. A secret without `boundTo` survives every settings change, so a driver should bind every secret that leaves the server. REST updates are not affected.
+
+### Destinations
+
+Each entry has a short `label` (up to 80 characters) and exactly one of:
+
+- `setting`: the dot path of a non-secret field, such as a URL or a server block. It must resolve in `jsonSchema` and must not be a secret path.
+- `param`: a parameter of the driver's actions, such as a recipient address. An optional `actions` list narrows it to the actions where it names a destination (the mail `to` of `send`, not the `to` filter of `search`). The registry checks that those actions exist and that one of them takes the parameter (an action with `params: null` takes whatever the service record declares).
+
+A person reads them with the service's values: a setting's value with the service's pins filled into its `{{placeholders}}`, a server block as `host:port`, a parameter as its pinned value or as chosen per run. A driver without `destinations` names none, and the approve page says so for a driver that reaches the network. Name every setting and parameter that decides where data leaves the server.
 
 ### Secret paths
 
@@ -81,7 +92,8 @@ Each entry:
   "configDoc": "user: the account's login name …",  // the free-text help, or null
   "configSchema": {                                 // or null
     "jsonSchema": { "type": "object", "properties": { … }, "examples": [ … ] },
-    "secrets": [{ "path": "pass", "label": "Password", "description": "…", "boundTo": ["imap", "smtp", "allow_plaintext_auth"] }]
+    "secrets": [{ "path": "pass", "label": "Password", "description": "…", "boundTo": ["imap", "smtp", "allow_plaintext_auth"] }],
+    "destinations": [{ "label": "SMTP server", "setting": "smtp" }, { "label": "Recipients (To)", "param": "to", "actions": ["send"] }]
   }
 }
 ```
@@ -90,9 +102,9 @@ Each entry:
 
 ## The built-in drivers
 
-| driver | secret paths | notes |
-|---|---|---|
-| `http` | `headers.*`, bound to `url` | Header values are where an http service carries credentials by design (an `Authorization` or API-key header), so every header value is marked. The url and body are not: a token belongs in a header. |
-| `mail` | `pass`, bound to `imap`, `smtp`, `allow_plaintext_auth`; `oauth2.client_secret` and `oauth2.refresh_token`, bound to those and `oauth2.token_url` | `oauth2.client_id`, the hosts and the addresses are settings, not secrets. The schema also carries the rules zod keeps in a refinement: exactly one of `pass` / `oauth2` (`oneOf`), at least one of `imap` / `smtp` (`anyOf`), and `from` as an email address. |
+| driver | secret paths | destinations | notes |
+|---|---|---|---|
+| `http` | `headers.*`, bound to `url` | `url` | Header values are where an http service carries credentials by design (an `Authorization` or API-key header), so every header value is marked. The url and body are not: a token belongs in a header. |
+| `mail` | `pass`, bound to `imap`, `smtp`, `allow_plaintext_auth`; `oauth2.client_secret` and `oauth2.refresh_token`, bound to those and `oauth2.token_url` | `imap`, `smtp`, `oauth2.token_url`; the `to`, `cc` and `bcc` of `send` | `oauth2.client_id`, the hosts and the addresses are settings, not secrets. The schema also carries the rules zod keeps in a refinement: exactly one of `pass` / `oauth2` (`oneOf`), at least one of `imap` / `smtp` (`anyOf`), and `from` as an email address. |
 
-Both publish `examples` that their own `validateConfig` accepts; the test suite checks this, and that every secret path resolves.
+Both publish `examples` that their own `validateConfig` accepts; the test suite checks this, and that every secret path and destination resolves.

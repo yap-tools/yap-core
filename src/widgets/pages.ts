@@ -12,6 +12,7 @@ import { verifyToken } from "../crypto.js";
 import type { DriverRegistry } from "../core/drivers/registry.js";
 import { uploadPageData, viewPageData } from "../core/files.js";
 import { secretPageData } from "../core/secretRequests.js";
+import { approvalPageData } from "../core/serviceApprovals.js";
 import { YapError, invalid, unauthorized } from "../core/errors.js";
 import type { Db } from "../db/index.js";
 import { WIDGETS, widgetHtml } from "./registry.js";
@@ -20,7 +21,7 @@ export interface PagesEnv {
   db: Db;
   blob: BlobStore;
   config: YapConfig;
-  /** The installed drivers: the secret form reads its field labels from them. */
+  /** The installed drivers: the secret form and the approve page read labels and destinations from them. */
   registry: DriverRegistry;
 }
 
@@ -34,8 +35,12 @@ export async function buildOriginPage(env: PagesEnv, widgetName: string, token: 
   if (!payload || payload.scope !== "widget" || payload.widget !== widgetName) {
     throw unauthorized("invalid or expired widget token");
   }
+  const requestId = String(payload.requestId ?? "");
   if (widgetName === "secret-input") {
-    return widgetHtml(widgetName, "origin", await secretPageData(env, String(payload.requestId ?? "")));
+    return widgetHtml(widgetName, "origin", await secretPageData(env, requestId), config.baseUrl);
+  }
+  if (widgetName === "service-approve") {
+    return widgetHtml(widgetName, "origin", await approvalPageData(env, requestId), config.baseUrl);
   }
   const fileId = String(payload.fileId ?? "");
 

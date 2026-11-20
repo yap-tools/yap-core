@@ -138,6 +138,8 @@ export interface ServiceRow {
   configEncrypted: string;
   settings: string | null;
   secretsEncrypted: string | null;
+  /** Null while the service waits for a person's approval (serviceApprovals.ts). */
+  approvedAt: string | null;
 }
 
 interface RunRow {
@@ -318,12 +320,28 @@ function buildParams(
  * so a schedule validates its stored action and params at write time by the
  * very same computation a run does at fire time.
  */
+/**
+ * A service written over MCP stays off until a person approves it
+ * (serviceApprovals.ts). Checked here, the one gate every run and every
+ * schedule goes through, before anything else about the call: an agent that
+ * wrote the service learns it must ask for approval, not that its params are off.
+ */
+function requireApproved(service: ServiceRow): void {
+  if (service.approvedAt) return;
+  throw new YapError(
+    "forbidden",
+    `service "${service.name}" is waiting for approval: it was written or changed over MCP, and it does not run ` +
+      "until a person who holds edit_services on this bundle approves it (approval_request gives them the page)",
+  );
+}
+
 export function prepareRun(
   registry: DriverRegistry,
   service: ServiceRow,
   requestedAction: string | undefined,
   supplied: Record<string, unknown>,
 ): { def: DriverDefinition; action: string } & ReturnType<typeof buildParams> {
+  requireApproved(service);
   const def = driverFor(registry, service);
   const action = resolveAction(def, service, requestedAction);
   return { def, action, ...buildParams(def, service, action, supplied) };

@@ -10,7 +10,7 @@
  *   secretsSet, and anyone else the listing view; load_bundle carries no
  *   settings;
  * - secret_request returns paths, labels and set flags, never a value; its
- *   form takes one successful submission, expires, re-checks the requester
+ *   form takes one successful submission with a login, expires, re-checks the requester
  *   and stays open after a refused one;
  * - the stored secret is never returned over REST or MCP, and the run uses it;
  * - edit_services is the gate, and a driver that writes into the bundle also
@@ -96,6 +96,7 @@ const scribeDriver: DriverDefinition = {
 describeEachAdapter("service authoring over MCP", (adapter) => {
   let app: TestApp;
   let alice: ApiClient;
+  let aliceKey: string;
   let aliceMcp: McpTestClient;
   let bobMcp: McpTestClient;
   let bobRest: ApiClient;
@@ -109,8 +110,28 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
   const one = async (client: McpTestClient, tool: string, params: Record<string, unknown>) =>
     (await client.call("call", { space_id: spaceId, calls: [{ bundle_id: bundleId, tool, params }] })).results[0];
 
-  const submit = (requestId: string, token: string, values: Record<string, unknown>) =>
-    apiClient(app.baseUrl).post(`/v1/secret-requests/${requestId}/submit`, { token, values });
+  const submit = (requestId: string, token: string, values: Record<string, unknown>, accessKey: string | null = aliceKey) =>
+    apiClient(app.baseUrl).post(`/v1/secret-requests/${requestId}/submit`, {
+      token,
+      values,
+      ...(accessKey !== null ? { access_key: accessKey } : {}),
+    });
+
+  /** A service written over MCP runs once a person approves it: Alice, on its approve page. */
+  const approve = async (service: string) => {
+    const req = await one(aliceMcp, "approval_request", { id: service });
+    expect(req.ok, JSON.stringify(req)).toBe(true);
+    const { request_id, token } = req._meta.data;
+    const anon = apiClient(app.baseUrl);
+    const view = await anon.post(`/v1/service-approvals/${request_id}/view`, { token });
+    const decided = await anon.post(`/v1/service-approvals/${request_id}/decide`, {
+      token,
+      decision: "approve",
+      access_key: aliceKey,
+      fingerprint: view.body.fingerprint,
+    });
+    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+  };
 
   beforeAll(async () => {
     targetPort = await getFreePort();
@@ -127,7 +148,8 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
     app.server.registry.register(scribeDriver);
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
-    alice = apiClient(app.baseUrl, a.body.initialKey.key);
+    aliceKey = a.body.initialKey.key;
+    alice = apiClient(app.baseUrl, aliceKey);
     aliceMcp = await connectMcp(app.baseUrl, a.body.initialKey.key);
     const b = await sysadmin.post("/v1/users", { name: "Bob" });
     bobId = b.body.user.id;
@@ -385,6 +407,7 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
     });
 
     it("the run uses the stored secret", async () => {
+      await approve("notify");
       authHeaders.length = 0;
       const run = await one(aliceMcp, "run_service", { id: "notify", params: { text: "hi" }, wait_ms: 5000 });
       expect(run.ok).toBe(true);
@@ -415,6 +438,7 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
       });
       expect(moved.ok).toBe(true);
       expect(moved.result.secretsSet).toEqual([]);
+      await approve("moved");
       authHeaders.length = 0;
       const ran = await one(aliceMcp, "run_service", { id: "moved", wait_ms: 5000 });
       expect(ran.result.status, JSON.stringify(ran.result)).toBe("succeeded");
@@ -451,6 +475,7 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
       expect(refused.status).toBe(400);
       expect(refused.body.error.message).toContain("token is not accepted");
       expect((await submit(id, tok, { token: VAULT_SECRET })).status).toBe(200);
+      await approve("vault");
       const run = await one(aliceMcp, "run_service", { id: "vault", wait_ms: 5000 });
       expect(run.result.status).toBe("succeeded");
       expect(run.result.result).toEqual({ tokenMatches: true });

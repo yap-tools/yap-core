@@ -25,6 +25,7 @@ const INSERT_ORDER = [
   "services",
   "schedules",
   "secret_requests",
+  "service_approvals",
   "runs",
   "user_docs",
   "oauth_clients",

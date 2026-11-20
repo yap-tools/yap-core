@@ -6,10 +6,10 @@
  * refuses a secret value in them). To fill in the secrets it calls
  * `secret_request` for some of the driver's secret paths. That reserves a row
  * here and returns a widget pointer plus an origin URL, like `upload_request`.
- * The human opens the form, types each secret into a password field, and the
- * form POSTs straight to `POST /v1/secret-requests/:id/submit` with its own
- * signed token. The agent sees the paths, their labels and whether each is
- * set, never a value.
+ * The human opens the form, types each secret into a password field and
+ * their access key, and the form POSTs straight to
+ * `POST /v1/secret-requests/:id/submit` with its own signed token. The agent
+ * sees the paths, their labels and whether each is set, never a value.
  *
  * The rules, which mirror uploads:
  *
@@ -28,10 +28,17 @@
  * - A submission sets the listed paths only. Every other secret and every
  *   setting stays as it is. Submitting a new form for the same path replaces
  *   that secret.
- * - Asking and submitting both check that the user who asked holds
- *   `edit_services` on the bundle, plus `edit_items` / `edit_files` for a
- *   driver that writes into it, as an update would: the token is theirs,
- *   lent to the form.
+ * - Submitting needs a login, the same as the service approve page
+ *   (`pageLogin`: a user access key, never the sysadmin key or an OAuth
+ *   token). The agent can see the form's token, so the token alone must not
+ *   be enough: otherwise an agent could put a credential of its own into a
+ *   service a person approved (a bearer token for its own account at the same
+ *   API), and a secret change does not take the approval away. With the
+ *   login, a secret is always one a person entered, so it keeps the approval.
+ * - Asking checks that the user who asked holds `edit_services` on the
+ *   bundle, plus `edit_items` / `edit_files` for a driver that writes into
+ *   it, as an update would. Submitting checks the same for the asker and for
+ *   the person who logged in, and records who that was (`submitted_by`).
  * - Each submission runs the driver's checks on the config the service will
  *   now run with, the online one included once no secret is missing.
  */
@@ -40,8 +47,10 @@ import { and, eq, gt, isNull, lt } from "drizzle-orm";
 import type { YapConfig } from "../config.js";
 import { signToken } from "../crypto.js";
 import { getBundleContext, hasBundleCapability, requireBundleCapability } from "./bundles.js";
+import { describeDestinations, type DestinationView } from "./serviceApprovals.js";
 import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
+import { pageLogin } from "./keys.js";
 import {
   isSplit,
   mergeConfig,
@@ -60,6 +69,8 @@ import {
   resolveServiceId,
   validatePendingConfig,
   type ServiceEnv,
+  type ServiceParamSpec,
+  type ServicePins,
 } from "./services.js";
 import { newId, nowIso } from "./util.js";
 
@@ -88,8 +99,15 @@ export interface SecretRequestResult {
 
 /** What the secret-input widget renders and where it posts. */
 export interface SecretFormData {
+  request_id: string;
   service_name: string;
   fields: SecretField[];
+  /**
+   * Where the secrets asked for are sent: the settings they are bound to
+   * (`boundTo` in the driver's schema), with the service's pins filled in. An
+   * http header shows the url; a mail password shows the IMAP and SMTP servers.
+   */
+  destinations: DestinationView[];
   submit_url: string;
   /** The form's own signed submit token, sent in the POST body. */
   token: string;
@@ -153,6 +171,24 @@ function defaultPaths(def: DriverDefinition, settings: ConfigObject, secrets: Co
   } catch {
     return pendingSecretCandidates(def, merged).pending;
   }
+}
+
+/** Where the secrets at `paths` go: every setting any of them is bound to, in the schema's order. */
+function destinationsFor(def: DriverDefinition, row: Loaded["row"], settings: ConfigObject, paths: string[]): DestinationView[] {
+  const bound: string[] = [];
+  for (const path of paths) {
+    for (const setting of secretFieldFor(def, path)?.boundTo ?? []) if (!bound.includes(setting)) bound.push(setting);
+  }
+  return describeDestinations(
+    def,
+    {
+      settings,
+      pins: JSON.parse(row.pins) as ServicePins,
+      params: JSON.parse(row.params) as ServiceParamSpec[],
+      actions: row.actions,
+    },
+    bound,
+  );
 }
 
 function checkPaths(def: DriverDefinition, raw: unknown): string[] {
@@ -243,7 +279,13 @@ export async function requestSecrets(
       expires_in: ttl,
       origin_url: `${config.baseUrl}/w/secret-input?token=${originToken}`,
     },
-    form: { service_name: row.name, fields, ...formUrls(config, id, ttl) },
+    form: {
+      request_id: id,
+      service_name: row.name,
+      fields,
+      destinations: destinationsFor(def, row, settings, paths),
+      ...formUrls(config, id, ttl),
+    },
   };
 }
 
@@ -268,14 +310,22 @@ async function openRequest(env: ServiceEnv, requestId: string): Promise<RequestR
   return row;
 }
 
-/** The data an origin-hosted secret form is served with (token checked by the caller). */
+/**
+ * The form as the server has it (token checked by the caller): what an
+ * origin-hosted form is served with, and what the widget in a host's frame
+ * fetches before it shows anything, since the data it was handed there came
+ * through the model.
+ */
 export async function secretPageData(env: ServiceEnv, requestId: string): Promise<SecretFormData> {
   const request = await openRequest(env, requestId);
-  const { def, row, secrets } = await loadService(env, request.serviceId);
+  const { def, row, settings, secrets } = await loadService(env, request.serviceId);
   const remaining = Math.max(1, Math.floor((Date.parse(request.expiresAt) - Date.now()) / 1000));
+  const paths = JSON.parse(request.paths) as string[];
   return {
+    request_id: requestId,
     service_name: row.name,
-    fields: fieldsFor(def, JSON.parse(request.paths) as string[], secrets),
+    fields: fieldsFor(def, paths, secrets),
+    destinations: destinationsFor(def, row, settings, paths),
     ...formUrls(env.config, requestId, remaining),
   };
 }
@@ -297,23 +347,37 @@ function checkValues(paths: string[], raw: unknown): Record<string, string> {
   return values;
 }
 
+const LOGIN_REFUSED: Record<string, string> = {
+  missing: "Enter your access key to save.",
+  sysadmin: "The sysadmin key cannot enter a service's secrets: enter one of your user access keys.",
+  "oauth-token": "An app's token cannot enter a service's secrets: enter one of your user access keys.",
+  invalid: "That access key is invalid or revoked.",
+};
+
 /**
- * A submission of the form (token checked by the caller): sets the values
- * given, at the paths the form asked for, and uses the form up. Returns the
- * paths set and nothing else.
+ * A submission of the form (token checked by the caller): logs the person
+ * in, sets the values given at the paths the form asked for, and uses the
+ * form up. Returns the paths set and nothing else. A refused login leaves the
+ * form open.
  */
 export async function submitSecrets(
   env: ServiceEnv,
   requestId: string,
   rawValues: unknown,
+  accessKey?: unknown,
 ): Promise<{ saved: true; paths: string[] }> {
   const { db, config } = env;
   const request = await openRequest(env, requestId);
   const values = checkValues(JSON.parse(request.paths) as string[], rawValues);
 
+  const login = await pageLogin(db, config.sysadminKey, typeof accessKey === "string" ? accessKey : "");
+  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]!);
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, request.createdBy, "edit_services", ctx))) {
     throw forbidden("the user who asked for this form no longer holds edit_services on this bundle");
+  }
+  if (!(await hasBundleCapability(db, login.userId, "edit_services", ctx))) {
+    throw forbidden("entering a service's secrets needs edit_services on its bundle, which this account does not hold");
   }
   const { def, row, settings, secrets } = await loadService(env, request.serviceId);
   // A config change closes open forms before it lands (services.ts). Checking
@@ -322,6 +386,7 @@ export async function submitSecrets(
   // the new secret to a destination changed since.
   await openRequest(env, requestId);
   await requireWriteCapabilities(db, request.createdBy, def, ctx);
+  if (login.userId !== request.createdBy) await requireWriteCapabilities(db, login.userId, def, ctx);
   const next = setSecrets(settings, secrets, values);
   await validatePendingConfig(env, def, next.merged);
   const columns = splitColumns(next, config.masterKey);
@@ -333,7 +398,7 @@ export async function submitSecrets(
     // check above can take a while, and a form must not outlive its time in it.
     const claimed: unknown[] = yield tx
       .update(secretRequests)
-      .set({ usedAt })
+      .set({ usedAt, submittedBy: login.userId })
       .where(
         and(eq(secretRequests.id, requestId), isNull(secretRequests.usedAt), gt(secretRequests.expiresAt, usedAt)),
       )

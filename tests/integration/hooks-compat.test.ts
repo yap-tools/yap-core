@@ -176,6 +176,7 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     // Planted directly, as if DNS had changed since authoring.
     const { services } = app.db.tables;
     await app.db.client.insert(services).values({
+      approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
       id: "planted-legacy-hook",
       bundleId,
       name: "rebound",

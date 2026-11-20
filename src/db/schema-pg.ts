@@ -210,6 +210,12 @@ export const services = pgTable(
     // Both null while the config is one sealed blob (a driver without a schema).
     settings: text("settings"),
     secretsEncrypted: text("secrets_encrypted"),
+    // When a person approved the service as it now stands (core/serviceApprovals.ts);
+    // null while it waits for approval, which an MCP write puts it into, and then
+    // it cannot run. REST writes and services from before the column count as
+    // approved. approved_by is the approver's user id: history, not a link.
+    approvedAt: text("approved_at"),
+    approvedBy: text("approved_by"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -274,8 +280,37 @@ export const secretRequests = pgTable(
     expiresAt: text("expires_at").notNull(),
     // Set by the one submission that claims the form; null while it is open.
     usedAt: text("used_at"),
+    // The user who logged in on the form to submit it: history, not a link.
+    submittedBy: text("submitted_by"),
   },
   (t) => [index("secret_requests_service_idx").on(t.serviceId)],
+);
+
+/** One-off approval pages for a service written over MCP (core/serviceApprovals.ts).
+ * An agent asks for one; a person logs in on it and approves or rejects the
+ * service as it stands. Each row takes one decision until it expires, and dies
+ * with its service and with the user who asked for it. */
+export const serviceApprovals = pgTable(
+  "service_approvals",
+  {
+    id: text("id").primaryKey(),
+    bundleId: text("bundle_id")
+      .notNull()
+      .references(() => bundles.id, { onDelete: "cascade" }),
+    serviceId: text("service_id")
+      .notNull()
+      .references(() => services.id, { onDelete: "cascade" }),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    // Set by the one decision that claims the page; null while it is open.
+    usedAt: text("used_at"),
+    decision: text("decision"), // "approved" | "rejected", with usedAt
+    decidedBy: text("decided_by"), // the user who logged in to decide: history, not a link
+  },
+  (t) => [index("service_approvals_service_idx").on(t.serviceId)],
 );
 
 /** Async service invocations — the audit trail for calls and their write-backs.

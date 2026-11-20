@@ -172,6 +172,23 @@ export function validateDriverDefinition(def: unknown): DriverDefinition {
   for (const [name, action] of Object.entries(def.actions)) {
     validateAction(name, action);
   }
+  // A param destination must name a parameter of the actions it is for. An
+  // action declaring `params: null` takes whatever the service record says,
+  // so any name may be one of its parameters.
+  const checked = def as unknown as DriverDefinition;
+  for (const [index, destination] of (checked.configSchema?.destinations ?? []).entries()) {
+    if (destination.param === undefined) continue;
+    const at = `driver "${checked.name}" configSchema.destinations[${index}]`;
+    const names = destination.actions ?? Object.keys(checked.actions);
+    for (const name of names) {
+      if (!Object.hasOwn(checked.actions, name)) throw invalid(`${at}.actions names "${name}", which is not one of its actions`);
+    }
+    const takes = names.some((name) => {
+      const params = checked.actions[name]!.params;
+      return params === null || params.some((spec) => spec.name === destination.param);
+    });
+    if (!takes) throw invalid(`${at}.param "${destination.param}" is not a parameter of ${destination.actions ? "those actions" : "any action"}`);
+  }
   if (typeof def.run !== "function") {
     throw invalid(`driver "${def.name}" must export a run(ctx) function`);
   }

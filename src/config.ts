@@ -83,7 +83,7 @@ export interface YapConfig {
   uploadTtlSeconds: number;
   downloadTtlSeconds: number;
   widgetTokenTtlSeconds: number;
-  /** How long a secret request (the one-off form for a service's secrets) stays open. */
+  /** How long a secret request (the one-off form for a service's secrets) stays open, and a service approve page too. */
   secretRequestTtlSeconds: number;
   oauthAccessTokenTtlSeconds: number;
   oauthRefreshTokenTtlSeconds: number;

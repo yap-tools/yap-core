@@ -237,6 +237,14 @@ function buildMailConfigSchema(): DriverConfigSchema {
         boundTo: ["oauth2.token_url", "imap", "smtp", "allow_plaintext_auth"],
       },
     ],
+    destinations: [
+      { label: "IMAP server", setting: "imap" },
+      { label: "SMTP server", setting: "smtp" },
+      { label: "OAuth token endpoint", setting: "oauth2.token_url" },
+      { label: "Recipients (To)", param: "to", actions: ["send"] },
+      { label: "Recipients (Cc)", param: "cc", actions: ["send"] },
+      { label: "Recipients (Bcc)", param: "bcc", actions: ["send"] },
+    ],
   };
 }
 

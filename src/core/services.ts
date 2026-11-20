@@ -37,6 +37,15 @@
  * and the secrets are entered by a human through a one-off form
  * (secretRequests.ts), so they never pass through the agent.
  *
+ * A service written over MCP does not run until a person approves it
+ * (serviceApprovals.ts): a service can send data out of the instance, and an
+ * agent can be steered by something it read. An MCP create leaves it waiting;
+ * an MCP update that changes what it does or where data goes puts it back to
+ * waiting; a REST write counts as approved, since its author sent the whole
+ * config. Entering secrets through the form leaves the approval as it is. The
+ * runner refuses a service that waits (runs.ts, `prepareRun`), so a run and a
+ * schedule both do.
+ *
  * A run writes to its bundle with the service's authority, not the runner's:
  * the bundle writer below skips the `edit_items` / `edit_files` check. That
  * holds because the author vouched for those writes: creating or changing a
@@ -146,6 +155,9 @@ export interface ServiceInfo {
   description: string;
   driver: string;
   actions: ServiceActionInfo[];
+  /** False while the service waits for a person's approval: it was written or
+   *  changed over MCP, and it does not run until approved (serviceApprovals.ts). */
+  approved: boolean;
 }
 
 /**
@@ -165,6 +177,10 @@ export interface ServiceAuthorInfo extends ServiceInfo {
   /** The secret paths that hold a value (map keys spelled out, e.g.
    *  `headers.Authorization`), sorted; null exactly when `settings` is. */
   secretsSet: string[] | null;
+  /** When a person last approved the service as it stands; null while it waits. */
+  approvedAt: string | null;
+  /** The user id of who approved it (a REST author, or the approve page's login). */
+  approvedBy: string | null;
 }
 
 export interface ServiceEnv {
@@ -186,6 +202,8 @@ interface ServiceRow {
   actions: string | null;
   settings: string | null;
   secretsEncrypted: string | null;
+  approvedAt: string | null;
+  approvedBy: string | null;
 }
 
 // ---- Validation -------------------------------------------------------------
@@ -595,7 +613,10 @@ function effectiveActions(
   }));
 }
 
-function toInfo(registry: DriverRegistry, row: Omit<ServiceRow, "settings" | "secretsEncrypted">): ServiceInfo {
+function toInfo(
+  registry: DriverRegistry,
+  row: Omit<ServiceRow, "settings" | "secretsEncrypted" | "approvedBy">,
+): ServiceInfo {
   const params = JSON.parse(row.params) as ServiceParamSpec[];
   const pins = JSON.parse(row.pins) as ServicePins;
   const def = registry.has(row.driver) ? registry.get(row.driver) : undefined;
@@ -605,6 +626,7 @@ function toInfo(registry: DriverRegistry, row: Omit<ServiceRow, "settings" | "se
     description: row.description,
     driver: row.driver,
     actions: effectiveActions(def, params, pins, row.actions),
+    approved: row.approvedAt !== null,
   };
 }
 
@@ -633,6 +655,8 @@ function toAuthorInfo(env: ServiceEnv, row: ServiceRow): ServiceAuthorInfo {
     params: JSON.parse(row.params) as ServiceParamSpec[],
     pins: JSON.parse(row.pins) as ServicePins,
     ...configView(def, row, env.config.masterKey),
+    approvedAt: row.approvedAt,
+    approvedBy: row.approvedBy,
   };
 }
 
@@ -649,6 +673,7 @@ export async function listServicesUnchecked(env: ServiceEnv, bundleId: string): 
       params: services.params,
       pins: services.pins,
       actions: services.actions,
+      approvedAt: services.approvedAt,
     })
     .from(services)
     .where(eq(services.bundleId, bundleId))
@@ -682,6 +707,8 @@ export async function listServices(
       actions: services.actions,
       settings: services.settings,
       secretsEncrypted: services.secretsEncrypted,
+      approvedAt: services.approvedAt,
+      approvedBy: services.approvedBy,
     })
     .from(services)
     .where(eq(services.bundleId, bundleId))
@@ -803,6 +830,10 @@ export async function createService(
   const now = nowIso();
   const id = newId();
   const description = input.description ?? "";
+  // Written over REST, the author sent the whole config and is the approval.
+  // Written over MCP, it waits for a person (serviceApprovals.ts).
+  const approvedAt = authoring === "rest" ? now : null;
+  const approvedBy = authoring === "rest" ? userId : null;
   await db.client.insert(services).values({
     id,
     bundleId,
@@ -813,6 +844,8 @@ export async function createService(
     pins: JSON.stringify(pins),
     actions,
     ...columns,
+    approvedAt,
+    approvedBy,
     createdAt: now,
     updatedAt: now,
   });
@@ -825,7 +858,47 @@ export async function createService(
     params,
     pins: pins as ServicePins,
     ...configView(def, columns, env.config.masterKey),
+    approved: approvedAt !== null,
+    approvedAt,
+    approvedBy,
   };
+}
+
+/**
+ * What an approval covers, as one comparable string: everything that decides
+ * what a service does and where its data goes. Name and description are not
+ * in it (they change what an agent reads, not what a run does), nor secret
+ * values, only which secret paths are set.
+ */
+function approvalShape(
+  def: DriverDefinition | undefined,
+  fields: { params: unknown; pins: unknown; actions: string | null },
+  columns: Pick<StoredConfigColumns, "settings" | "secretsEncrypted">,
+  masterKey: Buffer,
+): string {
+  const view = configView(def, columns, masterKey);
+  let actions: unknown = fields.actions;
+  try {
+    // Parsed so key order and spacing do not count; a value that is not JSON is compared as it is.
+    actions = fields.actions === null ? null : JSON.parse(fields.actions);
+  } catch {
+    /* compared raw */
+  }
+  return canonicalJson({
+    params: fields.params,
+    pins: fields.pins,
+    actions,
+    settings: view.settings,
+    secretsSet: view.secretsSet,
+  });
+}
+
+/** JSON with object keys sorted, so two equal values always print the same. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
+    return Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  });
 }
 
 export async function updateService(
@@ -909,7 +982,21 @@ export async function updateService(
       : undefined;
   if (name !== undefined) await assertNameFree(db, row.bundleId, name, serviceId);
 
-  const { services, secretRequests } = db.tables;
+  // Approval (serviceApprovals.ts). Over MCP, a write that changes what the
+  // service does or where it sends data (params, pins, actions, settings, or
+  // which secrets are set) puts it back to waiting for a person; renaming it,
+  // or sending back what is already stored, does not. Over REST, a write
+  // that sends the config is the author's own approval, as a REST create is.
+  let approval: { approvedAt: string | null; approvedBy: string | null } | undefined;
+  if (authoring === "mcp") {
+    const before = approvalShape(def, { params: JSON.parse(row.params), pins: JSON.parse(row.pins), actions: row.actions }, row, env.config.masterKey);
+    const after = approvalShape(def, { params, pins, actions }, columns ?? row, env.config.masterKey);
+    if (before !== after) approval = { approvedAt: null, approvedBy: null };
+  } else if (patch.config !== undefined) {
+    approval = { approvedAt: nowIso(), approvedBy: userId };
+  }
+
+  const { services, secretRequests, serviceApprovals } = db.tables;
   if (columns) {
     // A config change closes the service's open secret forms: a form was
     // handed to a human for the service as it was, and must not deliver a
@@ -920,6 +1007,13 @@ export async function updateService(
       .delete(secretRequests)
       .where(and(eq(secretRequests.serviceId, serviceId), isNull(secretRequests.usedAt)));
   }
+  if (approval) {
+    // An approval page shows the service as it was; one opened before this
+    // write must not approve what the write made of it.
+    await db.client
+      .delete(serviceApprovals)
+      .where(and(eq(serviceApprovals.serviceId, serviceId), isNull(serviceApprovals.usedAt)));
+  }
   await db.client
     .update(services)
     .set({
@@ -929,9 +1023,22 @@ export async function updateService(
       ...(patch.pins !== undefined ? { pins: JSON.stringify(pins) } : {}),
       ...(patch.actions !== undefined ? { actions } : {}),
       ...(columns ?? {}),
+      ...(approval ?? {}),
       updatedAt: nowIso(),
     })
-    .where(eq(services.id, serviceId));
+    // Over MCP the approval decision above was made against the row as read,
+    // so the write lands only on that row: a write in between (another
+    // update, an approval) fails this one rather than letting it keep an
+    // approval given to something else.
+    .where(
+      authoring === "mcp"
+        ? and(eq(services.id, serviceId), eq(services.updatedAt, row.updatedAt), eq(services.configEncrypted, row.configEncrypted))
+        : eq(services.id, serviceId),
+    )
+    .returning({ id: services.id })
+    .then((written) => {
+      if (written.length === 0) throw new YapError("conflict", `service "${row.name}" changed while this update was made: read it again and retry`);
+    });
   // Built from the row plus the patch rather than read back: every field of the
   // view is already resolved above — the effective actions from the *post*-patch
   // params, pins, and allowlist — so a second SELECT would only re-derive what
@@ -945,6 +1052,9 @@ export async function updateService(
     params,
     pins: pins as ServicePins,
     ...configView(def, columns ?? row, env.config.masterKey),
+    approved: (approval ?? row).approvedAt !== null,
+    approvedAt: (approval ?? row).approvedAt,
+    approvedBy: (approval ?? row).approvedBy,
   };
 }
 

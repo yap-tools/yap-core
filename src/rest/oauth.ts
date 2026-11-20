@@ -11,10 +11,9 @@ import type { Context } from "hono";
 
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
-import { constantTimeEqual } from "../crypto.js";
 import { requireAccountCapability } from "../core/accountCapabilities.js";
 import { YapError } from "../core/errors.js";
-import { authenticateKeyRow } from "../core/keys.js";
+import { pageLogin } from "../core/keys.js";
 import * as oauth from "../core/oauth.js";
 import type { YapServer } from "../server.js";
 
@@ -420,13 +419,13 @@ export function registerOAuthRoutes(server: YapServer): void {
         scope.role = chosenRole;
       }
 
-      const presentedKey = formValue(form, "access_key").trim();
-      if (!presentedKey || constantTimeEqual(presentedKey, config.sysadminKey)) {
-        return renderConsent(c, client, params, scope.role, "Enter one of your user access keys (the sysadmin key cannot authorize apps).");
-      }
-      const keyAuth = await authenticateKeyRow(db, presentedKey);
-      if (!keyAuth) {
-        return renderConsent(c, client, params, scope.role, "That access key is invalid or revoked.");
+      const keyAuth = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
+      if (!keyAuth.ok) {
+        const message =
+          keyAuth.reason === "invalid"
+            ? "That access key is invalid or revoked."
+            : "Enter one of your user access keys (the sysadmin key cannot authorize apps).";
+        return renderConsent(c, client, params, scope.role, message);
       }
 
       // The granted scope is what the user selected. The capability layer
@@ -495,9 +494,8 @@ export function registerOAuthRoutes(server: YapServer): void {
 
   /** Key auth for the self-served pages: sysadmin key refused, like consent. */
   async function pageKeyAuth(form: Record<string, string>): Promise<{ userId: string; keyId: string } | null> {
-    const presented = formValue(form, "access_key").trim();
-    if (!presented || constantTimeEqual(presented, config.sysadminKey)) return null;
-    return authenticateKeyRow(db, presented);
+    const login = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
+    return login.ok ? { userId: login.userId, keyId: login.keyId } : null;
   }
 
   const BAD_KEY = "That access key is invalid or revoked (the sysadmin key has no connections).";

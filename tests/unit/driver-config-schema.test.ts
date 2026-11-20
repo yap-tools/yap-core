@@ -97,6 +97,21 @@ describe("built-in driver config schemas", () => {
     const http = builtIns.find((d) => d.name === "http")!.configSchema!;
     expect(http.secrets.map((s) => s.path)).toEqual(["headers.*"]);
   });
+
+  it("names where each built-in sends data", () => {
+    const http = builtIns.find((d) => d.name === "http")!.configSchema!;
+    expect(http.destinations).toEqual([{ label: "URL", setting: "url" }]);
+    const mail = builtIns.find((d) => d.name === "mail")!.configSchema!;
+    expect(mail.destinations!.map((d) => d.setting ?? `param:${d.param}`)).toEqual([
+      "imap",
+      "smtp",
+      "oauth2.token_url",
+      "param:to",
+      "param:cc",
+      "param:bcc",
+    ]);
+    expect(mail.destinations!.find((d) => d.param === "to")!.actions).toEqual(["send"]);
+  });
 });
 
 function definition(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -218,6 +233,31 @@ describe("configSchema on the driver contract", () => {
         ],
       },
       /boundTo "auth\.key" is a secret path/,
+    ],
+    [
+      "a destination with neither setting nor param",
+      { ...goodSchema, destinations: [{ label: "Where" }] },
+      /destinations\[0\] needs exactly one of setting and param/,
+    ],
+    [
+      "a destination the schema does not declare",
+      { ...goodSchema, destinations: [{ label: "URL", setting: "url" }] },
+      /destinations\[0\]\.setting "url" does not name a field/,
+    ],
+    [
+      "a destination that is a secret",
+      { ...goodSchema, destinations: [{ label: "Key", setting: "auth.key" }] },
+      /destinations\[0\]\.setting "auth\.key" is a secret path/,
+    ],
+    [
+      "a param destination no action takes",
+      { ...goodSchema, destinations: [{ label: "To", param: "to" }] },
+      /destinations\[0\]\.param "to" is not a parameter/,
+    ],
+    [
+      "a param destination for an unknown action",
+      { ...goodSchema, destinations: [{ label: "To", param: "to", actions: ["send"] }] },
+      /names "send", which is not one of its actions/,
     ],
   ];
   for (const [name, configSchema, message] of bad) {

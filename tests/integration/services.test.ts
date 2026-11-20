@@ -510,6 +510,7 @@ describeEachAdapter("services", (adapter) => {
       // creation check — as if DNS changed after authoring.
       const { services } = app.db.tables;
       await app.db.client.insert(services).values({
+        approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
         id: "planted-service",
         bundleId,
         name: "rebound",
@@ -847,7 +848,8 @@ describeEachAdapter("services", (adapter) => {
       const bundle = loaded.bundles[0];
 
       const notify = bundle.services.find((s: any) => s.name === "notify");
-      expect(Object.keys(notify).sort()).toEqual(["actions", "description", "driver", "id", "name"]);
+      expect(Object.keys(notify).sort()).toEqual(["actions", "approved", "description", "driver", "id", "name"]);
+      expect(notify.approved).toBe(true);
       expect(notify.driver).toBe("http");
       expect(notify.description).toBe("Send a notification");
       expect(notify.actions.map((a: any) => a.name)).toEqual(["fire"]);
@@ -874,6 +876,7 @@ describeEachAdapter("services", (adapter) => {
     it("lists a service whose driver is not installed, with no actions and no crash", async () => {
       const { services } = app.db.tables;
       await app.db.client.insert(services).values({
+        approvedAt: "2026-01-01T00:00:00.000Z", // a service written before approvals: approved
         id: "orphaned-driver-service",
         bundleId: siblingBundleId,
         name: "orphaned",

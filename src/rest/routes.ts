@@ -28,6 +28,7 @@ import { propertyConfigSchema } from "../core/propertyConfig.js";
 import * as runsCore from "../core/runs.js";
 import * as schedulesCore from "../core/schedules.js";
 import * as secretRequestsCore from "../core/secretRequests.js";
+import * as serviceApprovalsCore from "../core/serviceApprovals.js";
 import * as servicesCore from "../core/services.js";
 import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
@@ -1016,6 +1017,19 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  // A service written over MCP waits for a person. This opens the approve page
+  // for one, as MCP approval_request does; the page itself is where they decide.
+  app.post(
+    "/v1/services/:id/approval-request",
+    handle(async (c, auth) => {
+      const userId = requireUser(auth);
+      const serviceId = param(c, "id");
+      const bundleId = await servicesCore.getServiceBundleId(db, serviceId);
+      const { result } = await serviceApprovalsCore.requestApproval(serviceEnv, userId, bundleId, { service: serviceId });
+      return c.json(result, 201);
+    }),
+  );
+
   app.post(
     "/v1/services/:id/run",
     handle(async (c, auth) => {
@@ -1238,22 +1252,88 @@ export function registerRestRoutes(server: YapServer): void {
   //
   // The secret-input widget posts here, from the host's frame or from its
   // origin page. The token is minted by secret_request for a caller holding
-  // edit_services; the core enforces single use, expiry and the rest. The body
-  // carries the token rather than the URL, so it stays out of access logs.
+  // edit_services and opens the form; saving also needs the person's access
+  // key in the body (never an OAuth token), since the agent can see the token.
+  // The core enforces the login, single use, expiry and the rest. Token and
+  // key travel in the body, so they stay out of access logs.
 
   app.post(
     "/v1/secret-requests/:id/submit",
     handle(async (c) => {
       const requestId = param(c, "id");
       const body = parseBody(
-        z.object({ token: z.string(), values: z.record(z.string(), z.unknown()) }),
+        z.object({ token: z.string(), values: z.record(z.string(), z.unknown()), access_key: z.string().optional() }),
         await jsonBody(c),
       );
       const payload = verifyToken(body.token, config.masterKey);
       if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
         throw unauthorized("this form has expired or its link is not valid: ask for a new one");
       }
-      return c.json(await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values));
+      return c.json(await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values, body.access_key));
+    }),
+  );
+
+  // The widget in a host's frame fetches the form from here before showing it:
+  // the data it was handed there came through the model.
+  app.post(
+    "/v1/secret-requests/:id/view",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(z.object({ token: z.string() }), await jsonBody(c));
+      const payload = verifyToken(body.token, config.masterKey);
+      if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
+        throw unauthorized("this form has expired or its link is not valid: ask for a new one");
+      }
+      return c.json(await secretRequestsCore.secretPageData(serviceEnv, requestId));
+    }),
+  );
+
+  // ---- Approve pages (public; the token opens the page, a login decides) ---------
+  //
+  // The service-approve widget calls these, from the host's frame or from its
+  // origin page. The token, minted by approval_request, lets it read the
+  // service as the server has it and reject it. Approving also needs a user
+  // access key in the body (never an OAuth token), whose user holds
+  // edit_services on the bundle. Token and key travel in the body.
+
+  const approvalToken = (requestId: string, token: string): void => {
+    const payload = verifyToken(token, config.masterKey);
+    if (!payload || payload.scope !== "service-approve" || payload.requestId !== requestId) {
+      throw unauthorized("this approval page has expired or its link is not valid: ask for a new one");
+    }
+  };
+
+  app.post(
+    "/v1/service-approvals/:id/view",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(z.object({ token: z.string() }), await jsonBody(c));
+      approvalToken(requestId, body.token);
+      return c.json(await serviceApprovalsCore.approvalView(serviceEnv, requestId));
+    }),
+  );
+
+  app.post(
+    "/v1/service-approvals/:id/decide",
+    handle(async (c) => {
+      const requestId = param(c, "id");
+      const body = parseBody(
+        z.object({
+          token: z.string(),
+          decision: z.enum(["approve", "reject"]),
+          access_key: z.string().optional(),
+          fingerprint: z.string().optional(),
+        }),
+        await jsonBody(c),
+      );
+      approvalToken(requestId, body.token);
+      return c.json(
+        await serviceApprovalsCore.decideApproval(serviceEnv, requestId, {
+          decision: body.decision,
+          accessKey: body.access_key,
+          fingerprint: body.fingerprint,
+        }),
+      );
     }),
   );
 

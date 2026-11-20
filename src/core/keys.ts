@@ -5,7 +5,7 @@
  */
 import { and, asc, eq, isNull } from "drizzle-orm";
 
-import { generateAccessKey, hashKey } from "../crypto.js";
+import { constantTimeEqual, generateAccessKey, hashKey, OAUTH_ACCESS_TOKEN_PREFIX } from "../crypto.js";
 import type { Db } from "../db/index.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertCanManageCredentials } from "./authScope.js";
@@ -153,4 +153,28 @@ export async function authenticateKeyRow(
     .from(accessKeys)
     .where(and(eq(accessKeys.keyHash, hashKey(presentedKey)), isNull(accessKeys.revokedAt)));
   return rows[0] ?? null;
+}
+
+/** Why a page login was refused, so each page can word it for its own reader. */
+export type PageLoginRefusal = "missing" | "sysadmin" | "oauth-token" | "invalid";
+
+/**
+ * The login a person gives on one of the pages Core serves itself: the OAuth
+ * consent screen, the connected-apps page, and the service approve page. Core
+ * has no passwords or sessions, so it is a user access key pasted into the
+ * page. Refused: the sysadmin key (an operator credential, not a person) and
+ * an OAuth token, which an app holds on a person's behalf and which is
+ * exactly what must not be able to stand in for them here.
+ */
+export async function pageLogin(
+  db: Db,
+  sysadminKey: string,
+  presented: string,
+): Promise<{ ok: true; userId: string; keyId: string } | { ok: false; reason: PageLoginRefusal }> {
+  const key = presented.trim();
+  if (!key) return { ok: false, reason: "missing" };
+  if (constantTimeEqual(key, sysadminKey)) return { ok: false, reason: "sysadmin" };
+  if (key.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) return { ok: false, reason: "oauth-token" };
+  const row = await authenticateKeyRow(db, key);
+  return row ? { ok: true, ...row } : { ok: false, reason: "invalid" };
 }

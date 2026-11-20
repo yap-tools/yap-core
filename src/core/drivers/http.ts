@@ -142,6 +142,9 @@ export const httpConfigSchemaInfo: DriverConfigSchema = {
       boundTo: ["url"],
     },
   ],
+  // A pin or a run's parameter can fill a {{placeholder}} in the path or query,
+  // never the host; the approve page shows the url with the pins filled in.
+  destinations: [{ label: "URL", setting: "url" }],
 };
 
 /** Renders the origin the SSRF guard should vouch for, with placeholders

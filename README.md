@@ -180,7 +180,7 @@ local dev.
 | `YAP_DRIVERS_DIR` | `./drivers` | Installed service drivers, one package folder each; loaded at startup |
 | `YAP_MAX_FILE_SIZE_BYTES` | 50 MiB | File size cap (uploads and sideloads) |
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
-| `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` / `YAP_SECRET_REQUEST_TTL_SECONDS` | 600 / 14400 / 600 / 600 | Link/token lifetimes; the last is how long a secret form stays open |
+| `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` / `YAP_SECRET_REQUEST_TTL_SECONDS` | 600 / 14400 / 600 / 600 | Link/token lifetimes; the last is how long a secret form or a service approve page stays open |
 | `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
@@ -261,7 +261,8 @@ metadata and descending only into the relevant branch:
   `run_service`, `get_run`, `list_runs`, `create_schedule`, `update_schedule`,
   `delete_schedule`, `list_schedules`, and the deprecated `fire_hook` alias
   (kept until 1.0). Service authoring (`edit_services`): `get_service`,
-  `create_service`, `update_service`, `delete_service` and `secret_request`.
+  `create_service`, `update_service`, `delete_service`, `secret_request` and
+  `approval_request`.
   Management (gated by the matching capability): `update_space` /
   `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
@@ -277,8 +278,10 @@ metadata and descending only into the relevant branch:
 either surface; REST and MCP are two transports over one capability-checked
 core. Service authoring is on both, with one difference: over MCP an agent
 sends a service's **settings only**, and its secrets reach the server through
-a one-off form a human fills in, so they never pass through the agent (see
-[docs/mcp-service-authoring.md](docs/mcp-service-authoring.md)). What stays
+a one-off form a human fills in, so they never pass through the agent, and a
+service it writes stays off until a person approves it (see
+[docs/mcp-service-authoring.md](docs/mcp-service-authoring.md) and
+[docs/service-approval.md](docs/service-approval.md)). What stays
 REST-only is the **operator/account actions** that aren't role capabilities
 (user provisioning via the sysadmin key, and access-key management), and
 authoring a service on a driver without a config schema. The REST API under
@@ -467,7 +470,9 @@ be the instance's externally reachable origin (https except on loopback).
   `update_service` take the settings, refuse any value at a secret path, and
   check the config as if the missing secrets were filled in; `secret_request`
   then hands the user a one-off form (an MCP widget, or a signed page) whose
-  password fields post straight to the server. The form takes one
+  password fields post straight to the server, with the person's access key:
+  the agent can see the form's token, so the token alone does not save a
+  secret. The form takes one
   submission, closes if the service's config changes, and expires after `YAP_SECRET_REQUEST_TTL_SECONDS` (default
   600). An MCP update that changes where a secret is sent (an http `url`, a
   mail server: the secret's `boundTo` in the driver's schema) drops that
@@ -475,6 +480,19 @@ be the instance's externally reachable origin (https except on loopback).
   `get_service` shows an author the settings, pins and `secretsSet`.
   The whole flow is in
   [docs/mcp-service-authoring.md](docs/mcp-service-authoring.md).
+  **A service an agent writes stays off until a person approves it.** A
+  service can send data out, and an agent can be steered by what it read, so
+  `run_service` and schedules refuse a service created over MCP, or changed
+  there in what it does or where data goes, until someone approves it.
+  `approval_request` gives them a one-off page (widget or signed link) that
+  shows the service as the server has it, where data goes first, and
+  approves it once they log in with a user access key and hold
+  `edit_services`; the link alone, an OAuth token and the sysadmin key are
+  not enough. Services written over REST, and every service from before,
+  count as approved, and listings show `approved`. Entering a secret
+  through the form keeps the approval. Details, and the known limit for an
+  agent that holds a raw access key, in
+  [docs/service-approval.md](docs/service-approval.md).
   A driver without a schema keeps its whole config as one encrypted blob
   that nobody reads back. Either way the full config is decrypted only in
   memory inside a run. Services authored before the split are split on the
@@ -690,11 +708,16 @@ be the instance's externally reachable origin (https except on loopback).
   unwrapped, so passing the whole `_meta` envelope still renders. Images,
   audio and video play inline (audio with its filename above the player),
   and every card has exactly one Download link.
-  The secret input (`secret_request`'s pointer) shows one password field per
-  requested secret path, posts the values straight to
-  `POST /v1/secret-requests/:id/submit` with its own signed token, and then
-  shows "Saved" and nothing else; its origin page is
-  `/w/secret-input?token=…`.
+  The secret input (`secret_request`'s pointer) shows where the secrets will
+  be sent, one password field per requested secret path and a field for the
+  person's access key, posts them straight to
+  `POST /v1/secret-requests/:id/submit` with its own signed token (saving
+  needs the login, as approving does), and then shows "Saved" and nothing else; its origin page is
+  `/w/secret-input?token=…`. The service approve page (`approval_request`'s
+  pointer, origin page `/w/service-approve?token=…`) shows a service written
+  over MCP for a person to approve or reject. Both read what they show from
+  the server (`POST …/view`) rather than from data a host passed through the
+  model, and both send only to the instance their HTML was served by.
 
 ## Development
 

@@ -28,6 +28,8 @@ const ALL_TABLES = [
   "item_types",
   "runs",
   "schedules",
+  "secret_requests",
+  "service_approvals",
   "services",
   "files",
   "user_docs",

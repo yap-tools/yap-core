@@ -42,12 +42,33 @@ export interface DriverSecretField {
   boundTo?: string[];
 }
 
+/**
+ * One place a service on this driver sends data: a setting (the http `url`,
+ * the mail `smtp` server) or a parameter (the mail `to` address). The approve
+ * page and the secret form show these first, with their values, so a person
+ * sees where data goes before they let a service run or hand it a secret.
+ * Exactly one of `setting` and `param`.
+ */
+export interface DriverDestination {
+  /** Short human label, e.g. "URL" or "SMTP server". */
+  label: string;
+  /** Dot path of a non-secret field of the config. */
+  setting?: string;
+  /** A parameter one of the driver's actions declares; shown pinned or as chosen per run. */
+  param?: string;
+  /** For a `param`: the actions in which it names a destination (the mail
+   *  `to` of send, not of search). Omitted: every action that takes it. */
+  actions?: string[];
+}
+
 export interface DriverConfigSchema {
   /** A JSON Schema (draft 2020-12) for the config object. Its `examples`
    * keyword, when present, holds configs the driver accepts. */
   jsonSchema: Record<string, unknown>;
   /** Every path in the config that holds a secret. May be empty. */
   secrets: DriverSecretField[];
+  /** Where a service on this driver sends data. Omitted: the driver names none. */
+  destinations?: DriverDestination[];
 }
 
 const SEGMENT = /^(?:[A-Za-z0-9_-]+|\*)$/;
@@ -162,14 +183,47 @@ export function validateConfigSchema(raw: unknown, field: string): DriverConfigS
     }
   }
   // A binding must name a setting, not a secret: checked once every secret path is known.
+  const isSecret = (setting: string): boolean => {
+    const b = setting.split(".");
+    return [...seen].some((path) => {
+      const p = path.split(".");
+      return p.length <= b.length && p.every((seg, i) => seg === "*" || seg === b[i]);
+    });
+  };
   for (const [index, entry] of (secrets as Array<Record<string, unknown>>).entries()) {
     for (const bound of (entry.boundTo as string[] | undefined) ?? []) {
-      const b = bound.split(".");
-      const isSecret = [...seen].some((path) => {
-        const p = path.split(".");
-        return p.length <= b.length && p.every((seg, i) => seg === "*" || seg === b[i]);
-      });
-      if (isSecret) throw invalid(`${field}.secrets[${index}].boundTo "${bound}" is a secret path, not a setting`);
+      if (isSecret(bound)) throw invalid(`${field}.secrets[${index}].boundTo "${bound}" is a secret path, not a setting`);
+    }
+  }
+  const { destinations } = raw;
+  if (destinations !== undefined) {
+    if (!Array.isArray(destinations)) throw invalid(`${field}.destinations must be an array when present`);
+    for (const [index, entry] of destinations.entries()) {
+      const at = `${field}.destinations[${index}]`;
+      if (!isPlainObject(entry)) throw invalid(`${at} must be an object with label and setting or param`);
+      const { label, setting, param } = entry;
+      if (typeof label !== "string" || label.trim() === "" || label.length > MAX_LABEL) {
+        throw invalid(`${at}.label must be a non-empty string of at most ${MAX_LABEL} characters`);
+      }
+      if ((setting === undefined) === (param === undefined)) throw invalid(`${at} needs exactly one of setting and param`);
+      if (setting !== undefined) {
+        if (typeof setting !== "string" || setting === "" || !setting.split(".").every((s) => SEGMENT.test(s) && s !== "*")) {
+          throw invalid(`${at}.setting must be a dot path of property names, got ${JSON.stringify(setting)}`);
+        }
+        if (!secretPathResolves(jsonSchema, setting)) throw invalid(`${at}.setting "${setting}" does not name a field in jsonSchema`);
+        if (isSecret(setting)) throw invalid(`${at}.setting "${setting}" is a secret path, not a setting`);
+      }
+      // A param is checked against the driver's actions by the registry, which knows them.
+      if (param !== undefined && (typeof param !== "string" || param === "")) {
+        throw invalid(`${at}.param must be a parameter name`);
+      }
+      const { actions } = entry;
+      if (actions !== undefined) {
+        if (param === undefined) throw invalid(`${at}.actions applies to a param destination only`);
+        if (!Array.isArray(actions) || actions.length === 0 || actions.some((a) => typeof a !== "string" || a === "")) {
+          throw invalid(`${at}.actions must be a non-empty array of action names when present`);
+        }
+      }
     }
   }
   return raw as unknown as DriverConfigSchema;

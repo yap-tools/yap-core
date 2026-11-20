@@ -21,6 +21,7 @@ import * as legacyHooks from "../core/legacyHooks.js";
 import * as runsCore from "../core/runs.js";
 import * as schedulesCore from "../core/schedules.js";
 import * as secretRequestsCore from "../core/secretRequests.js";
+import * as serviceApprovalsCore from "../core/serviceApprovals.js";
 import * as servicesCore from "../core/services.js";
 import * as spacesCore from "../core/spaces.js";
 import type { PropertyConfig } from "../core/propertyConfig.js";
@@ -535,7 +536,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   // that need a secret wait until it is entered (see services.ts).
   get_service: {
     description:
-      "Read one service in full: id, name, description, driver, actions, plus — for a caller holding edit_services on the bundle — the record's params, pins, settings (the config without its secrets) and secretsSet (which secret paths hold a value; never a value). Anyone else gets the listing view load_bundle shows. settings and secretsSet are null when the service keeps its config as one sealed secret (a driver without a config schema), which can only be changed over REST. Read a service with this before update_service. Params: id (the service's name or id).",
+      "Read one service in full: id, name, description, driver, actions, approved (false while it waits for a person: see approval_request), plus — for a caller holding edit_services on the bundle — the record's params, pins, settings (the config without its secrets) and secretsSet (which secret paths hold a value; never a value), approvedAt and approvedBy. Anyone else gets the listing view load_bundle shows. settings and secretsSet are null when the service keeps its config as one sealed secret (a driver without a config schema), which can only be changed over REST. Read a service with this before update_service. Params: id (the service's name or id).",
     capability: "(bundle read access)",
     params: idParam,
     handler: async (env, params) => ({
@@ -544,7 +545,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   create_service: {
     description:
-      'Create a service in the bundle from one of the installed drivers (list_drivers shows each one\'s actions and config schema). Params: name, driver? (default "http"), description?, params? (parameter specs [{name, description?, required?}] — for http, the {{placeholders}} its template uses), pins? ({param: fixed scalar}, hidden from runners), actions? (allowlist of the driver\'s action names; omit for all), settings (the driver\'s config WITHOUT any secret: a value at a path the driver marks secret is refused). Secrets are never sent here: after creating, call secret_request so the user types them into a one-off form that goes straight to the server. The driver\'s config checks run now with the missing secrets treated as filled in; checks that need the real secrets run when they are entered. A driver without a config schema cannot be authored over MCP. A driver that writes items or files into the bundle also needs edit_items / edit_files. Returns the service as get_service shows it. Example: {name: "notify", driver: "http", params: [{name: "text", required: true}], settings: {url: "https://api.example.com/notify", method: "POST", headers: {}, body_json: {text: "{{text}}"}}}, then secret_request {id: "notify", paths: ["headers.authorization"]}.',
+      'Create a service in the bundle from one of the installed drivers (list_drivers shows each one\'s actions and config schema). Params: name, driver? (default "http"), description?, params? (parameter specs [{name, description?, required?}] — for http, the {{placeholders}} its template uses), pins? ({param: fixed scalar}, hidden from runners), actions? (allowlist of the driver\'s action names; omit for all), settings (the driver\'s config WITHOUT any secret: a value at a path the driver marks secret is refused). Secrets are never sent here: after creating, call secret_request so the user types them into a one-off form that goes straight to the server. The driver\'s config checks run now with the missing secrets treated as filled in; checks that need the real secrets run when they are entered. A driver without a config schema cannot be authored over MCP. A driver that writes items or files into the bundle also needs edit_items / edit_files. The new service is off until a person approves it: after entering its secrets, call approval_request. Returns the service as get_service shows it. Example: {name: "notify", driver: "http", params: [{name: "text", required: true}], settings: {url: "https://api.example.com/notify", method: "POST", headers: {}, body_json: {text: "{{text}}"}}}, then secret_request {id: "notify", paths: ["headers.authorization"]}, then approval_request {id: "notify"}.',
     capability: "edit_services",
     params: {
       name: { required: true },
@@ -576,7 +577,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_service: {
     description:
-      "Change a service. Params: id (name or id), and any of name, description, params (replaces the specs), pins (replaces the set; null clears it), actions (replaces the allowlist; null = every action), settings. settings replaces the stored settings whole, so send what get_service returned, edited: a secret is kept as long as the object holding it is still in the settings, and dropping that object drops its secrets; null at a secret path removes that secret. Changing a setting a secret is bound to (where it is sent: an http url, a mail server — see boundTo in list_drivers) drops that secret too, and the user enters it again through secret_request. A secret value is refused, as on create_service: change a secret with secret_request. A service whose config is one sealed secret cannot be changed over MCP. Returns the service as get_service shows it.",
+      "Change a service. Params: id (name or id), and any of name, description, params (replaces the specs), pins (replaces the set; null clears it), actions (replaces the allowlist; null = every action), settings. settings replaces the stored settings whole, so send what get_service returned, edited: a secret is kept as long as the object holding it is still in the settings, and dropping that object drops its secrets; null at a secret path removes that secret. Changing a setting a secret is bound to (where it is sent: an http url, a mail server — see boundTo in list_drivers) drops that secret too, and the user enters it again through secret_request. A secret value is refused, as on create_service: change a secret with secret_request. A service whose config is one sealed secret cannot be changed over MCP. A change to params, pins, actions or settings that makes the service differ from what is stored turns it off until a person approves it again (approval_request); name and description do not. Returns the service as get_service shows it.",
     capability: "edit_services",
     params: { id: { required: true }, name: {}, description: {}, params: {}, pins: {}, actions: {}, settings: {} },
     handler: async (env, params) => {
@@ -601,7 +602,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   delete_service: {
     description:
-      "Delete a service, with its schedules and its open secret forms. Its past runs stay in the run log. Params: id (the service's name or id).",
+      "Delete a service, with its schedules, its open secret forms and approval pages. Its past runs stay in the run log. Params: id (the service's name or id).",
     capability: "edit_services",
     params: idParam,
     handler: async (env, params) => {
@@ -612,7 +613,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   secret_request: {
     description:
-      "Ask the user for a service's secrets through a one-off form, so they go from the human straight to the server and never through you. Params: id (the service's name or id), paths? (the secret paths to ask for; omit for the ones the service still lacks, e.g. [\"pass\"] for a mail service on a password, or its two oauth2 secrets for one with an oauth2 block; a map path is named with its key, e.g. [\"headers.authorization\"] for http). Returns request_id, the fields (path, label, description, and whether each is already set — never a value), expires_in, and origin_url — a signed page with the form: give this link to the user. A secret-input widget pointer rides in _meta for widget-capable hosts: render it with show_widget(widget=\"secret-input\", params=<this result's _meta.data>). The form takes one successful submission and expires like an upload link; submitting sets the listed paths only. Afterwards, get_service's secretsSet shows what is set. Needs edit_services.",
+      "Ask the user for a service's secrets through a one-off form, so they go from the human straight to the server and never through you. Params: id (the service's name or id), paths? (the secret paths to ask for; omit for the ones the service still lacks, e.g. [\"pass\"] for a mail service on a password, or its two oauth2 secrets for one with an oauth2 block; a map path is named with its key, e.g. [\"headers.authorization\"] for http). Returns request_id, the fields (path, label, description, and whether each is already set — never a value), expires_in, and origin_url — a signed page with the form: give this link to the user. A secret-input widget pointer rides in _meta for widget-capable hosts: render it with show_widget(widget=\"secret-input\", params=<this result's _meta.data>). Saving needs the user's own access key (never an OAuth token), so you cannot fill the form in yourself. The form takes one successful submission and expires like an upload link; submitting sets the listed paths only. Afterwards, get_service's secretsSet shows what is set. Needs edit_services.",
     capability: "edit_services",
     params: { id: { required: true }, paths: {} },
     handler: async (env, params) => {
@@ -621,6 +622,18 @@ export const secondTier: Record<string, SecondTierTool> = {
         paths: params.paths,
       });
       return { result, _meta: { widget: "ui://yap/secret-input", data: { ...form } } };
+    },
+  },
+  approval_request: {
+    description:
+      "Ask a person to approve a service you created or changed. A service written over MCP is off until a person approves it: run_service and schedules refuse it, and get_service and load_bundle show approved: false. Changing its params, pins, actions or settings over MCP puts it back to waiting; renaming it, or entering secrets through secret_request, does not. Params: id (the service's name or id). Returns request_id, the service, expires_in, and origin_url, a signed page that shows the person exactly what they approve (where data goes, the actions, params, pins, settings, and which secrets are set) with Approve and Reject: give this link to the user. A service-approve widget pointer rides in _meta for widget-capable hosts: render it with show_widget(widget=\"service-approve\", params=<this result's _meta.data>). Approving needs the person to log in with one of their access keys and to hold edit_services on the bundle; the link alone is not enough, and an OAuth token is never accepted, so you cannot approve it yourself. Never ask the user to paste an access key into the chat. Enter secrets before asking, so the person sees them as set. The page takes one decision and expires like a secret form. Needs edit_services.",
+    capability: "edit_services",
+    params: idParam,
+    handler: async (env, params) => {
+      const { result, widget } = await serviceApprovalsCore.requestApproval(env, env.userId, env.bundleId, {
+        service: String(params.id),
+      });
+      return { result, _meta: { widget: "ui://yap/service-approve", data: { ...widget } } };
     },
   },
 

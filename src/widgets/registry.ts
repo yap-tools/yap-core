@@ -128,6 +128,50 @@ export const UPLOAD_ERROR_JS = `
   }
 `;
 
+/**
+ * Calls to the instance for the widgets that carry a person's input or show
+ * what they approve (secret-input, service-approve). Every call goes to
+ * `window.__YAP_BASE__`, the instance the widget's HTML was served by, never
+ * to a URL from the widget's data. `loadView` takes the view from an origin
+ * page's own embedded data (built by the server at serve time) and otherwise
+ * fetches it, since data handed over in a host's frame came through the model.
+ * Inlined into each such widget's render, so it also works mounted in the shell.
+ */
+export const SERVER_CALL_JS = `
+  function serverCall(path, body, done, failed) {
+    var yapBase = window.__YAP_BASE__;
+    if (!yapBase) { failed("This page cannot tell which Yap it belongs to. Ask for a new link."); return; }
+    fetch(yapBase + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (res) {
+        return res.text().then(function (text) {
+          var parsed = null;
+          try { parsed = JSON.parse(text); } catch (_e) {}
+          if (res.ok) { done(parsed); return; }
+          failed(parsed && parsed.error && parsed.error.message ? String(parsed.error.message) : "");
+        });
+      })
+      .catch(function () { failed("Could not reach the server. Check the connection and try again."); });
+  }
+  function loadView(d, path, done, failed) {
+    if (document.documentElement.getAttribute("data-yap-mode") === "origin" && window.__YAP_DATA__ === d) { done(d); return; }
+    serverCall(path, { token: d.token }, done, function (message) { failed(message || "This page could not be loaded. Ask for a new one."); });
+  }
+  function destinationsHtml(dests) {
+    var out = "";
+    for (var i = 0; i < dests.length; i++) {
+      var x = dests[i] || {};
+      var per = Array.isArray(x.chosenPerRun) ? x.chosenPerRun : [];
+      out += '<p><strong>' + esc(x.label) + '</strong><br>' +
+        (x.value === null || x.value === undefined
+          ? '<span class="muted">Chosen by whoever runs the service.</span>'
+          : '<span class="value">' + esc(x.value) + '</span>' +
+            (per.length ? '<br><span class="muted">Filled in by whoever runs it: ' + esc(per.join(", ")) + '</span>' : '')) +
+        '</p>';
+    }
+    return out;
+  }
+`;
+
 /** Shared bridge, inlined into every widget. */
 const BRIDGE_JS = `
   var MODE = document.documentElement.getAttribute("data-yap-mode") || "client";
@@ -726,7 +770,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "secret-input",
     uri: `${UI_SCHEME_PREFIX}secret-input`,
     description:
-      "One-off form for a service's secrets: a password field per requested secret path, with the driver's label and description. It POSTs the values straight to the server with its own signed token, so they never pass through the host or the model, then shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ service_name, fields: [{ path, label, description?, set }], submit_url, token }).",
+      "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's access key, which saving needs. In a host's frame it fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
     originHostable: true,
     style: `
       form { display: block; }
@@ -735,23 +779,37 @@ export const WIDGETS: Record<string, WidgetDef> = {
       .field .muted { display: block; }
       .field input { display: block; width: 100%; margin-top: 6px; font: inherit; color: inherit; padding: 7px 10px;
                      border-radius: var(--border-radius-small, 8px); border: 1px solid var(--yap-border); background: var(--yap-bg); }
+      .dest { border: 1px solid var(--yap-border); border-radius: var(--border-radius-small, 8px); padding: 8px 10px; margin: 0 0 14px; }
+      .dest .value { font-family: ui-monospace, monospace; word-break: break-all; }
       .done { font-weight: 600; }
       button:disabled { opacity: .6; cursor: default; }
     `,
     render: `
+      ${SERVER_CALL_JS}
       onData(function (d) {
         // Once saved, stay saved: a host re-delivering the result must not
         // bring back a form whose token is already spent.
         if (window.__yapSecretSaved) return;
         var root = document.getElementById("root");
-        var fields = (d && Array.isArray(d.fields)) ? d.fields : [];
-        if (!d || !d.submit_url || !d.token || fields.length === 0) {
+        if (!d || !d.request_id || !d.token) {
           root.innerHTML = '<div class="card muted">No form data reached this widget. Ask for a new secret form.</div>';
           return;
         }
+        var base = "/v1/secret-requests/" + encodeURIComponent(d.request_id);
+        // Only data the server built is shown: the page's own, or the form
+        // fetched from the server when the data came through a host.
+        loadView(d, base + "/view", function (form) { show(root, d, base, form); },
+          function (message) { root.innerHTML = '<div class="card err">' + esc(message) + '</div>'; requestAnimationFrame(announceHeight); });
+      });
+      function show(root, d, base, form) {
+        var fields = Array.isArray(form.fields) ? form.fields : [];
+        var dests = Array.isArray(form.destinations) ? form.destinations : [];
         var html = '<form class="card" id="secret-form" autocomplete="off" novalidate>' +
-          '<p><strong>' + esc(d.service_name) + '</strong></p>' +
-          '<p class="muted">Each value goes straight to the server. Nobody can read it back afterwards, the assistant included.</p>';
+          '<p><strong>' + esc(form.service_name) + '</strong></p>';
+        if (dests.length) {
+          html += '<div class="dest"><p class="muted">These secrets are sent to:</p>' + destinationsHtml(dests) + '</div>';
+        }
+        html += '<p class="muted">Each value goes straight to the server. Nobody can read it back afterwards, the assistant included.</p>';
         for (var i = 0; i < fields.length; i++) {
           var f = fields[i] || {};
           html += '<label class="field" for="secret-' + i + '"><span class="label">' + esc(f.label || f.path) + '</span>' +
@@ -759,13 +817,16 @@ export const WIDGETS: Record<string, WidgetDef> = {
             (f.description ? '<span class="muted">' + esc(f.description) + '</span>' : '') +
             '<input type="password" id="secret-' + i + '" autocomplete="new-password" spellcheck="false" autocapitalize="off"></label>';
         }
+        html += '<label class="field" for="secret-key"><span class="label">Your access key</span>' +
+          '<span class="muted">Saving needs your login. The key goes only to this Yap and is not stored.</span>' +
+          '<input type="password" id="secret-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>';
         html += '<p><button type="submit" id="secret-save">Save</button></p><p class="err" id="secret-msg" role="alert"></p></form>';
         root.innerHTML = html;
-        var form = document.getElementById("secret-form");
+        var formEl = document.getElementById("secret-form");
         var save = document.getElementById("secret-save");
         var msg = document.getElementById("secret-msg");
         function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
-        form.addEventListener("submit", function (e) {
+        formEl.addEventListener("submit", function (e) {
           e.preventDefault();
           var values = {};
           var count = 0;
@@ -774,34 +835,124 @@ export const WIDGETS: Record<string, WidgetDef> = {
             if (v) { values[fields[i].path] = v; count++; }
           }
           if (count === 0) { say("Fill in at least one field."); return; }
+          var key = document.getElementById("secret-key");
+          if (!key.value) { say("Enter your access key to save."); return; }
           save.disabled = true;
           say("");
-          fetch(d.submit_url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ token: d.token, values: values }),
-          }).then(function (res) {
-            return res.text().then(function (text) {
-              if (res.ok) {
-                window.__yapSecretSaved = true;
-                root.innerHTML = '<div class="card done">Saved</div>';
-                requestAnimationFrame(announceHeight);
-                return;
-              }
-              var message = "Saving failed. Ask for a new secret form and try again.";
-              try {
-                var body = JSON.parse(text);
-                if (body && body.error && body.error.message) message = String(body.error.message);
-              } catch (_e) {}
-              save.disabled = false;
-              say(message);
-            });
-          }).catch(function () {
+          serverCall(base + "/submit", { token: d.token, values: values, access_key: key.value }, function (_body) {
+            window.__yapSecretSaved = true;
+            root.innerHTML = '<div class="card done">Saved</div>';
+            requestAnimationFrame(announceHeight);
+          }, function (message) {
             save.disabled = false;
-            say("Could not reach the server. Check the connection and try again.");
+            say(message || "Saving failed. Ask for a new secret form and try again.");
           });
         });
+        requestAnimationFrame(announceHeight);
+      }
+    `,
+  },
+
+  "service-approve": {
+    name: "service-approve",
+    uri: `${UI_SCHEME_PREFIX}service-approve`,
+    description:
+      "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs a login with a user access key, sent only to the instance the widget was served by; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
+    originHostable: true,
+    style: `
+      .dest { border: 2px solid var(--yap-border); border-radius: var(--border-radius-small, 8px); padding: 10px 12px; margin: 0 0 14px; }
+      .dest .value, code, pre { font-family: ui-monospace, monospace; word-break: break-all; }
+      pre { white-space: pre-wrap; margin: 4px 0 12px; font-size: .85em; }
+      h2 { font-size: 1em; margin: 14px 0 4px; }
+      .field .muted { display: block; }
+      ul { margin: 4px 0 8px; padding-left: 18px; }
+      .field input { display: block; width: 100%; margin-top: 6px; font: inherit; color: inherit; padding: 7px 10px;
+                     border-radius: var(--border-radius-small, 8px); border: 1px solid var(--yap-border); background: var(--yap-bg); }
+      .row { display: flex; gap: 8px; margin-top: 12px; }
+      .done { font-weight: 600; }
+      button:disabled { opacity: .6; cursor: default; }
+    `,
+    render: `
+      ${SERVER_CALL_JS}
+      onData(function (d) {
+        // A decision is final: a re-delivered result must not bring the buttons back.
+        if (window.__yapApprovalDone) return;
+        var root = document.getElementById("root");
+        if (!d || !d.request_id || !d.token) {
+          root.innerHTML = '<div class="card muted">No approval data reached this widget. Ask for a new approval page.</div>';
+          return;
+        }
+        var base = "/v1/service-approvals/" + encodeURIComponent(d.request_id);
+        // What is shown is what the server has, never what the data says the
+        // service is: in a host's frame the data came through the model.
+        loadView(d, base + "/view", function (got) { show(root, d, base, got.view, got.fingerprint); },
+          function (message) { root.innerHTML = '<div class="card err">' + esc(message) + '</div>'; requestAnimationFrame(announceHeight); });
       });
+      function list(items) { return items.length ? '<ul>' + items.join("") + '</ul>' : '<p class="muted">None.</p>'; }
+      function show(root, d, base, v, fingerprint) {
+        if (!v || !v.service) { root.innerHTML = '<div class="card err">This approval page could not be read. Ask for a new one.</div>'; return; }
+        var dests = Array.isArray(v.destinations) ? v.destinations : [];
+        var html = '<div class="card">' +
+          '<p><strong>Approve service ' + esc(v.service.name) + '?</strong></p>' +
+          (v.service.description ? '<p>' + esc(v.service.description) + '</p>' : '') +
+          '<p class="muted">An assistant wrote this service. It stays off until a person who may edit this bundle\\'s services approves it.</p>';
+        html += '<div class="dest"><p><strong>Where data goes</strong></p>' +
+          (dests.length ? destinationsHtml(dests) : '<p class="muted">' + (v.driver && v.driver.egress ? 'This driver reaches the network; it names no destination setting. Check the settings below.' : 'This driver does not reach the network.') + '</p>') +
+          '</div>';
+        html += '<h2>Driver</h2><p><code>' + esc(v.driver && v.driver.name) + '</code>: ' + esc(v.driver && v.driver.description) + '</p>';
+        if (v.driver && v.driver.writes && v.driver.writes.length) html += '<p>It writes ' + esc(v.driver.writes.join(" and ")) + ' into this bundle when it runs.</p>';
+        var actions = (v.actions || []).map(function (a) {
+          var ps = (a.params || []).map(function (p) { return '<code>' + esc(p.name) + '</code>' + (p.required ? ' (required)' : ''); });
+          return '<li><code>' + esc(a.name) + '</code>: ' + esc(a.description) + (ps.length ? '<br><span class="muted">Parameters a run supplies: ' + ps.join(", ") + '</span>' : '') + '</li>';
+        });
+        html += '<h2>Allowed actions</h2>' + list(actions);
+        var pins = Object.keys(v.pins || {}).map(function (k) { return '<li><code>' + esc(k) + '</code> = <code>' + esc(String(v.pins[k])) + '</code></li>'; });
+        html += '<h2>Pinned parameters</h2>' + list(pins);
+        html += '<h2>Settings</h2><pre>' + esc(JSON.stringify(v.settings || {}, null, 2)) + '</pre>';
+        var secrets = (v.secrets_set || []).map(function (p) { return '<li><code>' + esc(p) + '</code></li>'; });
+        html += '<h2>Secrets set</h2>' + (secrets.length ? '<ul>' + secrets.join("") + '</ul>' : '<p class="muted">None.</p>') +
+          '<p class="muted">Names only: nobody can read a secret back.</p>';
+        if (v.approved) {
+          html += '<p class="done">This service is approved already.</p></div>';
+          root.innerHTML = html;
+          requestAnimationFrame(announceHeight);
+          return;
+        }
+        html += '<form id="approve-form" autocomplete="off" novalidate>' +
+          '<label class="field" for="approve-key"><strong>Your access key</strong>' +
+          '<span class="muted"> Approving needs your login. The key goes only to this Yap and is not stored.</span>' +
+          '<input type="password" id="approve-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>' +
+          '<div class="row"><button type="button" id="approve-reject">Reject</button><button type="submit" id="approve-ok">Approve</button></div>' +
+          '<p class="err" id="approve-msg" role="alert"></p></form></div>';
+        root.innerHTML = html;
+        var form = document.getElementById("approve-form");
+        var ok = document.getElementById("approve-ok");
+        var reject = document.getElementById("approve-reject");
+        var key = document.getElementById("approve-key");
+        var msg = document.getElementById("approve-msg");
+        function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
+        function busy(on) { ok.disabled = on; reject.disabled = on; }
+        function finish(text) {
+          window.__yapApprovalDone = true;
+          root.innerHTML = '<div class="card done">' + esc(text) + '</div>';
+          requestAnimationFrame(announceHeight);
+        }
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          if (!key.value) { say("Enter your access key to approve."); return; }
+          busy(true); say("");
+          serverCall(base + "/decide", { token: d.token, decision: "approve", access_key: key.value, fingerprint: fingerprint },
+            function () { key.value = ""; finish("Approved. " + v.service.name + " can run now."); },
+            function (message) { busy(false); say(message || "Approving failed. Try again."); });
+        });
+        reject.addEventListener("click", function () {
+          busy(true); say("");
+          serverCall(base + "/decide", { token: d.token, decision: "reject" },
+            function () { finish("Rejected. " + v.service.name + " stays off."); },
+            function (message) { busy(false); say(message || "Rejecting failed. Try again."); });
+        });
+        requestAnimationFrame(announceHeight);
+      }
     `,
   },
 };
@@ -820,11 +971,19 @@ const clientHtmlCache = new Map<string, string>();
  * waits for ui/render-data over postMessage; in origin mode the data is
  * embedded at serve time and there is no event channel.
  */
-export function widgetHtml(name: string, mode: "client" | "origin", data?: unknown): string {
-  const cached = mode === "client" ? clientHtmlCache.get(name) : undefined;
+export function widgetHtml(name: string, mode: "client" | "origin", data?: unknown, baseUrl?: string): string {
+  const cacheKey = `${name}\n${baseUrl ?? ""}`;
+  const cached = mode === "client" ? clientHtmlCache.get(cacheKey) : undefined;
   if (cached) return cached;
   const def = WIDGETS[name];
   if (!def) throw new Error(`unknown widget ${name}`);
+  // The instance this page was served by, baked in by the server. A widget
+  // that sends a person's input (a secret, an access key) or shows what they
+  // approve talks to this and nothing else, never to a URL in its data: in a
+  // host's frame the data comes from the model, which could be steered to
+  // point it at a server of its own.
+  const baseScript =
+    baseUrl !== undefined ? `<script>window.__YAP_BASE__ = ${escapeForInlineJson(JSON.stringify(baseUrl.replace(/\/+$/, "")))};</script>` : "";
   const dataScript =
     mode === "origin" ? `<script>window.__YAP_DATA__ = ${escapeForInlineJson(JSON.stringify(data ?? {}))};</script>` : "";
   // The widget's own style + render, embedded as inert JSON so the shell can
@@ -843,6 +1002,7 @@ export function widgetHtml(name: string, mode: "client" | "origin", data?: unkno
 </head>
 <body>
 <div id="root"></div>
+${baseScript}
 ${dataScript}
 ${srcScript}
 <script>
@@ -853,6 +1013,6 @@ ${def.render}
 </script>
 </body>
 </html>`;
-  if (mode === "client") clientHtmlCache.set(name, html);
+  if (mode === "client") clientHtmlCache.set(cacheKey, html);
   return html;
 }
