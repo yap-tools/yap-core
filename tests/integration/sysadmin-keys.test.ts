@@ -42,6 +42,7 @@ describeEachAdapter("sysadmin key lane", (adapter) => {
       id: expect.any(String),
       name: "recovery",
       issuer: "sysadmin",
+      scope: null,
       createdAt: expect.any(String),
       key: expect.stringMatching(/^yap_/),
     });
@@ -68,6 +69,29 @@ describeEachAdapter("sysadmin key lane", (adapter) => {
     expect((await sysadmin.post(`/v1/users/${user.id}/keys`, { name: 7 })).status).toBe(400);
   });
 
+  it("issues a scoped key for a user, shown in both listings, and refuses a located or unknown scope", async () => {
+    const user = await newUser("ScopedIssued");
+    const issued = await sysadmin.post(`/v1/users/${user.id}/keys`, { name: "agent", scope: { role: "member" } });
+    expect(issued.status, JSON.stringify(issued.body)).toBe(201);
+    expect(issued.body).toMatchObject({ name: "agent", issuer: "sysadmin", scope: { role: "member" } });
+    const stored = (await sysadmin.get(`/v1/users/${user.id}/keys`)).body.data.find((k: any) => k.id === issued.body.id);
+    expect(stored.scope).toEqual({ role: "member" });
+    expect((await user.client.get("/v1/keys")).body.data.find((k: any) => k.id === issued.body.id).scope).toEqual({
+      role: "member",
+    });
+    const viaIssued = apiClient(app.baseUrl, issued.body.key);
+    expect((await viaIssued.get("/v1/whoami")).body.keyScope).toEqual({ role: "member" });
+
+    for (const scope of [{ role: "member", spaces: ["s"] }, { role: "member", bundles: ["b"] }, { role: "root" }]) {
+      expect((await sysadmin.post(`/v1/users/${user.id}/keys`, { name: "bad", scope })).status).toBe(400);
+    }
+    // A bad scope is refused before anything else, even for a user that does not exist.
+    expect((await sysadmin.post("/v1/users/nobody/keys", { scope: { role: "root" } })).status).toBe(400);
+    // The lane revokes it like any key.
+    expect((await sysadmin.delete(`/v1/users/${user.id}/keys/${issued.body.id}`)).status).toBe(200);
+    expect((await viaIssued.get("/v1/whoami")).status).toBe(401);
+  });
+
   it("lists a user's keys as metadata only, never the raw key or its hash", async () => {
     const user = await newUser("Listed");
     const issued = await sysadmin.post(`/v1/users/${user.id}/keys`, { name: "ops" });
@@ -78,9 +102,9 @@ describeEachAdapter("sysadmin key lane", (adapter) => {
     expect(list.body.data).toHaveLength(3);
     expect(list.body.data).toEqual(
       expect.arrayContaining([
-        { id: user.initialKeyId, name: "default", issuer: "sysadmin", createdAt: expect.any(String) },
-        { id: issued.body.id, name: "ops", issuer: "sysadmin", createdAt: expect.any(String) },
-        { id: minted.body.id, name: "laptop", issuer: "user", createdAt: expect.any(String) },
+        { id: user.initialKeyId, name: "default", issuer: "sysadmin", scope: null, createdAt: expect.any(String) },
+        { id: issued.body.id, name: "ops", issuer: "sysadmin", scope: null, createdAt: expect.any(String) },
+        { id: minted.body.id, name: "laptop", issuer: "user", scope: null, createdAt: expect.any(String) },
       ]),
     );
     const raw = JSON.stringify(list.body);

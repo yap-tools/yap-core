@@ -48,7 +48,7 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   to paste a secret into the chat either. Instead call secret_request for the
   paths you need: it returns a one-off form (a secret-input widget, and an
   origin_url to give the user) whose password fields go straight to the
-  server; the user saves it with their own access key, so you cannot fill
+  server; the user saves it with their own full access key, so you cannot fill
   it in yourself. You see the paths, their labels and whether each is set, never a
   value. The form takes one submission and expires. get_service shows an
   author the settings, pins and secretsSet; read it before update_service,
@@ -64,16 +64,17 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   steered by something you read. run_service and schedules refuse it, and
   listings show approved: false. Changing its params, pins, actions or
   settings over MCP turns it off again; renaming it, or entering secrets
-  through secret_request, does not. Services written over REST count as
-  approved. Enter the secrets first, then call approval_request and give the
+  through secret_request, does not. Services written over REST with a full
+  key count as approved; with a scoped key they wait like yours do. Enter the secrets first, then call approval_request and give the
   user its page (a service-approve widget, or origin_url): it shows where
   data goes, the actions, params, pins, settings and which secrets are set,
-  and the person approves by logging in with one of their access keys while
-  holding edit_services. The link alone is not enough, and an OAuth token is
-  never accepted, so an agent connected over OAuth cannot approve its own
-  service. One known limit: an agent that holds a raw access key itself (a
-  key pasted into its MCP config, a script) could approve on the page with
-  it. That is discouraged, not prevented. Never ask the user for a key.
+  and the person approves by logging in with one of their full access keys while
+  holding edit_services. The link alone is not enough, and an OAuth token or
+  a scoped access key is never accepted, so an agent connected over OAuth or
+  with a scoped key cannot approve its own service. One known limit: an
+  agent that holds a full access key itself (a key pasted into its MCP
+  config, a script) could approve on the page with it. That is discouraged,
+  not prevented. Never ask the user for a key.
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the
@@ -164,6 +165,14 @@ specific spaces or bundles. A narrowed session sees correspondingly smaller
 role lists from load, and denied calls report the missing capability; tell
 the user the authorization's scope doesn't cover the action (they can
 reconnect the app with a wider scope) rather than retrying.
+
+A session may also run on a scoped access key: a key fixed to one of the
+same roles, never to places. whoami then shows keyScope ({role}); denials
+report decidedBy "key_scope". A scoped key, at any role, cannot manage keys
+or connected apps, cannot create spaces below admin, and is refused on the
+pages where a person decides (consent, secret forms, service approval).
+Tell the user the key is limited (they can give you a wider one) rather
+than retrying.
 
 ## Reference URIs
 

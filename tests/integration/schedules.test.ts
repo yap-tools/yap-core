@@ -16,7 +16,7 @@ import { createServer, type Server } from "node:http";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { runWithTokenAuth } from "../../src/core/authScope.js";
+import { runWithScope } from "../../src/core/authScope.js";
 import { DRIVER_API, type DriverDefinition, type RunContext } from "../../src/core/drivers/types.js";
 import { getRun, listRuns, type RunRecord } from "../../src/core/runs.js";
 import { createScheduler } from "../../src/core/scheduler.js";
@@ -643,8 +643,8 @@ describeEachAdapter("schedules", (adapter) => {
         cron: "0 7 * * *",
       });
       // A read-only token in scope would deny run_services if it leaked into the tick.
-      const outcome = await runWithTokenAuth(
-        { userId: viewerId, grantId: "g", scope: { role: "read-only" } },
+      const outcome = await runWithScope(
+        { source: "token", userId: viewerId, grantId: "g", scope: { role: "read-only" } },
         () => app.server.scheduler.fire(created.body.id),
       );
       expect(outcome.kind).toBe("started");

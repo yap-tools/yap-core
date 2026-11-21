@@ -14,8 +14,8 @@ import { FastMCP } from "fastmcp";
 
 import type { BlobStore } from "./blob/index.js";
 import type { YapConfig } from "./config.js";
-import type { TokenAuth } from "./core/authScope.js";
-import { bearerToken, resolveCredential } from "./core/credential.js";
+import type { ScopedAuth } from "./core/authScope.js";
+import { bearerToken, resolveCredential, scopeOf } from "./core/credential.js";
 import { createHttpDriver } from "./core/drivers/http.js";
 import { createMailDriver } from "./core/drivers/mail/index.js";
 import { DriverRegistry } from "./core/drivers/registry.js";
@@ -32,12 +32,13 @@ import { registerRestRoutes } from "./rest/routes.js";
  * is the only edit — `../package.json` resolves the same from src/ and dist/. */
 const VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
-/** MCP session auth payload: identity (plus, on the OAuth lane, the token's
- * delegation) — permissions always come from grants. */
+/** MCP session auth payload: identity (plus, for an OAuth token or a scoped
+ * key, the scope that narrows it) — permissions always come from grants. */
 export interface SessionAuth extends Record<string, unknown> {
   userId: string;
-  /** Present on token-authenticated sessions; tools run inside its scope. */
-  tokenAuth?: TokenAuth;
+  /** Present on sessions opened with a token or a scoped key; tools run
+   * inside it. */
+  scopedAuth?: ScopedAuth;
 }
 
 export interface YapServer {
@@ -90,9 +91,10 @@ async function authenticateMcp(
   const auth = await resolveCredential(db, config, key);
   switch (auth.kind) {
     case "user":
-      return { userId: auth.userId };
-    case "token":
-      return { userId: auth.userId, tokenAuth: auth.tokenAuth };
+    case "token": {
+      const scopedAuth = scopeOf(auth);
+      return scopedAuth ? { userId: auth.userId, scopedAuth } : { userId: auth.userId };
+    }
     case "missing":
       return deny("access key or access token required (Authorization: Bearer or ?key= fallback)");
     case "sysadmin":

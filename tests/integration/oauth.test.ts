@@ -146,6 +146,18 @@ describeEachAdapter("oauth", (adapter) => {
       }
     });
 
+    it("refuses a scoped key, at any role: an app is authorized by the person, not a machine's key", async () => {
+      const client = await registerClient(app.baseUrl);
+      const { challenge } = pkce();
+      for (const role of ["admin", "member", "read-only"]) {
+        const scoped = await alice.post("/v1/keys", { name: `consent-${role}`, scope: { role } });
+        const res = await postAuthorize(app.baseUrl, { clientId: client.body.client_id, key: scoped.body.key, challenge });
+        expect(res.status).toBe(401);
+        expect(res.headers.get("location")).toBeNull();
+        expect(await res.text()).toContain("This key is limited. Log in with a full key.");
+      }
+    });
+
     it("deny sends access_denied and no code", async () => {
       const client = await registerClient(app.baseUrl);
       const { challenge } = pkce();
@@ -482,6 +494,32 @@ describeEachAdapter("oauth", (adapter) => {
         });
         expect(res.status).toBe(401);
       }
+    });
+  });
+
+  describe("scoped keys and connected apps", () => {
+    it("the connections page refuses a scoped key with its own words", async () => {
+      const scoped = await alice.post("/v1/keys", { name: "connections", scope: { role: "admin" } });
+      for (const path of ["/oauth/connections", "/oauth/connections/disconnect"]) {
+        const res = await fetch(`${app.baseUrl}${path}`, {
+          method: "POST",
+          body: new URLSearchParams({ access_key: scoped.body.key, grant_id: "x" }),
+        });
+        expect(res.status).toBe(401);
+        expect(await res.text()).toContain("This key is limited. Log in with a full key.");
+      }
+    });
+
+    it("a scoped key can neither list nor disconnect apps; an admin token still can", async () => {
+      const { clientId } = await connectApp(app.baseUrl, aliceKey);
+      const grant = (await alice.get("/v1/oauth/grants")).body.data.find((g: any) => g.client.id === clientId);
+      const scoped = apiClient(app.baseUrl, (await alice.post("/v1/keys", { name: "apps", scope: { role: "admin" } })).body.key);
+      expect((await scoped.get("/v1/oauth/grants")).status).toBe(403);
+      expect((await scoped.delete(`/v1/oauth/grants/${grant.id}`)).status).toBe(403);
+      // OAuth behaviour is unchanged: a role:admin token manages credentials as before.
+      const admin = apiClient(app.baseUrl, (await connectApp(app.baseUrl, aliceKey, "role:admin")).access_token);
+      expect((await admin.get("/v1/oauth/grants")).status).toBe(200);
+      expect((await admin.delete(`/v1/oauth/grants/${grant.id}`)).status).toBe(200);
     });
   });
 

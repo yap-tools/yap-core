@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { runWithScope, type KeyAuth } from "../../src/core/authScope.js";
 import { decide, effectiveCapabilities, normalizeCapability, resolveCapability } from "../../src/core/capabilities.js";
 import { createDb, type Db } from "../../src/db/index.js";
 
@@ -200,5 +201,45 @@ describe("resolveCapability (db-backed)", () => {
     expect(atBundle).not.toContain("run_services"); // bundle deny overrides
     expect(atBundle).toContain("custom_cap"); // bundle-only allow
     await db.close();
+  });
+
+  describe("under a scoped access key", () => {
+    const keyAuth = (role: KeyAuth["scope"]["role"]): KeyAuth => ({ source: "key", userId: "u1", keyId: "k1", scope: { role } });
+
+    it("clamps by the role mask ahead of the personal-owner shortcut, naming the key as the reason", async () => {
+      const { db } = await setup();
+      const ctx = { space: space(1), bundleId: "bn1" };
+      const decision = await runWithScope(keyAuth("read-only"), () => resolveCapability(db, "u1", "edit_items", ctx));
+      expect(decision).toEqual({ allowed: false, decidedBy: "key_scope" });
+      expect((await runWithScope(keyAuth("read-only"), () => resolveCapability(db, "u1", "read_items", ctx))).allowed).toBe(true);
+      expect(await runWithScope(keyAuth("read-only"), () => effectiveCapabilities(db, "u1", ctx))).toEqual(["read_files", "read_items"]);
+      await db.close();
+    });
+
+    it("never adds authority: the user's grants still decide inside the mask", async () => {
+      const { db, insertGrant } = await setup();
+      await insertGrant("space", "sp1", "read_items", "allow");
+      const ctx = { space: space(), bundleId: "bn1" };
+      const admin = await runWithScope(keyAuth("admin"), () => effectiveCapabilities(db, "u1", ctx));
+      expect(admin).toEqual(["read_items"]);
+      const member = await runWithScope(keyAuth("member"), () => resolveCapability(db, "u1", "edit_items", ctx));
+      expect(member.allowed).toBe(false);
+      expect(member.decidedBy).toBe("default_deny");
+      await db.close();
+    });
+
+    it("member masks the container capabilities that manage a space, admin masks nothing", async () => {
+      const { db } = await setup();
+      const ctx = { space: space(1) };
+      const member = await runWithScope(keyAuth("member"), () => effectiveCapabilities(db, "u1", ctx));
+      expect(member).toContain("edit_services");
+      expect(member).toContain("edit_bundles");
+      expect(member).not.toContain("manage_roles");
+      expect(member).not.toContain("manage_space");
+      expect(await runWithScope(keyAuth("admin"), () => effectiveCapabilities(db, "u1", ctx))).toEqual(
+        await effectiveCapabilities(db, "u1", ctx),
+      );
+      await db.close();
+    });
   });
 });

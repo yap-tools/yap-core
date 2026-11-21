@@ -1,24 +1,32 @@
 /**
  * The credential lane: one decision, made once — what does a presented
  * bearer secret mean? Exactly one of three lanes: a user access key
- * (identity, full authority), an OAuth access token (delegated identity,
- * scope-clamped), or the environment-level sysadmin key (operator
- * credential, never a content principal). Both transports resolve through
- * here and keep only their own wording and dressing per outcome. Two things
- * deliberately stay with the transports: credential *extraction* (REST reads
- * the Authorization header; MCP adds the ?key= fallback) and the *timing* of
- * the token scope context (REST per request, MCP per session).
+ * (identity: the user's full authority, or a fixed role mask of it when the
+ * key is scoped), an OAuth access token (delegated identity, scope-clamped),
+ * or the environment-level sysadmin key (operator credential, never a content
+ * principal). Both transports resolve through here and keep only their own
+ * wording and dressing per outcome. Two things deliberately stay with the
+ * transports: credential *extraction* (REST reads the Authorization header;
+ * MCP adds the ?key= fallback) and the *timing* of the scope context (REST
+ * per request, MCP per session). `scopeOf` gives the context to run under, for a
+ * token and for a scoped key alike; an unscoped key has none and runs as
+ * before.
  */
 import { OAUTH_ACCESS_TOKEN_PREFIX, constantTimeEqual } from "../crypto.js";
 import type { Db } from "../db/index.js";
-import type { TokenAuth } from "./authScope.js";
+import type { KeyAuth, ScopedAuth, TokenAuth } from "./authScope.js";
 import { authenticateKey } from "./keys.js";
 import { authenticateToken } from "./oauth.js";
 
 export type CredentialOutcome =
   | { kind: "missing" }
   | { kind: "sysadmin" }
-  | { kind: "user"; userId: string }
+  | {
+      kind: "user";
+      userId: string;
+      /** Present exactly when the key is scoped: the context to run under. */
+      keyAuth?: KeyAuth;
+    }
   | { kind: "token"; userId: string; tokenAuth: TokenAuth }
   | { kind: "invalid-token" }
   | { kind: "invalid-key" };
@@ -41,6 +49,15 @@ export async function resolveCredential(
     const tokenAuth = await authenticateToken(db, presented);
     return tokenAuth ? { kind: "token", userId: tokenAuth.userId, tokenAuth } : { kind: "invalid-token" };
   }
-  const userId = await authenticateKey(db, presented);
-  return userId ? { kind: "user", userId } : { kind: "invalid-key" };
+  const key = await authenticateKey(db, presented);
+  if (!key) return { kind: "invalid-key" };
+  const { userId, keyId, scope } = key;
+  return scope ? { kind: "user", userId, keyAuth: { source: "key", userId, keyId, scope } } : { kind: "user", userId };
+}
+
+/** The scope a resolved credential runs under, if it is narrowed at all. */
+export function scopeOf(outcome: CredentialOutcome): ScopedAuth | undefined {
+  if (outcome.kind === "token") return outcome.tokenAuth;
+  if (outcome.kind === "user") return outcome.keyAuth;
+  return undefined;
 }

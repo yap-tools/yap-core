@@ -13,7 +13,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { requireAccountCapability } from "../core/accountCapabilities.js";
 import { YapError } from "../core/errors.js";
-import { pageLogin } from "../core/keys.js";
+import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "../core/keys.js";
 import * as oauth from "../core/oauth.js";
 import type { YapServer } from "../server.js";
 
@@ -224,6 +224,17 @@ function connectionsPage(input: {
   return page("Connected apps", body);
 }
 
+const ENTER_USER_KEY = "Enter one of your user access keys (the sysadmin key cannot authorize apps).";
+
+/** What the consent screen says for each refused login. */
+const CONSENT_LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+  missing: ENTER_USER_KEY,
+  sysadmin: ENTER_USER_KEY,
+  "oauth-token": ENTER_USER_KEY,
+  invalid: "That access key is invalid or revoked.",
+  "scoped-key": SCOPED_KEY_LOGIN_REFUSED,
+};
+
 function oauthErrorBody(err: oauth.OAuthError): { error: string; error_description: string } {
   return { error: err.code, error_description: err.message };
 }
@@ -421,11 +432,7 @@ export function registerOAuthRoutes(server: YapServer): void {
 
       const keyAuth = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
       if (!keyAuth.ok) {
-        const message =
-          keyAuth.reason === "invalid"
-            ? "That access key is invalid or revoked."
-            : "Enter one of your user access keys (the sysadmin key cannot authorize apps).";
-        return renderConsent(c, client, params, scope.role, message);
+        return renderConsent(c, client, params, scope.role, CONSENT_LOGIN_REFUSED[keyAuth.reason]);
       }
 
       // The granted scope is what the user selected. The capability layer
@@ -492,13 +499,24 @@ export function registerOAuthRoutes(server: YapServer): void {
 
   // ---- Connected apps page --------------------------------------------------
 
-  /** Key auth for the self-served pages: sysadmin key refused, like consent. */
-  async function pageKeyAuth(form: Record<string, string>): Promise<{ userId: string; keyId: string } | null> {
-    const login = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
-    return login.ok ? { userId: login.userId, keyId: login.keyId } : null;
-  }
-
   const BAD_KEY = "That access key is invalid or revoked (the sysadmin key has no connections).";
+  const CONNECTIONS_LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+    missing: BAD_KEY,
+    sysadmin: BAD_KEY,
+    "oauth-token": BAD_KEY,
+    invalid: BAD_KEY,
+    "scoped-key": SCOPED_KEY_LOGIN_REFUSED,
+  };
+
+  /** Key auth for the self-served pages: the same refusals as consent. A
+   * refusal carries the words the page shows. */
+  async function pageKeyAuth(
+    form: Record<string, string>,
+  ): Promise<{ ok: true; userId: string; keyId: string } | { ok: false; error: string }> {
+    const login = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
+    if (login.ok) return login;
+    return { ok: false, error: CONNECTIONS_LOGIN_REFUSED[login.reason] };
+  }
 
   /** A user the operator has denied `manage_keys` gets the key prompt back
    * with the reason instead of their connections; null when the page may go on. */
@@ -527,7 +545,7 @@ export function registerOAuthRoutes(server: YapServer): void {
     handle(async (c) => {
       const form = (await c.req.parseBody()) as Record<string, string>;
       const auth = await pageKeyAuth(form);
-      if (!auth) return c.html(connectionsPage({ error: BAD_KEY }), 401);
+      if (!auth.ok) return c.html(connectionsPage({ error: auth.error }), 401);
       const refused = await refusedPage(c, auth.userId);
       if (refused) return refused;
       return c.html(
@@ -544,7 +562,7 @@ export function registerOAuthRoutes(server: YapServer): void {
     handle(async (c) => {
       const form = (await c.req.parseBody()) as Record<string, string>;
       const auth = await pageKeyAuth(form);
-      if (!auth) return c.html(connectionsPage({ error: BAD_KEY }), 401);
+      if (!auth.ok) return c.html(connectionsPage({ error: auth.error }), 401);
       const refused = await refusedPage(c, auth.userId);
       if (refused) return refused;
       let notice = "App disconnected — its tokens are revoked.";

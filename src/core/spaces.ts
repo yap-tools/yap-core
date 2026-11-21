@@ -11,7 +11,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 import type { BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
-import { assertAccountWrite } from "./authScope.js";
+import { assertCanCreateSpaces } from "./authScope.js";
 import { KNOWN_CAPABILITIES, effectiveCapabilities, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
@@ -35,10 +35,11 @@ export async function createSpace(
   input: { name: string; description?: string; keywords?: string; context?: string },
 ): Promise<Space> {
   // Space creation is account-level (no granted-capability gate), so the
-  // token-scope clamp has to be asserted here rather than in capability
-  // resolution. The operator's `create_spaces` denial is its own check:
-  // assertAccountWrite also guards user docs, which a denial must not touch.
-  assertAccountWrite();
+  // scope clamp has to be asserted here rather than in capability
+  // resolution: no read-only scope, and a scoped key only at role admin. The
+  // operator's `create_spaces` denial is its own check: the scope rule also
+  // guards user docs (assertAccountWrite), which a denial must not touch.
+  assertCanCreateSpaces();
   await requireAccountCapability(db, userId, "create_spaces");
   const name = input.name?.trim();
   if (!name) throw invalid("space name is required");

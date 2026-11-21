@@ -8,7 +8,7 @@ import { UserError } from "fastmcp";
 import { z } from "zod";
 
 import type { YapConfig } from "../config.js";
-import { runWithTokenAuth } from "../core/authScope.js";
+import { runWithScope } from "../core/authScope.js";
 import {
   DATATYPES,
   getBundleContext,
@@ -131,18 +131,18 @@ export function registerMcpTools(server: YapServer): void {
   // `scheduler` for schedule edits, which re-arm it.
   const env = { db, config, blob, logger, registry, scheduler, baseUrl: config.baseUrl };
 
-  // Every tool executes inside the session's token-scope context (if the
-  // session authenticated with an OAuth token) so capability resolution deep
-  // in core sees the delegation clamp. Key-lane sessions run unscoped.
+  // Every tool executes inside the session's scope context (if the session
+  // authenticated with an OAuth token or a scoped access key) so capability
+  // resolution deep in core sees the clamp. Unscoped-key sessions run unscoped.
   const rawAddTool = mcp.addTool.bind(mcp);
   const addTool: typeof mcp.addTool = (tool) =>
     rawAddTool({
       ...tool,
       execute: async (args, ctx) => {
-        const tokenAuth = ctx.session?.tokenAuth;
+        const scopedAuth = ctx.session?.scopedAuth;
         const run = () => tool.execute(args, ctx);
         try {
-          return await (tokenAuth ? runWithTokenAuth(tokenAuth, run) : run());
+          return await (scopedAuth ? runWithScope(scopedAuth, run) : run());
         } catch (err) {
           // A UserError is meant for the caller. Anything else (a storage
           // error from an index or constraint, a bug) would reach the caller
@@ -308,7 +308,7 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "whoami",
-    description: "Return the currently authenticated user's minimal identity (id, name and externalId), the account-level capabilities the instance operator has denied them (deniedCapabilities — empty when unrestricted; manage_keys and create_spaces are the ones that exist) and the running Yap Core version.",
+    description: "Return the currently authenticated user's minimal identity (id, name and externalId), the account-level capabilities the instance operator has denied them (deniedCapabilities — empty when unrestricted; manage_keys and create_spaces are the ones that exist), keyScope when you connected with a scoped access key ({role}: what you may do is that role's share of the user's rights, and you cannot manage keys or approve on a person's pages) and the running Yap Core version.",
     annotations: { readOnlyHint: true, title: "Who am I" },
     execute: async (_args, ctx) => {
       try {
@@ -598,7 +598,7 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "space_create",
     description:
-      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces; whoami shows that). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
+      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces, and a scoped access key only at role admin; whoami shows both). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
     parameters: z.object({
       name: z.string(),
       description: z.string().optional(),

@@ -29,8 +29,8 @@
  *   setting stays as it is. Submitting a new form for the same path replaces
  *   that secret.
  * - Submitting needs a login, the same as the service approve page
- *   (`pageLogin`: a user access key, never the sysadmin key or an OAuth
- *   token). The agent can see the form's token, so the token alone must not
+ *   (`pageLogin`: an unscoped user access key, never the sysadmin key, an
+ *   OAuth token or a scoped key). The agent can see the form's token, so the token alone must not
  *   be enough: otherwise an agent could put a credential of its own into a
  *   service a person approved (a bearer token for its own account at the same
  *   API), and a secret change does not take the approval away. With the
@@ -50,7 +50,7 @@ import { getBundleContext, hasBundleCapability, requireBundleCapability } from "
 import { describeDestinations, type DestinationView } from "./serviceApprovals.js";
 import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
-import { pageLogin } from "./keys.js";
+import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "./keys.js";
 import {
   isSplit,
   mergeConfig,
@@ -347,10 +347,11 @@ function checkValues(paths: string[], raw: unknown): Record<string, string> {
   return values;
 }
 
-const LOGIN_REFUSED: Record<string, string> = {
+const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
   missing: "Enter your access key to save.",
   sysadmin: "The sysadmin key cannot enter a service's secrets: enter one of your user access keys.",
   "oauth-token": "An app's token cannot enter a service's secrets: enter one of your user access keys.",
+  "scoped-key": SCOPED_KEY_LOGIN_REFUSED,
   invalid: "That access key is invalid or revoked.",
 };
 
@@ -371,7 +372,7 @@ export async function submitSecrets(
   const values = checkValues(JSON.parse(request.paths) as string[], rawValues);
 
   const login = await pageLogin(db, config.sysadminKey, typeof accessKey === "string" ? accessKey : "");
-  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]!);
+  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, request.createdBy, "edit_services", ctx))) {
     throw forbidden("the user who asked for this form no longer holds edit_services on this bundle");

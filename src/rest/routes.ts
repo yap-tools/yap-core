@@ -12,7 +12,7 @@ import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
-import { runWithTokenAuth } from "../core/authScope.js";
+import { runWithScope } from "../core/authScope.js";
 import * as bundlesCore from "../core/bundles.js";
 import { describeDriver } from "../core/drivers/registry.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
@@ -38,7 +38,7 @@ import * as usersCore from "../core/users.js";
 import { verifyToken } from "../crypto.js";
 import type { YapServer } from "../server.js";
 import { buildOriginPage } from "../widgets/pages.js";
-import { resolveCredential, type CredentialOutcome } from "../core/credential.js";
+import { resolveCredential, scopeOf, type CredentialOutcome } from "../core/credential.js";
 import { bearerFrom, requireSysadmin, requireUser } from "./auth.js";
 
 type Handler = (c: Context, auth: CredentialOutcome) => Promise<Response>;
@@ -171,12 +171,11 @@ export function registerRestRoutes(server: YapServer): void {
     async (c: Context): Promise<Response> => {
       try {
         // Resolve the presented credential once; every handler receives the
-        // outcome. The token lane additionally runs inside its scope context,
-        // so capability resolution deep in core sees the clamp.
+        // outcome. A token or a scoped key additionally runs inside its scope
+        // context, so capability resolution deep in core sees the clamp.
         const auth = await resolveCredential(db, config, bearerFrom(c));
-        if (auth.kind === "token") {
-          return await runWithTokenAuth(auth.tokenAuth, () => fn(c, auth));
-        }
+        const scoped = scopeOf(auth);
+        if (scoped) return await runWithScope(scoped, () => fn(c, auth));
         return await fn(c, auth);
       } catch (err) {
         if (err instanceof YapError) {
@@ -250,14 +249,15 @@ export function registerRestRoutes(server: YapServer): void {
 
   // ---- A user's keys (sysadmin key) ------------------------------------------
 
-  const createKeySchema = z.object({ name: z.string().optional() });
+  // scope passes through as given: core owns its shape and words the refusals.
+  const createKeySchema = z.object({ name: z.string().optional(), scope: z.unknown().optional() });
 
   app.post(
     "/v1/users/:id/keys",
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createKeySchema, await optionalJsonBody(c));
-      return c.json(await keysCore.issueKeyForUser(db, param(c, "id"), body.name ?? ""), 201);
+      return c.json(await keysCore.issueKeyForUser(db, param(c, "id"), body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -293,7 +293,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(createKeySchema, await jsonBody(c));
-      return c.json(await keysCore.createKey(db, userId, body.name ?? ""), 201);
+      return c.json(await keysCore.createKey(db, userId, body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -1293,7 +1293,7 @@ export function registerRestRoutes(server: YapServer): void {
   // The service-approve widget calls these, from the host's frame or from its
   // origin page. The token, minted by approval_request, lets it read the
   // service as the server has it and reject it. Approving also needs a user
-  // access key in the body (never an OAuth token), whose user holds
+  // access key in the body (never an OAuth token or a scoped key), whose user holds
   // edit_services on the bundle. Token and key travel in the body.
 
   const approvalToken = (requestId: string, token: string): void => {

@@ -42,6 +42,10 @@ export const accessKeys = sqliteTable(
     // "sysadmin" (the initial key, or one issued over the sysadmin key lane).
     // A fact about the key's origin — it carries no authority of its own.
     issuer: text("issuer").$type<"user" | "sysadmin">().notNull().default("user"),
+    // The key's fixed scope, as JSON (`{"role":"member"}`): a role mask that
+    // narrows what the key may do below its user's authority. Null means an
+    // unscoped key with the user's full authority. Set at creation, never changed.
+    scope: text("scope"),
     keyHash: text("key_hash").notNull(),
     createdAt: text("created_at").notNull(),
     revokedAt: text("revoked_at"),

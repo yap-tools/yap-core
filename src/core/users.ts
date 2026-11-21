@@ -14,6 +14,7 @@ import {
   serializeDeniedCapabilities,
   type AccountCapability,
 } from "./accountCapabilities.js";
+import { currentKeyScope, type KeyScope } from "./authScope.js";
 import { invalid, notFound } from "./errors.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
@@ -39,6 +40,9 @@ export interface CurrentUser {
   name: string;
   externalId: string | null;
   deniedCapabilities: AccountCapability[];
+  /** The calling access key's fixed scope — present only when the request
+   * came with a scoped key, so a caller can see it is limited. */
+  keyScope?: KeyScope;
 }
 
 type UserRow = Db["tables"]["users"]["$inferSelect"];
@@ -200,13 +204,17 @@ export async function updateUser(db: Db, userId: string, patch: { deniedCapabili
   return toUser(updated[0]!);
 }
 
+/** The caller's identity. Read inside the request's scope context, which is
+ * where the calling key's scope comes from. */
 export async function whoami(db: Db, userId: string): Promise<CurrentUser> {
   const user = await getUser(db, userId);
+  const keyScope = currentKeyScope();
   return {
     id: user.id,
     name: user.name,
     externalId: user.externalId,
     deniedCapabilities: user.deniedCapabilities,
+    ...(keyScope ? { keyScope: { role: keyScope.role } } : {}),
   };
 }
 

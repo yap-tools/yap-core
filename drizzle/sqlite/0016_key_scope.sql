@@ -1,0 +1,1 @@
+ALTER TABLE `access_keys` ADD `scope` text;
