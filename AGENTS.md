@@ -6,4 +6,4 @@ Do not mention Claude, Codex, Copilot, or any other coding agent in commit messa
 
 ## Releasing
 
-The release process — when and how a version ships — is documented in [RELEASING.md](RELEASING.md). Do not bump versions or push `v*` tags unless explicitly asked: tagging is what publishes a release to users. The `Bump version to X.Y.Z` commit follows the commit-message rule above.
+The release process — when and how a version ships — is documented in [RELEASING.md](RELEASING.md), including branches and hotfixes. Do not bump versions, push `v*` tags or create `release/*` branches unless explicitly asked: tagging is what publishes a release to users. The `Bump version to X.Y.Z` commit follows the commit-message rule above.

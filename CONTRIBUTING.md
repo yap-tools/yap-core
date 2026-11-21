@@ -54,4 +54,5 @@ These are load-bearing, not preferences:
 
 `main` is trunk: merge freely, it's never released automatically. A release is
 a `v*` tag, and only tagged releases reach users. The full process — versioning,
-the bump-then-tag sequence, and the gotchas — lives in [RELEASING.md](RELEASING.md).
+the bump-then-tag sequence, hotfixes to an older release via `release/X.Y`
+branches, and the gotchas — lives in [RELEASING.md](RELEASING.md).
