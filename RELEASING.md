@@ -6,7 +6,9 @@ How a version gets from `main` to users. For contributing ground rules see
 ## The model in one sentence
 
 `main` is trunk — always CI-green, **never released automatically**; a release
-is a `v*` git tag, and **only tagged releases ever reach users**.
+is a `v*` git tag, and **only tagged releases ever reach users**. A release
+needs no merge and no release branch: tagging is the whole event. The one
+exception is a hotfix to an older release (see [Hotfixes](#hotfixes)).
 
 That second half is the load-bearing fact: distribution is tag-gated.
 `release.yml` triggers on `push: tags: ["v*"]` and nothing else, so commits can
@@ -60,6 +62,70 @@ When the accumulated commits feel like a coherent release:
 Release notes are generated from merged PR/commit titles, so write titles that
 read well in a changelog.
 
+## Branches
+
+- **`main`** is the only standing branch. All work lands on it through PRs.
+- **`release/MAJOR.MINOR`** exists only when a hotfix needs it (below). It is
+  cut from a release tag, kept while that minor version is supported, and
+  never merged back into `main` as a whole.
+
+A standing `dev` branch, with releases merged into `main`, is not used: every
+hotfix would have to be merged back into `dev` by hand.
+
+## Hotfixes
+
+A hotfix is a fix to something already released. Where it goes depends on
+whether `main` has moved since the tag.
+
+**`main` has not moved since the tag** (`git rev-list v0.8.0..main` is empty).
+Fix on `main` through a PR, then bump and tag from `main` as in
+[Cutting a release](#cutting-a-release). No release branch.
+
+**`main` has moved on.** Fixing on `main` would ship unreleased work, so the
+fix goes on a release branch cut from the tag. Example: `v0.8.0` needs a fix
+and `main` is already past it.
+
+1. Create `release/0.8` from the release tag, or reuse it if it exists:
+
+   ```sh
+   git fetch origin --tags
+   git switch -c release/0.8 v0.8.0       # first hotfix on this minor
+   git push -u origin release/0.8
+   # later hotfixes: git switch release/0.8 && git pull
+   ```
+
+2. Fix on a branch off it and open a PR against `release/0.8` (CI runs on
+   every PR, whatever its base):
+
+   ```sh
+   git switch -c fix/some-bug release/0.8
+   # commit, push, open the PR with base release/0.8
+   ```
+
+3. After it merges, bump `package.json` to the next patch on the release
+   branch (`Bump version to 0.8.1`), then tag that commit. The tag must still
+   equal `package.json` `"version"`:
+
+   ```sh
+   git switch release/0.8 && git pull
+   git tag -a v0.8.1 -m "v0.8.1"
+   git push origin v0.8.1
+   ```
+
+4. Cherry-pick the fix onto `main` through its own PR, so the next release
+   from `main` carries it. Do not cherry-pick the version bump.
+
+   ```sh
+   git switch -c fix/some-bug-main main
+   git cherry-pick <sha-of-the-fix>
+   # push, open the PR against main
+   ```
+
+`release.yml` runs on any `v*` tag, so it publishes a tag from a release
+branch the same way as one from `main`. Note that `releases/latest` is the
+newest non-prerelease GitHub Release by date: tagging `v0.8.1` after `v0.9.0`
+may make `0.8.1` the install default. Check the Release page after a hotfix.
+
 ## Checklist
 
 - [ ] All intended work merged to `main`, CI green.
@@ -69,6 +135,9 @@ read well in a changelog.
 - [ ] `git push origin main && git push origin vX.Y.Z`.
 - [ ] `release` action green; GitHub Release shows `yap-cli.tgz` + `yap-core.tgz`.
 
+For a hotfix on a release branch, the same list applies with `release/X.Y` in
+place of `main`, plus the cherry-pick PR onto `main`.
+
 ## Edge cases
 
 - **Release candidates.** Tag `v0.6.0-rc.1` for a dry run. ⚠️ As written,
@@ -76,7 +145,7 @@ read well in a changelog.
   normal release and can become `latest`. To run a real RC channel, add
   `--prerelease` to the `gh release create` step (e.g. when the tag contains a
   `-`); GitHub keeps prereleases out of `releases/latest`.
-- **Hotfixing an old release.** If `main` has moved past the released commit,
-  branch from the tag (`git switch -c hotfix/0.6.1 v0.6.0`), apply the fix, bump
-  the patch version, tag `v0.6.1`, then merge the fix forward into `main`.
-- **Never tag a commit that isn't on `main`** or hasn't passed CI.
+- **Never tag a commit** that is not on `main` or a `release/X.Y` branch, or
+  that has not passed CI.
+- **Tags other than `vX.Y.Z`.** Release tags are `vMAJOR.MINOR.PATCH`,
+  annotated, and nothing else.

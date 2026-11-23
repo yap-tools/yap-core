@@ -768,7 +768,9 @@ Issues and pull requests are welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules (short version: tests
 green on both database matrices, domain logic stays in `src/core/`). For
 anything security-sensitive, follow [SECURITY.md](SECURITY.md) instead of
-opening a public issue.
+opening a public issue. Branching, releases and hotfixes (trunk-based: `main`,
+release tags, `release/X.Y` only for hotfixes) are described in
+[RELEASING.md](RELEASING.md).
 
 ## License
 
