@@ -397,4 +397,99 @@ describeEachAdapter("surgical text edits", (adapter) => {
       expect(result.results[0].result[0].values.notes).toBe("initial via MCP");
     });
   });
+
+  // ---- Malformed ops: refused on every path, nothing written --------------------
+
+  describe("malformed edit ops", () => {
+    // A guessed operand key: `value` and `text` where prepend takes `content`.
+    const guesses = [
+      { op: "prepend", value: "x" },
+      { op: "prepend", text: "x" },
+    ];
+
+    async function mcpCall(bundle: string, tool: string, params: Record<string, unknown>) {
+      const result = await aliceMcp.call("call", { space_id: spaceId, calls: [{ bundle_id: bundle, tool, params }] });
+      return result.results[0];
+    }
+
+    for (const bad of guesses) {
+      const key = Object.keys(bad).find((k) => k !== "op")!;
+
+      it(`MCP update_items refuses {op: "prepend", ${key}} and leaves the item unchanged`, async () => {
+        await resetItem("kept");
+        const r = await mcpCall(itemBundleId, "update_items", { updates: [{ id: itemId, edits: { notes: [bad] } }] });
+        expect(r.ok).toBe(false);
+        expect(r.error.code).toBe("invalid_request");
+        expect(r.error.message).toContain(`unknown key "${key}" for op "prepend"; expected {op, content}`);
+        const item = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+        expect(item.values.notes).toBe("kept");
+      });
+
+      it(`MCP patch_doc refuses {op: "prepend", ${key}} and leaves the doc unchanged`, async () => {
+        await resetDoc("kept");
+        const r = await mcpCall(bundleId, "patch_doc", { id: docId, edits: [bad] });
+        expect(r.ok).toBe(false);
+        expect(r.error.code).toBe("invalid_request");
+        expect(r.error.message).toContain(`unknown key "${key}" for op "prepend"`);
+        expect((await alice.get(`/v1/bundles/${bundleId}/docs/${docId}`)).body.content).toBe("kept");
+      });
+    }
+
+    it("MCP update_items refuses a null or missing operand", async () => {
+      await resetItem("kept");
+      for (const bad of [{ op: "append", content: null }, { op: "insert_after", target: "kept" }]) {
+        const r = await mcpCall(itemBundleId, "update_items", { updates: [{ id: itemId, edits: { notes: [bad] } }] });
+        expect(r.ok).toBe(false);
+        expect(r.error.code).toBe("invalid_request");
+        expect(r.error.message).toMatch(/edits\[0\]: "(append|insert_after)" needs content \(a string\)/);
+      }
+      const item = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      expect(item.values.notes).toBe("kept");
+    });
+
+    it("MCP patch_doc refuses replace_lines without content as invalid_request, not internal", async () => {
+      await resetDoc("a\nb");
+      const r = await mcpCall(bundleId, "patch_doc", { id: docId, edits: [{ op: "replace_lines", from: 1, to: 1 }] });
+      expect(r.ok).toBe(false);
+      expect(r.error.code).toBe("invalid_request");
+      expect(r.error.message).toContain('"replace_lines" needs content');
+    });
+
+    it("MCP patch_user_doc refuses a guessed key and leaves the doc unchanged", async () => {
+      await resetUserDoc("kept");
+      const r = await aliceMcp.callRaw("patch_user_doc", { id: userDocId, edits: [{ op: "prepend", value: "x" }] });
+      expect(r.isError).toBe(true);
+      const text = r.content.map((c: { text: string }) => c.text).join("\n");
+      expect(text).toContain("invalid_request");
+      expect(text).toContain('unknown key "value" for op "prepend"; expected {op, content}');
+      expect((await alice.get(`/v1/user-docs/${userDocId}`)).body.content).toBe("kept");
+    });
+
+    it("REST item PATCH refuses an extra key instead of stripping it", async () => {
+      await resetItem("kept");
+      const r = await alice.patch(`/v1/items/${itemId}`, {
+        edits: { notes: [{ op: "append", content: " more", extra: true }] },
+      });
+      expect(r.status).toBe(400);
+      expect(r.body.error.code).toBe("invalid_request");
+      expect(r.body.error.message).toContain('unknown key "extra" for op "append"');
+      const item = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      expect(item.values.notes).toBe("kept");
+    });
+
+    it("REST bundle-doc and user-doc PATCH refuse an extra key with a pointed message", async () => {
+      await resetDoc("kept");
+      await resetUserDoc("kept");
+      const bad = [{ op: "append", content: " more", value: "x" }];
+      const doc = await alice.patch(`/v1/bundles/${bundleId}/docs/${docId}`, { edits: bad });
+      const userDoc = await alice.patch(`/v1/user-docs/${userDocId}`, { edits: bad });
+      for (const r of [doc, userDoc]) {
+        expect(r.status).toBe(400);
+        expect(r.body.error.message).toContain('edits[0]: unknown key "value" for op "append"');
+        expect(r.body.error.details.issues[0].path).toEqual([0]);
+      }
+      expect((await alice.get(`/v1/bundles/${bundleId}/docs/${docId}`)).body.content).toBe("kept");
+      expect((await alice.get(`/v1/user-docs/${userDocId}`)).body.content).toBe("kept");
+    });
+  });
 });

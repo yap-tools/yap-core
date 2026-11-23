@@ -9,7 +9,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/index.js";
 import { assertAccountWrite } from "./authScope.js";
 import { invalid, notFound } from "./errors.js";
-import { applyEdits, type EditOp } from "./textEdits.js";
+import { applyEdits } from "./textEdits.js";
 import { newId, nowIso } from "./util.js";
 
 export interface UserDocInfo {
@@ -123,7 +123,7 @@ export async function updateUserDoc(
   return getUserDoc(db, userId, docId);
 }
 
-export async function patchUserDoc(db: Db, userId: string, docId: string, ops: EditOp[]): Promise<UserDoc> {
+export async function patchUserDoc(db: Db, userId: string, docId: string, ops: unknown): Promise<UserDoc> {
   assertAccountWrite();
   const doc = await getUserDoc(db, userId, docId);
   const content = applyEdits(doc.content, ops);

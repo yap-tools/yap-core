@@ -33,7 +33,7 @@ import {
   parseConfig,
   type PropertyConfig,
 } from "./propertyConfig.js";
-import { applyEdits, type EditOp } from "./textEdits.js";
+import { applyEdits } from "./textEdits.js";
 import { displayValue, newId, nowIso } from "./util.js";
 
 /** Element-wise comparison operators. On a multi-valued property they apply
@@ -705,7 +705,8 @@ export async function getItemsUnchecked(db: Db, bundleId: string, ids: string[])
   });
 }
 
-export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> };
+/** `edits` maps a text property to its ops; `applyEdits` validates them. */
+export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, unknown> };
 
 export async function updateItems(
   db: Db,

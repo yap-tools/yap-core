@@ -172,4 +172,102 @@ describe("applyEdits", () => {
       }
     });
   });
+
+  describe("strict validation", () => {
+    // Each op with a well-formed example; every operand key gets broken in turn.
+    const valid: Record<string, Record<string, unknown>> = {
+      prepend: { op: "prepend", content: "x" },
+      append: { op: "append", content: "x" },
+      search_replace: { op: "search_replace", search: "a", replace: "b" },
+      insert_before: { op: "insert_before", target: "a", content: "x" },
+      insert_after: { op: "insert_after", target: "a", content: "x" },
+      delete: { op: "delete", target: "a" },
+      replace_lines: { op: "replace_lines", from: 1, to: 1, content: "x" },
+      delete_lines: { op: "delete_lines", from: 1, to: 1 },
+    };
+    const wrongType = (key: string): unknown => (key === "from" || key === "to" ? "1" : 42);
+
+    function refusal(ops: unknown): YapError {
+      try {
+        applyEdits("abc", ops);
+      } catch (err) {
+        expect(err).toBeInstanceOf(YapError);
+        expect((err as YapError).code).toBe("invalid_request");
+        return err as YapError;
+      }
+      throw new Error("expected the edits to be refused");
+    }
+
+    for (const [name, op] of Object.entries(valid)) {
+      describe(name, () => {
+        it("accepts the well-formed op", () => {
+          expect(() => applyEdits("abc", [op])).not.toThrow();
+        });
+        for (const key of Object.keys(op).filter((k) => k !== "op")) {
+          it(`refuses a missing ${key}`, () => {
+            const { [key]: _dropped, ...rest } = op;
+            expect(refusal([rest]).message).toMatch(new RegExp(`^edits\\[0\\]: "${name}" needs ${key} \\(`));
+          });
+          it(`refuses a null ${key}`, () => {
+            expect(refusal([{ ...op, [key]: null }]).message).toContain(`"${name}" needs ${key}`);
+          });
+          it(`refuses a wrong-typed ${key}`, () => {
+            expect(refusal([{ ...op, [key]: wrongType(key) }]).message).toContain(`"${name}" needs ${key}`);
+          });
+        }
+        it("refuses an unknown key, naming it and the expected shape", () => {
+          const err = refusal([{ ...op, value: "x" }]);
+          expect(err.message).toMatch(new RegExp(`^edits\\[0\\]: unknown key "value" for op "${name}"; expected \\{op`));
+          expect(err.details).toMatchObject({ issues: [expect.objectContaining({ path: [0] })] });
+        });
+      });
+    }
+
+    it("names value and content for a prepend that guessed the key", () => {
+      expect(refusal([{ op: "prepend", value: "x" }]).message).toBe(
+        'edits[0]: unknown key "value" for op "prepend"; expected {op, content}',
+      );
+    });
+    it("names text the same way", () => {
+      expect(refusal([{ op: "append", text: "x" }]).message).toContain('unknown key "text" for op "append"');
+    });
+    it("shows an optional key with a ? in the expected shape", () => {
+      expect(refusal([{ op: "search_replace", search: "a", replace: "b", every: true }]).message).toContain(
+        "expected {op, search, replace, all?}",
+      );
+    });
+    it("refuses a non-boolean all, and a null one", () => {
+      for (const all of ["yes", null]) {
+        expect(refusal([{ op: "search_replace", search: "a", replace: "b", all }]).message).toContain(
+          '"search_replace" takes all as a boolean, or leave it out',
+        );
+      }
+    });
+    it("refuses zero or fractional line numbers", () => {
+      expect(refusal([{ op: "delete_lines", from: 0, to: 1 }]).message).toContain("needs from (a positive integer)");
+      expect(refusal([{ op: "delete_lines", from: 1, to: 1.5 }]).message).toContain("needs to (a positive integer)");
+    });
+    it("refuses a replace_lines without content cleanly (was a raw TypeError)", () => {
+      expect(refusal([{ op: "replace_lines", from: 1, to: 1 }]).message).toContain('"replace_lines" needs content');
+    });
+    it("refuses an edit that is not an object", () => {
+      expect(refusal(["prepend"]).message).toContain('edits[0]: each edit must be an object with an "op" field');
+      expect(refusal([null]).message).toContain("edits[0]: each edit must be an object");
+    });
+    it("refuses a hole in a sparse array", () => {
+      expect(refusal(new Array(1)).message).toContain("edits[0]: each edit must be an object");
+    });
+    it("refuses a non-array edits", () => {
+      expect(refusal({ op: "append", content: "x" }).message).toBe("edits must be a non-empty array");
+    });
+    it("checks every op before applying any, and reports each bad one", () => {
+      const err = refusal([
+        { op: "append", content: "fine" },
+        { op: "prepend", value: "x" },
+        { op: "insert_after", target: "a" },
+      ]);
+      expect(err.message).toContain("edits[1]: unknown key");
+      expect(err.message).toContain('edits[2]: "insert_after" needs content (a string)');
+    });
+  });
 });

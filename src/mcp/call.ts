@@ -11,7 +11,7 @@ import type { YapLogger } from "../logger.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import type { BundleDoc } from "../core/bundleDocs.js";
-import type { EditOp } from "../core/textEdits.js";
+import { EDIT_OP_RULES, EDIT_OP_SHAPES } from "../core/textEdits.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import type { DriverRegistry } from "../core/drivers/registry.js";
@@ -228,7 +228,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). A date value is YYYY-MM-DD or a timestamp with Z or an offset; on a day-precision date property (config {precision: \"day\"}) only YYYY-MM-DD, returned as sent. Anything else is refused. edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.",
+      `Batch-update item values with set or edits (text ops take content). Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). A date value is YYYY-MM-DD or a timestamp with Z or an offset; on a day-precision date property (config {precision: "day"}) only YYYY-MM-DD, returned as sent. Anything else is refused. edits: {propertyName: [op, ...]} applies surgical ops, in order, to a text property without replacing the whole value. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: {log: [{op: "prepend", content: "2026-11-05 note\\n"}]}. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.`,
     capability: "edit_items",
     params: { updates: { required: true } },
     handler: async (env, params) => ({
@@ -236,7 +236,7 @@ export const secondTier: Record<string, SecondTierTool> = {
         env.db,
         env.userId,
         env.bundleId,
-        params.updates as { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }[],
+        params.updates as itemsCore.ItemUpdateInput[],
       ),
     }),
   },
@@ -292,12 +292,12 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   patch_doc: {
     description:
-      "Surgically edit a bundle doc without replacing the entire content. Applied in order, all-or-nothing. Params: id (the doc's name or id), edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all occurrences), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
+      `Surgically edit a bundle doc with text ops ({op: "append", content} and the like). Params: id (the doc's name or id), edits — array of ops, applied in order, all-or-nothing. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: [{op: "append", content: "\\n## Notes\\n"}]. search_replace errors unless there is exactly one match; all: true replaces every occurrence. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (to insert_before a line, include its trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.`,
     capability: "edit_docs",
     params: { ...idParam, edits: { required: true } },
     handler: async (env, params) => ({
       result: docView(
-        await bundleDocsCore.patchDoc(env.db, env.userId, env.bundleId, String(params.id), params.edits as EditOp[]),
+        await bundleDocsCore.patchDoc(env.db, env.userId, env.bundleId, String(params.id), params.edits),
       ),
     }),
   },

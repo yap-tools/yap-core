@@ -29,13 +29,13 @@ import { listSchedulesUnchecked } from "../core/schedules.js";
 import { listServicesUnchecked } from "../core/services.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesWithRole, spaceRole } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
+import { EDIT_OP_RULES, EDIT_OP_SHAPES } from "../core/textEdits.js";
 import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
-import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
 function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -757,15 +757,15 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
   addTool({
     name: "patch_user_doc",
     description:
-      "Surgically edit a user doc without replacing the entire content. Applied in order, all-or-nothing. Params: id, edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
+      `Surgically edit a user doc with text ops ({op: "append", content} and the like). Params: id, edits — array of ops, applied in order, all-or-nothing. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: [{op: "append", content: "\\n## Notes\\n"}]. search_replace errors unless there is exactly one match; all: true replaces every occurrence. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (to insert_before a line, include its trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.`,
     parameters: z.object({
       id: z.string(),
-      edits: z.array(editOpSchema).min(1),
+      edits: z.array(z.unknown()),
     }),
     execute: async (args, ctx) => {
       try {
         const userId = sessionUser(ctx.session);
-        return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits as EditOp[]));
+        return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits));
       } catch (err) {
         rethrow(err);
       }

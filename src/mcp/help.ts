@@ -147,6 +147,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    delete (anchor ops: splice at the raw character offset, include newlines
    yourself), replace_lines, delete_lines (1-based inclusive, line-aware).
    update_items also accepts an edits key alongside set for text properties.
+   Each op takes exactly its own keys — prepend and append take content, as in
+   edits: {log: [{op: "prepend", content: "2026-11-05 note\\n"}]} — and a
+   missing, null or misnamed key is refused with invalid_request, nothing
+   written. The tool descriptions (get_tools) list every op's shape.
 
 Run the discovery chain silently — do not narrate loading steps.
 

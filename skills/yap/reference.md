@@ -67,7 +67,7 @@ Schemas are freely mutable (EAV): renames touch no values, removals drop values,
 | `replace_lines` | `from`, `to`, `content` | 1-based inclusive line range; line-aware |
 | `delete_lines` | `from`, `to` | 1-based inclusive line range; line-aware |
 
-Ops are applied sequentially; if any fails, the entire update is rejected.
+Each op takes exactly the fields in its row (plus `op`). The whole array is checked before anything is applied: a missing, `null` or wrong-typed field, or a field the op does not take (`{"op": "prepend", "value": "..."}`), is refused with `400 invalid_request` naming the op index and the field, e.g. `edits[0]: unknown key "value" for op "prepend"; expected {op, content}`. Ops are then applied sequentially; if any fails, the entire update is rejected and nothing is written.
 
 **MCP-only doc tools** (via `call`): `get_doc {id}` — read a single bundle doc by name or id. `patch_doc {id, edits}` — surgical edits on a bundle doc. First-tier: `get_user_doc {id}`, `patch_user_doc {id, edits}`.
 

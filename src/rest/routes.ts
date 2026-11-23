@@ -30,7 +30,6 @@ import * as schedulesCore from "../core/schedules.js";
 import * as secretRequestsCore from "../core/secretRequests.js";
 import * as serviceApprovalsCore from "../core/serviceApprovals.js";
 import * as servicesCore from "../core/services.js";
-import { editOpSchema, type EditOp } from "../core/textEdits.js";
 import * as spacesCore from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
 import { headerSafeFilename } from "../core/util.js";
@@ -592,7 +591,7 @@ export function registerRestRoutes(server: YapServer): void {
           name: z.string().optional(),
           content: z.string().optional(),
           autoload: z.boolean().optional(),
-          edits: z.array(editOpSchema).min(1).optional(),
+          edits: z.array(z.unknown()).optional(),
         }),
         await jsonBody(c),
       );
@@ -602,7 +601,7 @@ export function registerRestRoutes(server: YapServer): void {
       const bundleId = param(c, "id");
       const docRef = param(c, "docRef");
       if (body.edits !== undefined) {
-        return c.json(await bundleDocsCore.patchDoc(db, userId, bundleId, docRef, body.edits as EditOp[]));
+        return c.json(await bundleDocsCore.patchDoc(db, userId, bundleId, docRef, body.edits));
       }
       return c.json(
         await bundleDocsCore.updateDoc(db, userId, bundleId, docRef, {
@@ -767,7 +766,7 @@ export function registerRestRoutes(server: YapServer): void {
       const body = parseBody(
         z.object({
           set: z.record(z.string(), z.unknown()).optional(),
-          edits: z.record(z.string(), z.array(editOpSchema).min(1)).optional(),
+          edits: z.record(z.string(), z.unknown()).optional(),
         }),
         await jsonBody(c),
       );
@@ -775,7 +774,7 @@ export function registerRestRoutes(server: YapServer): void {
       const itemId = param(c, "id");
       const bundleId = await itemsCore.getItemBundleId(db, itemId);
       const updated = await itemsCore.updateItems(db, userId, bundleId, [
-        { id: itemId, set: body.set, edits: body.edits as Record<string, EditOp[]> | undefined },
+        { id: itemId, set: body.set, edits: body.edits },
       ]);
       return c.json(updated[0]);
     }),
@@ -1390,7 +1389,7 @@ export function registerRestRoutes(server: YapServer): void {
           name: z.string().optional(),
           content: z.string().optional(),
           autoload: z.boolean().optional(),
-          edits: z.array(editOpSchema).min(1).optional(),
+          edits: z.array(z.unknown()).optional(),
         }),
         await jsonBody(c),
       );
@@ -1398,7 +1397,7 @@ export function registerRestRoutes(server: YapServer): void {
         throw invalid("content and edits are mutually exclusive");
       }
       if (body.edits !== undefined) {
-        return c.json(await userDocsCore.patchUserDoc(db, userId, param(c, "id"), body.edits as EditOp[]));
+        return c.json(await userDocsCore.patchUserDoc(db, userId, param(c, "id"), body.edits));
       }
       return c.json(
         await userDocsCore.updateUserDoc(db, userId, param(c, "id"), {
