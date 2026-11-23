@@ -296,10 +296,15 @@ Datatypes: `text`, `number`, `boolean`, `date`, plus two references —
 read. A `date` takes exactly two forms: a bare day, `YYYY-MM-DD` (stored as
 midnight UTC), or a timestamp with its zone, `Z` or an offset such as
 `2026-11-16T09:00:00+01:00` (stored as that instant in UTC); anything else,
-a zoneless timestamp included, is refused. Send `YYYY-MM-DD` for a day (a due
-date, a birthday) and a zoned timestamp for a moment. Dates read back as UTC
-ISO-8601 (`2026-11-16T08:00:00.000Z`); see [docs/dates.md](docs/dates.md),
-which also carries the upgrade note for callers of earlier versions. For the
+a zoneless timestamp included, is refused. Dates read back as UTC ISO-8601
+(`2026-11-16T08:00:00.000Z`). A `date` property that holds a day rather than a
+moment (a due date, a birthday) declares `config: {"precision": "day"}`: it
+then takes only `YYYY-MM-DD`, stores and returns it exactly as sent
+(`2026-11-16`), refuses timestamps, and filters and sorts by day. An existing
+property can be switched; its stored values are converted only when every one
+is exactly midnight UTC, and the switch is refused, naming the items,
+otherwise. See [docs/dates.md](docs/dates.md), which also carries the upgrade
+notes: nothing changes for a property until it sets `precision`. For the
 other datatypes, a reference is checked to exist in the bundle at write time (a later
 delete leaves a dangling reference that resolves to `not_found`, matching the
 loose EAV model). A property may be **multi-valued** (`multi: true`), holding an
@@ -331,6 +336,7 @@ A property may declare a **`config`** of constraints, enforced at the core
 | `text` | `{ pattern }` | value must match the regex (`RegExp.test`; anchor with `^…$` for a full match) |
 | `text` | `{ enum }` | value must be one of the listed strings (exact, case-sensitive); with `multi` it is a multi-select |
 | `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
+| `date` | `{ precision }` | `"day"`: holds a calendar day, sent and returned as `YYYY-MM-DD`; `"instant"` or left out: a UTC instant. Switching an existing property converts its values — see [docs/dates.md](docs/dates.md) |
 | `item` | `{ itemType }` | the referent must be of this item-type (same bundle); send its name or id, it is stored and read back as the id — see [docs/item-links.md](docs/item-links.md) |
 | any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
 | single-valued `text` / `number` | `{ unique }` | no two items of the type may share a value (exact match on the stored value; absent values never collide) — for ids and other identity fields |
@@ -343,7 +349,13 @@ would be a lie if duplicates were grandfathered: enabling it on a property
 whose items already share values is rejected (with the shared values named)
 until the data is deduplicated. Uniqueness is enforced at the application
 layer on the API write paths, like every other constraint — a backup restore
-does not re-validate it.
+does not re-validate it. The other exception is a date's `precision`, the one
+config change that rewrites stored values: switching to `day` converts values
+that are exactly midnight UTC to their day, in the same transaction as the
+config, and is rejected (naming up to five items) if any other value is
+stored; switching back turns each day into midnight UTC. Since an update
+replaces `config` whole, a config patch without `precision` switches a day
+property back to instant.
 
 Query filters AND-combine and are datatype-aware. Comparison ops — `eq`,
 `neq`, `contains`, `gt`, `gte`, `lt`, `lte`, `in` — take an optional

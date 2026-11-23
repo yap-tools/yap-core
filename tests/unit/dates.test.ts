@@ -4,7 +4,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DATE_INPUT_HINT, parseDateInput } from "../../src/core/dates.js";
+import { DATE_INPUT_HINT, DAY_INPUT_HINT, parseDateInput, parseDayInput } from "../../src/core/dates.js";
+import { validatePropertyConfig } from "../../src/core/propertyConfig.js";
 
 const ACCEPTED: [string, string][] = [
   ["2026-11-16", "2026-11-16T00:00:00.000Z"],
@@ -104,5 +105,51 @@ describe("parseDateInput is independent of the server's time zone", () => {
 
     expect(kiritimati).toEqual(copenhagen);
     expect(copenhagen).toEqual(ACCEPTED.map(([, stored]) => stored));
+  });
+});
+
+describe("parseDayInput (a day-precision property)", () => {
+  it.each(["2026-11-16", "2024-02-29", "2000-02-29", "0001-01-01", "9999-12-31"])("keeps %s as sent", (input) => {
+    expect(parseDayInput(input)).toBe(input);
+  });
+
+  it.each([
+    "2026-11-16T00:00:00.000Z",
+    "2026-11-16T00:00:00+01:00",
+    "2026-11-16T09:00Z",
+    "2026-02-30",
+    "2026-02-29",
+    "1900-02-29",
+    "2026-13-01",
+    "2026-00-10",
+    "2026-11-00",
+    "2026-11-6",
+    " 2026-11-16",
+    "2026-11",
+    "20261116",
+    "+002026-11-16",
+  ])("refuses %s", (input) => {
+    expect(parseDayInput(input)).toBeNull();
+  });
+
+  it.each([20261116, null, undefined, true, {}])("refuses the non-string %s", (input) => {
+    expect(parseDayInput(input)).toBeNull();
+  });
+
+  it("names the form to send", () => {
+    expect(DAY_INPUT_HINT).toMatch(/send YYYY-MM-DD/);
+  });
+});
+
+describe("config.precision", () => {
+  it("is valid on a date property, single or multi", () => {
+    expect(validatePropertyConfig("date", false, { precision: "day" })).toEqual([]);
+    expect(validatePropertyConfig("date", true, { precision: "instant" })).toEqual([]);
+  });
+  it("is refused on other datatypes and for unknown values", () => {
+    expect(validatePropertyConfig("text", false, { precision: "day" })).toEqual(["config.precision is not valid for a text property"]);
+    expect(validatePropertyConfig("date", false, { precision: "hour" as never })).toEqual([
+      "config.precision must be one of: day, instant",
+    ]);
   });
 });

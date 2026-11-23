@@ -22,11 +22,17 @@ import {
   resolveItemType,
   type BundleContext,
 } from "./bundles.js";
-import { DATE_INPUT_HINT, parseDateInput } from "./dates.js";
+import { DATE_INPUT_HINT, DAY_INPUT_HINT, parseDateInput, parseDayInput } from "./dates.js";
 import { invalid, notFound } from "./errors.js";
-import type { Property } from "./itemTypes.js";
+import { guardDatePrecision, type Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
-import { countDecimals, NUMBER_DEFAULT_DECIMALS, parseConfig, type PropertyConfig } from "./propertyConfig.js";
+import {
+  countDecimals,
+  isDayPrecision,
+  NUMBER_DEFAULT_DECIMALS,
+  parseConfig,
+  type PropertyConfig,
+} from "./propertyConfig.js";
 import { applyEdits, type EditOp } from "./textEdits.js";
 import { displayValue, newId, nowIso } from "./util.js";
 
@@ -115,10 +121,12 @@ export function refId(value: string): string {
  * Validates a write value against the property datatype; returns the stored
  * text. When `config` is supplied (the write path) the declared constraints are
  * enforced too — regex for text, bounds/decimals for number. It is omitted on
- * the filter path, where operands are only type-checked and canonicalized.
+ * the filter path, where operands are only type-checked and canonicalized. A
+ * date's precision is not a constraint but what the value is, so it is read
+ * from the property itself on both paths.
  */
 export function normalizeValue(
-  property: Pick<Property, "name" | "datatype">,
+  property: Pick<Property, "name" | "datatype"> & { config?: string },
   value: unknown,
   config?: PropertyConfig,
 ): string {
@@ -159,7 +167,7 @@ export function normalizeValue(
       }
       return value ? "true" : "false";
     case "date":
-      return dateValue(`property "${property.name}"`, value);
+      return dateValue(`property "${property.name}"`, value, isDayPrecision(parseConfig(property.config)));
     case "item":
       return normalizeRef("item", property.name, value);
     case "file":
@@ -172,13 +180,15 @@ export function normalizeValue(
 /**
  * A date input in its stored form, or a validation error that names the
  * property, shows the value and says what to send. One parser for item writes
- * and filter operands alike; see src/core/dates.ts for the accepted forms.
+ * and filter operands alike; `config.precision` picks a day (`YYYY-MM-DD`,
+ * stored as sent) or an instant (stored as UTC). See src/core/dates.ts for
+ * the accepted forms.
  */
-function dateValue(subject: string, value: unknown): string {
-  const stored = parseDateInput(value);
+function dateValue(subject: string, value: unknown, day: boolean): string {
+  const stored = day ? parseDayInput(value) : parseDateInput(value);
   if (stored !== null) return stored;
   const shown = typeof value === "string" ? displayValue(value) : (JSON.stringify(value) ?? String(value)).slice(0, 60);
-  throw invalid(`${subject} expects a date, got ${shown}: ${DATE_INPUT_HINT}`);
+  throw invalid(`${subject} expects ${day ? "a day" : "a date"}, got ${shown}: ${day ? DAY_INPUT_HINT : DATE_INPUT_HINT}`);
 }
 
 /** Casts stored text back to the declared datatype for reading. */
@@ -238,7 +248,7 @@ function storedValueExpr(property: Pick<Property, "datatype">): SQL {
 }
 
 /** Normalizes a filter operand for comparison against stored values. */
-function compareOperand(property: Pick<Property, "name" | "datatype">, value: unknown): string | number {
+function compareOperand(property: Pick<Property, "name" | "datatype" | "config">, value: unknown): string | number {
   if (property.datatype === "number") {
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) throw invalid(`filter on "${property.name}" expects a number`);
@@ -249,7 +259,9 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
     if (value === "true" || value === "false") return value;
     throw invalid(`filter on "${property.name}" expects a boolean`);
   }
-  if (property.datatype === "date") return dateValue(`filter on "${property.name}"`, value);
+  if (property.datatype === "date") {
+    return dateValue(`filter on "${property.name}"`, value, isDayPrecision(parseConfig(property.config)));
+  }
   if (property.datatype === "item" || property.datatype === "file") {
     // Canonicalize so a filter operand matches stored "<scheme>://<id>".
     return normalizeValue(property, value);
@@ -272,7 +284,8 @@ function valueIn(property: Property, expr: SQL, operands: (string | number)[]): 
 const RANGE_SQL = { gt: ">", gte: ">=", lt: "<", lte: "<=" } as const;
 
 /**
- * A range comparison. Dates are stored as canonical ISO-8601 strings, always
+ * A range comparison. Dates are stored as fixed-width text (a UTC instant
+ * `2026-11-16T08:00:00.000Z`, or on a day property `2026-11-16`), always
  * shorter than the indexed prefix, so for them the prefix bound equals the
  * full one and is stated too, letting the value index serve date ranges. For
  * text of any length a prefix bound is unsound under a linguistic collation
@@ -639,7 +652,9 @@ export async function createItemsUnchecked(
   // none of them written.
   const { items, itemValues } = db.tables;
   const now = nowIso();
+  const written = new Set(normalized.flat().map((r) => r.propertyId));
   const created = await db.transaction(function* (tx) {
+    yield* guardDatePrecision(db, tx, props.filter((p) => written.has(p.id)));
     const created: { id: string; createdAt: string; updatedAt: string }[] = [];
     for (const rows of normalized) {
       const item = { id: newId(), bundleId, itemTypeId: itemType.id, createdAt: now, updatedAt: now };
@@ -826,6 +841,7 @@ export async function updateItemsUnchecked(
   // value deleted and an item half-updated: either every plan lands or none.
   const now = nowIso();
   await db.transaction(function* (tx) {
+    yield* guardDatePrecision(db, tx, plans.flatMap((plan) => plan.ops.map((op) => op.prop)));
     for (const plan of plans) {
       for (const op of plan.ops) {
         yield tx

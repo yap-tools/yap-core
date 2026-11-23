@@ -38,6 +38,23 @@ export interface PropertyConfig {
    *  (exact match on the stored text; absent values never collide). Enforced
    *  at write time in application code — see validateUniqueness in items.ts. */
   unique?: boolean;
+  /** date: what a value is. "day" holds a calendar day, stored and returned
+   *  as `YYYY-MM-DD`; "instant" (the same as leaving it out) holds a UTC
+   *  instant. See src/core/dates.ts. Switching an existing property between
+   *  the two rewrites its stored values (convertDatePrecision in itemTypes.ts). */
+  precision?: DatePrecision;
+}
+
+export const DATE_PRECISIONS = ["day", "instant"] as const;
+export type DatePrecision = (typeof DATE_PRECISIONS)[number];
+
+export function isDatePrecision(value: unknown): value is DatePrecision {
+  return (DATE_PRECISIONS as readonly unknown[]).includes(value);
+}
+
+/** True when a date property's config says it holds a day. */
+export function isDayPrecision(config: PropertyConfig | undefined): boolean {
+  return config?.precision === "day";
 }
 
 /** Loose shape accepted at the transport boundary; semantics are checked by
@@ -53,6 +70,7 @@ export const propertyConfigSchema = z
     maxItems: z.number().int().min(0),
     itemType: z.string(),
     unique: z.boolean(),
+    precision: z.enum(DATE_PRECISIONS),
   })
   .partial();
 
@@ -62,7 +80,7 @@ const KEYS_BY_DATATYPE: Record<string, (keyof PropertyConfig)[]> = {
   text: ["pattern", "enum"],
   number: ["min", "max", "decimals"],
   boolean: [],
-  date: [],
+  date: ["precision"],
   item: ["itemType"],
   file: [],
 };
@@ -127,6 +145,9 @@ export function validatePropertyConfig(datatype: string, multi: boolean, config:
   }
   if (config.unique !== undefined && typeof config.unique !== "boolean") {
     errors.push(`config.unique must be a boolean`);
+  }
+  if (config.precision !== undefined && !isDatePrecision(config.precision)) {
+    errors.push(`config.precision must be one of: ${DATE_PRECISIONS.join(", ")}`);
   }
   if (config.decimals !== undefined && (!Number.isInteger(config.decimals) || config.decimals < 0)) {
     errors.push(`config.decimals must be a non-negative integer`);

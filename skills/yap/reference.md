@@ -40,13 +40,13 @@ Property: `{"name", "datatype", "required"?, "multi"?, "config"?}`.
 | `text` | string | `{pattern}` — regex via `RegExp.test`; anchor `^…$` for full match; `{enum}` — one of the listed strings (multi-select when `multi`) |
 | `number` | number | `{min, max, decimals}` — inclusive bounds; default 2 decimals, excess precision rejected |
 | `boolean` | bool | — |
-| `date` | send `YYYY-MM-DD` (a day, stored as midnight UTC) or a timestamp with `Z` or an offset (`2026-11-16T09:00:00+01:00`, stored as that instant); read back as UTC ISO-8601 (`2026-11-16T08:00:00.000Z`). Anything else, a zoneless timestamp included, is refused — on writes and filter values alike. Use `YYYY-MM-DD` for a day, a zoned timestamp for a moment (`docs/dates.md`) | — |
+| `date` | default (an instant): send `YYYY-MM-DD` (stored as midnight UTC) or a timestamp with `Z` or an offset (`2026-11-16T09:00:00+01:00`, stored as that instant); read back as UTC ISO-8601 (`2026-11-16T08:00:00.000Z`). Anything else, a zoneless timestamp included, is refused — on writes and filter values alike. With `{precision: "day"}`: send only `YYYY-MM-DD` (`2026-11-16`), stored and read back as sent; a timestamp is refused (`docs/dates.md`) | `{precision}` — `"day"` for a calendar day (a due date, a birthday), `"instant"` (or omitted) for a moment. Switching an existing property converts values that are all exactly midnight UTC; any other value refuses the switch and the error names the items |
 | `item` | `item://<id>` (same bundle) | `{itemType}` — referent must be of that type; send a name or id of a type in the bundle, it is stored and read back as the id (renames never break it; an unknown one is refused) |
 | `file` | `file://<id>` (finalized file) | — |
 | any with `multi: true` | ordered array | `{minItems, maxItems}` |
 | single-valued `text` / `number` | — | `{unique}` — no two items of the type may share a value; enabling it on a property with existing duplicates is rejected |
 
-Schemas are freely mutable (EAV): renames touch no values, removals drop values, tightened configs are not retroactive.
+Schemas are freely mutable (EAV): renames touch no values, removals drop values, tightened configs are not retroactive. Two exceptions look at stored data: enabling `unique` is rejected while duplicates exist, and switching a date's `precision` rewrites its values (to `day` only when all are exactly midnight UTC, else rejected naming the items). `config` is replaced whole on update, so keep `precision` in it when changing another key.
 
 ### Items
 | Method & path | Shape |
