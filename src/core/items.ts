@@ -22,6 +22,7 @@ import {
   resolveItemType,
   type BundleContext,
 } from "./bundles.js";
+import { DATE_INPUT_HINT, parseDateInput } from "./dates.js";
 import { invalid, notFound } from "./errors.js";
 import type { Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
@@ -157,12 +158,8 @@ export function normalizeValue(
         throw invalid(`property "${property.name}" expects a boolean`);
       }
       return value ? "true" : "false";
-    case "date": {
-      if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-        throw invalid(`property "${property.name}" expects an ISO-8601 date string`);
-      }
-      return new Date(value).toISOString();
-    }
+    case "date":
+      return dateValue(`property "${property.name}"`, value);
     case "item":
       return normalizeRef("item", property.name, value);
     case "file":
@@ -170,6 +167,18 @@ export function normalizeValue(
     default:
       throw invalid(`property "${property.name}" has unknown datatype ${property.datatype}`);
   }
+}
+
+/**
+ * A date input in its stored form, or a validation error that names the
+ * property, shows the value and says what to send. One parser for item writes
+ * and filter operands alike; see src/core/dates.ts for the accepted forms.
+ */
+function dateValue(subject: string, value: unknown): string {
+  const stored = parseDateInput(value);
+  if (stored !== null) return stored;
+  const shown = typeof value === "string" ? displayValue(value) : (JSON.stringify(value) ?? String(value)).slice(0, 60);
+  throw invalid(`${subject} expects a date, got ${shown}: ${DATE_INPUT_HINT}`);
 }
 
 /** Casts stored text back to the declared datatype for reading. */
@@ -240,12 +249,7 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
     if (value === "true" || value === "false") return value;
     throw invalid(`filter on "${property.name}" expects a boolean`);
   }
-  if (property.datatype === "date") {
-    if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-      throw invalid(`filter on "${property.name}" expects an ISO-8601 date string`);
-    }
-    return new Date(value).toISOString();
-  }
+  if (property.datatype === "date") return dateValue(`filter on "${property.name}"`, value);
   if (property.datatype === "item" || property.datatype === "file") {
     // Canonicalize so a filter operand matches stored "<scheme>://<id>".
     return normalizeValue(property, value);

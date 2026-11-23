@@ -293,7 +293,14 @@ Items conform to per-bundle **item-types** — a set of typed **properties**.
 Datatypes: `text`, `number`, `boolean`, `date`, plus two references —
 `item` (another item in the same bundle, stored as `item://<id>`) and `file`
 (a finalized file, `file://<id>`). Values are validated on write and cast on
-read; a reference is checked to exist in the bundle at write time (a later
+read. A `date` takes exactly two forms: a bare day, `YYYY-MM-DD` (stored as
+midnight UTC), or a timestamp with its zone, `Z` or an offset such as
+`2026-11-16T09:00:00+01:00` (stored as that instant in UTC); anything else,
+a zoneless timestamp included, is refused. Send `YYYY-MM-DD` for a day (a due
+date, a birthday) and a zoned timestamp for a moment. Dates read back as UTC
+ISO-8601 (`2026-11-16T08:00:00.000Z`); see [docs/dates.md](docs/dates.md),
+which also carries the upgrade note for callers of earlier versions. For the
+other datatypes, a reference is checked to exist in the bundle at write time (a later
 delete leaves a dangling reference that resolves to `not_found`, matching the
 loose EAV model). A property may be **multi-valued** (`multi: true`), holding an
 ordered list of its datatype; such fields are read and written as arrays

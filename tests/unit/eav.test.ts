@@ -33,11 +33,16 @@ describe("normalizeValue (write-time validation → stored text)", () => {
     expect(() => normalizeValue(prop("boolean"), 1)).toThrow(YapError);
   });
 
-  it("date: accepts parseable strings, normalizes to ISO-8601", () => {
+  it("date: accepts a bare day or a zoned timestamp, stores UTC ISO-8601", () => {
     expect(normalizeValue(prop("date"), "2026-06-10T12:00:00Z")).toBe("2026-06-10T12:00:00.000Z");
+    expect(normalizeValue(prop("date"), "2026-06-10T14:00:00+02:00")).toBe("2026-06-10T12:00:00.000Z");
     expect(normalizeValue(prop("date"), "2026-06-10")).toBe("2026-06-10T00:00:00.000Z");
     expect(() => normalizeValue(prop("date"), "not a date")).toThrow(YapError);
     expect(() => normalizeValue(prop("date"), 1718000000000)).toThrow(YapError);
+    // Forms Date.parse takes but the strict parser refuses (src/core/dates.ts).
+    expect(() => normalizeValue(prop("date"), "2026-06-10T12:00:00")).toThrow(YapError);
+    expect(() => normalizeValue(prop("date"), "Jun 10, 2026")).toThrow(YapError);
+    expect(() => normalizeValue(prop("date"), "2026-02-30")).toThrow(YapError);
   });
 
   it("text enum: accepts a listed value, rejects an unlisted one", () => {

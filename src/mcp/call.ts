@@ -186,7 +186,7 @@ function toCapabilityList(value: unknown): string[] {
 export const secondTier: Record<string, SecondTierTool> = {
   query_items: {
     description:
-      'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction} — property is a schema property name or the system timestamps createdAt/updatedAt), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
+      'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction} — property is a schema property name or the system timestamps createdAt/updatedAt), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. A date filter value is YYYY-MM-DD or a timestamp with Z or an offset; anything else is refused (contains is the exception: a substring match on the stored UTC text, e.g. "2026-11"). For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
     capability: "read_items",
     params: {
       item_type: { required: true },
@@ -216,7 +216,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   create_items: {
     description:
-      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}]. All-or-nothing per call: if any item is invalid or a write fails, none of them is created.',
+      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}]. A date value is YYYY-MM-DD (a day) or a timestamp with Z or an offset (a moment); anything else is refused. All-or-nothing per call: if any item is invalid or a write fails, none of them is created.',
     capability: "edit_items",
     params: { item_type: { required: true }, items: { required: true } },
     handler: async (env, params) => ({
@@ -228,7 +228,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.",
+      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). A date value is YYYY-MM-DD (a day) or a timestamp with Z or an offset (a moment); anything else is refused. edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.",
     capability: "edit_items",
     params: { updates: { required: true } },
     handler: async (env, params) => ({
@@ -762,7 +762,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   add_property: {
     description:
-      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern, enum} (enum restricts to a fixed set of strings); number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type: an item-type name or id in this bundle, stored and read back as the id, so renames never break the link; an unknown one is refused); any multi field {minItems,maxItems}; single-valued text/number {unique} (no two items of the type may share a value).",
+      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. A date value (on writes and in filters) is YYYY-MM-DD for a day (stored as midnight UTC) or a timestamp with Z or an offset for a moment (2026-11-16T09:00:00+01:00); anything else, a zoneless timestamp included, is refused. Dates read back as UTC ISO-8601. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern, enum} (enum restricts to a fixed set of strings); number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type: an item-type name or id in this bundle, stored and read back as the id, so renames never break the link; an unknown one is refused); any multi field {minItems,maxItems}; single-valued text/number {unique} (no two items of the type may share a value).",
     capability: "edit_bundles",
     params: { item_type_id: { required: true }, name: { required: true }, datatype: { required: true }, required: {}, multi: {}, config: {} },
     handler: async (env, params) => ({

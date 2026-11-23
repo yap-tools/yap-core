@@ -39,7 +39,8 @@ Property: `{"name", "datatype", "required"?, "multi"?, "config"?}`.
 |---|---|---|
 | `text` | string | `{pattern}` — regex via `RegExp.test`; anchor `^…$` for full match; `{enum}` — one of the listed strings (multi-select when `multi`) |
 | `number` | number | `{min, max, decimals}` — inclusive bounds; default 2 decimals, excess precision rejected |
-| `boolean`, `date` | bool / ISO date | — |
+| `boolean` | bool | — |
+| `date` | send `YYYY-MM-DD` (a day, stored as midnight UTC) or a timestamp with `Z` or an offset (`2026-11-16T09:00:00+01:00`, stored as that instant); read back as UTC ISO-8601 (`2026-11-16T08:00:00.000Z`). Anything else, a zoneless timestamp included, is refused — on writes and filter values alike. Use `YYYY-MM-DD` for a day, a zoned timestamp for a moment (`docs/dates.md`) | — |
 | `item` | `item://<id>` (same bundle) | `{itemType}` — referent must be of that type; send a name or id of a type in the bundle, it is stored and read back as the id (renames never break it; an unknown one is refused) |
 | `file` | `file://<id>` (finalized file) | — |
 | any with `multi: true` | ordered array | `{minItems, maxItems}` |
