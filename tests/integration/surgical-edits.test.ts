@@ -398,6 +398,78 @@ describeEachAdapter("surgical text edits", (adapter) => {
     });
   });
 
+  // ---- The payload shape that was reported as a transport failure ----------------
+
+  describe("MCP update_items: large multi-line search_replace plus prepend", () => {
+    // Replacement text full of what a regex-based replace would mangle.
+    const replacement = Array.from(
+      { length: 28 },
+      (_, i) => `line ${i}: $& $1 $$ \\n \\\\ C:\\dir "quoted" – æøå ✓ 日本語 😀`,
+    ).join("\r\n");
+
+    async function send(params: Record<string, unknown>) {
+      const result = await aliceMcp.call("call", {
+        space_id: spaceId,
+        calls: [{ bundle_id: itemBundleId, tool: "update_items", params }],
+      });
+      return result.results[0];
+    }
+
+    it("applies both edits and stores the replacement literally", async () => {
+      expect(replacement.length).toBeGreaterThan(1400);
+      await alice.patch(`/v1/items/${itemId}`, { set: { notes: "head [[PLACEHOLDER]] tail", status: "old status" } });
+      const r = await send({
+        updates: [
+          {
+            id: itemId,
+            edits: {
+              notes: [{ op: "search_replace", search: "[[PLACEHOLDER]]", replace: replacement }],
+              status: [{ op: "prepend", content: "2026-01-01 — new entry\n" }],
+            },
+          },
+        ],
+      });
+      expect(r.ok).toBe(true);
+      expect(r.result[0].values.notes).toBe(`head ${replacement} tail`);
+      expect(r.result[0].values.status).toBe("2026-01-01 — new entry\nold status");
+      const stored = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      expect(stored.values.notes).toBe(`head ${replacement} tail`);
+      expect(stored.values.status).toBe("2026-01-01 — new entry\nold status");
+    });
+
+    it("returns a structured ok:false naming the property when search does not match", async () => {
+      await alice.patch(`/v1/items/${itemId}`, { set: { notes: "unchanged", status: "unchanged status" } });
+      const r = await send({
+        updates: [
+          {
+            id: itemId,
+            edits: {
+              notes: [{ op: "search_replace", search: "not in the text", replace: replacement }],
+              status: [{ op: "prepend", content: "x" }],
+            },
+          },
+        ],
+      });
+      expect(r.ok).toBe(false);
+      expect(r.error.message).toContain('edits for "notes"');
+      const stored = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      expect(stored.values.notes).toBe("unchanged");
+      expect(stored.values.status).toBe("unchanged status");
+    });
+
+    it("stores the same value for an edit as for a set of the same text", async () => {
+      await alice.patch(`/v1/items/${itemId}`, { set: { notes: "a", status: "s" } });
+      const viaEdit = await send({ updates: [{ id: itemId, edits: { notes: [{ op: "append", content: replacement }] } }] });
+      expect(viaEdit.ok).toBe(true);
+      const editedRow = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      await alice.patch(`/v1/items/${itemId}`, { set: { notes: "a" } });
+      const viaSet = await send({ updates: [{ id: itemId, set: { notes: `a${replacement}` } }] });
+      expect(viaSet.ok).toBe(true);
+      const setRow = (await alice.get(`/v1/bundles/${itemBundleId}/items?ids=${itemId}`)).body.data[0];
+      expect(editedRow.values.notes).toBe(setRow.values.notes);
+    });
+  });
+
   // ---- Malformed ops: refused on every path, nothing written --------------------
 
   describe("malformed edit ops", () => {

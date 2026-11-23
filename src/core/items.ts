@@ -810,8 +810,8 @@ export async function updateItemsUnchecked(
           .limit(1);
         const currentText = valueRow[0]?.value ?? "";
         const newText = applyEdits(currentText, editOps);
-        normalizeValue(prop, newText, parseConfig(prop.config));
-        plan.ops.push({ prop, rows: [{ value: newText, position: 0 }] });
+        const stored = normalizeValue(prop, newText, parseConfig(prop.config));
+        plan.ops.push({ prop, rows: [{ value: stored, position: 0 }] });
       } catch (err) {
         errors.push(`updates[${i}]: edits for "${name}": ${(err as Error).message}`);
       }
