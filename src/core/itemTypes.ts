@@ -7,7 +7,7 @@
  */
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
-import type { Db } from "../db/index.js";
+import type { Db, DbClient } from "../db/index.js";
 import { valueIndexPrefix } from "../db/valueIndex.js";
 import {
   DATATYPES,
@@ -17,9 +17,16 @@ import {
   type Datatype,
   type PropertyInput,
 } from "./bundles.js";
-import { invalid, notFound } from "./errors.js";
+import { MIDNIGHT_UTC_SUFFIX as MIDNIGHT_UTC, STORED_DAY_LENGTH, STORED_INSTANT_LENGTH } from "./dates.js";
+import { invalid, notFound, YapError } from "./errors.js";
 import { hasLinkTarget, linkTargetCandidates, withResolvedLinkTarget } from "./linkTargets.js";
-import { parseConfig, serializeConfig, validatePropertyConfig, type PropertyConfig } from "./propertyConfig.js";
+import {
+  isDayPrecision,
+  parseConfig,
+  serializeConfig,
+  validatePropertyConfig,
+  type PropertyConfig,
+} from "./propertyConfig.js";
 import { displayValue, newId, nowIso } from "./util.js";
 
 export interface Property {
@@ -119,21 +126,24 @@ export async function createItemType(
     : [];
   const configs = propInputs.map((prop) => withResolvedLinkTarget(prop.name.trim(), prop.config, candidates));
 
-  await db.client.insert(itemTypes).values({ id, bundleId, name, createdAt: nowIso() });
-  if (propInputs.length > 0) {
-    await db.client.insert(properties).values(
-      propInputs.map((prop, order) => ({
-        id: newId(),
-        itemTypeId: id,
-        name: prop.name.trim(),
-        datatype: prop.datatype,
-        required: prop.required ? 1 : 0,
-        multi: prop.multi ? 1 : 0,
-        config: serializeConfig(configs[order]),
-        sortOrder: order,
-      })),
-    );
-  }
+  // The type and its properties are one transaction: no type without them.
+  await db.transaction(function* (tx) {
+    yield tx.insert(itemTypes).values({ id, bundleId, name, createdAt: nowIso() });
+    if (propInputs.length > 0) {
+      yield tx.insert(properties).values(
+        propInputs.map((prop, order) => ({
+          id: newId(),
+          itemTypeId: id,
+          name: prop.name.trim(),
+          datatype: prop.datatype,
+          required: prop.required ? 1 : 0,
+          multi: prop.multi ? 1 : 0,
+          config: serializeConfig(configs[order]),
+          sortOrder: order,
+        })),
+      );
+    }
+  });
   const all = await listItemTypesUnchecked(db, bundleId);
   return all.find((t) => t.id === id)!;
 }
@@ -295,18 +305,129 @@ export async function updateProperty(
   const config = hasLinkTarget(patch.config)
     ? withResolvedLinkTarget(current.name, patch.config, await linkTargetCandidates(db, ctx.bundle.id))
     : patch.config;
-  await db.client
-    .update(properties)
-    .set({
-      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
-      ...(patch.required !== undefined ? { required: patch.required ? 1 : 0 } : {}),
-      ...(patch.multi !== undefined ? { multi: patch.multi ? 1 : 0 } : {}),
-      ...(config !== undefined ? { config: serializeConfig(config) } : {}),
-      ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
-    })
-    .where(eq(properties.id, propertyId));
+  // A date property switched between instant and day has its stored values
+  // rewritten in the same transaction as the config, so the two never
+  // disagree. A config patch replaces the config whole: leaving precision out
+  // of it means instant. The precision it is switched from is read inside the
+  // transaction, under a row lock on Postgres, so two concurrent config
+  // changes cannot both decide from the same stale value.
+  await db.transaction(function* (tx) {
+    if (current.datatype === "date" && config !== undefined) {
+      const query = tx.select({ config: properties.config }).from(properties).where(eq(properties.id, propertyId));
+      const [fresh]: { config: string }[] = yield lockRows(db, query, "update");
+      const wasDay = isDayPrecision(parseConfig(fresh?.config));
+      const toDay = isDayPrecision(config);
+      if (toDay !== wasDay) yield* convertDatePrecision(db, tx, current, toDay ? "day" : "instant");
+    }
+    yield tx
+      .update(properties)
+      .set({
+        ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+        ...(patch.required !== undefined ? { required: patch.required ? 1 : 0 } : {}),
+        ...(patch.multi !== undefined ? { multi: patch.multi ? 1 : 0 } : {}),
+        ...(config !== undefined ? { config: serializeConfig(config) } : {}),
+        ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
+      })
+      .where(eq(properties.id, propertyId));
+  });
   const updated = await db.client.select().from(properties).where(eq(properties.id, propertyId));
   return updated[0]!;
+}
+
+/**
+ * A select that locks the rows it reads until the transaction ends, on
+ * Postgres. SQLite needs no row locks: its transactions run start to finish
+ * without another request's statements in between (see Db.transaction).
+ */
+function lockRows<T>(db: Db, query: T, mode: "update" | "key share"): T {
+  return db.dialect === "pg" ? (query as unknown as { for(m: string): T }).for(mode) : query;
+}
+
+/**
+ * The guard an item write runs first inside its transaction: re-reads the
+ * precision of the date properties it writes, and refuses the write (a
+ * `conflict`, safe to retry) if any changed after its values were validated.
+ * On Postgres the read key-share-locks those property rows (the lightest
+ * lock that still conflicts with FOR UPDATE) until the write commits, and a precision switch locks the row for update (updateProperty),
+ * so the two take turns: either the switch waits and then converts the
+ * values this write committed, or this write waits and sees the new precision.
+ */
+export function* guardDatePrecision(db: Db, tx: DbClient, written: Property[]): Generator<unknown, void, any> {
+  const dates = [...new Map(written.filter((p) => p.datatype === "date").map((p) => [p.id, p])).values()];
+  if (dates.length === 0) return;
+  const { properties } = db.tables;
+  const query = tx
+    .select({ id: properties.id, config: properties.config })
+    .from(properties)
+    .where(inArray(properties.id, dates.map((p) => p.id)));
+  const rows: { id: string; config: string }[] = yield lockRows(db, query, "key share");
+  for (const prop of dates) {
+    const row = rows.find((r) => r.id === prop.id);
+    if (row && isDayPrecision(parseConfig(row.config)) !== isDayPrecision(parseConfig(prop.config))) {
+      throw new YapError("conflict", `property "${prop.name}" changed precision while this write was in progress; retry it`);
+    }
+  }
+}
+
+/**
+ * Rewrites a date property's stored values for a switch of precision, inside
+ * the caller's transaction (see updateProperty).
+ *
+ * To day: only an instant at exactly midnight UTC (`2026-11-16T00:00:00.000Z`)
+ * becomes its day (`2026-11-16`). Any other instant is ambiguous — 23:00 UTC
+ * is midnight at UTC+1 or a real evening — so it is never guessed at:
+ * the switch is refused, naming up to five items holding such a value, and
+ * the owner fixes those by hand and switches again.
+ *
+ * To instant: each day becomes midnight UTC of that day, which every day has.
+ *
+ * The matching values are rewritten first and whatever is left is checked
+ * after, in one transaction. Item writes cannot slip a value in the old form
+ * past it: see guardDatePrecision.
+ */
+function* convertDatePrecision(
+  db: Db,
+  tx: DbClient,
+  property: Property,
+  to: "day" | "instant",
+): Generator<unknown, void, any> {
+  const { itemValues } = db.tables;
+  const ofProperty = eq(itemValues.propertyId, property.id);
+  // Stored forms are told apart by length (see dates.ts); an instant longer
+  // than the canonical one has an expanded year and never converts.
+  const isInstant = sql`length(${itemValues.value}) = ${STORED_INSTANT_LENGTH}`;
+  const isDay = sql`length(${itemValues.value}) = ${STORED_DAY_LENGTH}`;
+  const convertible =
+    to === "day" ? sql`${isInstant} AND substr(${itemValues.value}, ${STORED_DAY_LENGTH + 1}) = ${MIDNIGHT_UTC}` : isDay;
+  yield tx
+    .update(itemValues)
+    .set({
+      value:
+        to === "day"
+          ? sql`substr(${itemValues.value}, 1, ${STORED_DAY_LENGTH})`
+          : sql`${itemValues.value} || ${MIDNIGHT_UTC}`,
+    })
+    .where(and(ofProperty, convertible));
+  // After the rewrite, a converted value has the target form; anything else
+  // could not be converted.
+  const converted = to === "day" ? isDay : isInstant;
+  const offending: { itemId: string }[] = yield tx
+    .select({ itemId: itemValues.itemId })
+    .from(itemValues)
+    .where(and(ofProperty, sql`NOT (${converted})`))
+    .groupBy(itemValues.itemId)
+    .orderBy(asc(itemValues.itemId))
+    .limit(5);
+  if (offending.length > 0) {
+    const ids = offending.map((o) => o.itemId).join(", ");
+    throw invalid(
+      to === "day"
+        ? `cannot switch "${property.name}" to precision "day": item(s) ${ids} hold a time other than ` +
+            `midnight UTC (${MIDNIGHT_UTC.slice(1)}), which has no one day to convert to; ` +
+            `set each to the day it means as YYYY-MM-DD (stored as midnight UTC), or clear it, and switch again`
+        : `cannot switch "${property.name}" to precision "instant": item(s) ${ids} hold a value that is not a day (YYYY-MM-DD)`,
+    );
+  }
 }
 
 /** Deletes the property row; its value rows cascade-delete immediately. */

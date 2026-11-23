@@ -45,6 +45,27 @@ export interface BlobStore {
   downloadUrl(key: string, ttlSeconds: number, opts: DownloadUrlOpts): Promise<string>;
 }
 
+/**
+ * Delete stored bytes once the rows that pointed at them are gone for good:
+ * after the deleting transaction has committed, never inside it, because a
+ * rollback cannot bring a blob back. Each delete is best effort. A failure is
+ * logged and the rest carry on; the caller's write has already succeeded, so
+ * the worst case is an orphaned blob, not a broken record.
+ */
+export async function deleteBlobsAfterCommit(
+  blob: BlobStore,
+  keys: string[],
+  logger?: { warn(...args: unknown[]): void },
+): Promise<void> {
+  for (const key of keys) {
+    try {
+      await blob.delete(key);
+    } catch (err) {
+      (logger ?? console).warn(`blob delete failed after commit; the bytes at ${key} are orphaned`, err);
+    }
+  }
+}
+
 function diskBacked(disk: Disk): Pick<BlobStore, "put" | "putStream" | "getStream" | "delete" | "stat"> {
   return {
     put: async (key, bytes) => {

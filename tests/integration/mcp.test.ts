@@ -182,6 +182,14 @@ describeEachAdapter("MCP surface", (adapter) => {
       );
     });
 
+    it("the load manifest summaries for edit tools name the operand key", async () => {
+      const loaded = await alice.call("load");
+      expect(loaded.tools.call.second_tier.update_items.summary).toBe(
+        "Batch-update item values with set or edits (text ops take content).",
+      );
+      expect(loaded.tools.call.second_tier.patch_doc.summary).toContain("content");
+    });
+
     it("load_space returns context and bundle metadata", async () => {
       const result = await alice.call("load_space", { space_id: spaceId });
       expect(result.bundles).toEqual([

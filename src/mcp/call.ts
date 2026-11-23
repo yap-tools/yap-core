@@ -11,7 +11,7 @@ import type { YapLogger } from "../logger.js";
 import * as bundlesCore from "../core/bundles.js";
 import * as bundleDocsCore from "../core/bundleDocs.js";
 import type { BundleDoc } from "../core/bundleDocs.js";
-import type { EditOp } from "../core/textEdits.js";
+import { EDIT_OP_RULES, EDIT_OP_SHAPES } from "../core/textEdits.js";
 import * as filesCore from "../core/files.js";
 import * as grantsCore from "../core/grants.js";
 import type { DriverRegistry } from "../core/drivers/registry.js";
@@ -186,7 +186,7 @@ function toCapabilityList(value: unknown): string[] {
 export const secondTier: Record<string, SecondTierTool> = {
   query_items: {
     description:
-      'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction} — property is a schema property name or the system timestamps createdAt/updatedAt), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
+      'Filtered, sorted, paginated item retrieval. Params: item_type (name or id), filters (array of {property, op, value, quantifier?}; AND-combined), sort ({property, direction} — property is a schema property name or the system timestamps createdAt/updatedAt), cursor, limit. Comparison ops: eq, neq, contains, gt, gte, lt, lte, in — e.g. filters: [{property: "status", op: "eq", value: "open"}, {property: "due", op: "lt", value: "2026-07-01"}]. A date filter value is YYYY-MM-DD or a timestamp with Z or an offset; on a day-precision date property (config {precision: "day"}) only YYYY-MM-DD. Anything else is refused (contains is the exception: a substring match on the stored text, e.g. "2026-11"). For multi-valued properties a comparison op takes quantifier any (default; some element matches) | all (every element matches) | none (no element matches); set ops match the value set directly: has (contains value), has_any (contains any of an array), has_all (contains all of an array), has_none (contains none of an array) — e.g. {property: "tags", op: "has_any", value: ["work", "urgent"]}.',
     capability: "read_items",
     params: {
       item_type: { required: true },
@@ -216,7 +216,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   create_items: {
     description:
-      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}].',
+      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}]. A date value is YYYY-MM-DD or a timestamp with Z or an offset; on a day-precision date property (config {precision: "day"}) only YYYY-MM-DD, returned as sent. Anything else is refused. All-or-nothing per call: if any item is invalid or a write fails, none of them is created.',
     capability: "edit_items",
     params: { item_type: { required: true }, items: { required: true } },
     handler: async (env, params) => ({
@@ -228,7 +228,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. Applied all-or-nothing per item.",
+      `Batch-update item values with set or edits (text ops take content). Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). A date value is YYYY-MM-DD or a timestamp with Z or an offset; on a day-precision date property (config {precision: "day"}) only YYYY-MM-DD, returned as sent. Anything else is refused. edits: {propertyName: [op, ...]} applies surgical ops, in order, to a text property without replacing the whole value. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: {log: [{op: "prepend", content: "2026-11-05 note\\n"}]}. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.`,
     capability: "edit_items",
     params: { updates: { required: true } },
     handler: async (env, params) => ({
@@ -236,7 +236,7 @@ export const secondTier: Record<string, SecondTierTool> = {
         env.db,
         env.userId,
         env.bundleId,
-        params.updates as { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> }[],
+        params.updates as itemsCore.ItemUpdateInput[],
       ),
     }),
   },
@@ -292,12 +292,12 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   patch_doc: {
     description:
-      "Surgically edit a bundle doc without replacing the entire content. Applied in order, all-or-nothing. Params: id (the doc's name or id), edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all occurrences), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
+      `Surgically edit a bundle doc with text ops ({op: "append", content} and the like). Params: id (the doc's name or id), edits — array of ops, applied in order, all-or-nothing. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: [{op: "append", content: "\\n## Notes\\n"}]. search_replace errors unless there is exactly one match; all: true replaces every occurrence. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (to insert_before a line, include its trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.`,
     capability: "edit_docs",
     params: { ...idParam, edits: { required: true } },
     handler: async (env, params) => ({
       result: docView(
-        await bundleDocsCore.patchDoc(env.db, env.userId, env.bundleId, String(params.id), params.edits as EditOp[]),
+        await bundleDocsCore.patchDoc(env.db, env.userId, env.bundleId, String(params.id), params.edits),
       ),
     }),
   },
@@ -661,7 +661,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     params: noParams,
     targets: ["space"],
     handler: async (env) => {
-      await spacesCore.deleteSpace(env.db, env.userId, env.spaceId, env.blob);
+      await spacesCore.deleteSpace(env.db, env.userId, env.spaceId, env.blob, env.logger);
       return { result: { deleted: true } };
     },
   },
@@ -722,7 +722,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     capability: "edit_bundles",
     params: noParams,
     handler: async (env) => {
-      await bundlesCore.deleteBundle(env.db, env.userId, env.bundleId, env.blob);
+      await bundlesCore.deleteBundle(env.db, env.userId, env.bundleId, env.blob, env.logger);
       return { result: { deleted: true } };
     },
   },
@@ -762,7 +762,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   add_property: {
     description:
-      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern, enum} (enum restricts to a fixed set of strings); number {min,max,decimals} (decimals default 2, extra precision rejected); item {itemType} (pin the referent's type: an item-type name or id in this bundle, stored and read back as the id, so renames never break the link; an unknown one is refused); any multi field {minItems,maxItems}; single-valued text/number {unique} (no two items of the type may share a value).",
+      "Add a property to an item-type. Params: item_type_id, name, datatype (text|number|boolean|date|item|file), required?, multi?, config?. A date property holds an instant unless its config says {precision: \"day\"}. An instant takes YYYY-MM-DD (stored as midnight UTC) or a timestamp with Z or an offset (2026-11-16T09:00:00+01:00); anything else, a zoneless timestamp included, is refused; it reads back as UTC ISO-8601. A day property takes only YYYY-MM-DD (2026-11-16), reads back exactly as sent, and refuses timestamps. This holds on writes and in filters. item references another item in this bundle (item://<id>); file references a finalized file (file://<id>). config constrains writes: text {pattern, enum} (enum restricts to a fixed set of strings); number {min,max,decimals} (decimals default 2, extra precision rejected); date {precision: \"day\" | \"instant\"} (use \"day\" for a due date or a birthday, so no time zone can shift it); item {itemType} (pin the referent's type: an item-type name or id in this bundle, stored and read back as the id, so renames never break the link; an unknown one is refused); any multi field {minItems,maxItems}; single-valued text/number {unique} (no two items of the type may share a value).",
     capability: "edit_bundles",
     params: { item_type_id: { required: true }, name: { required: true }, datatype: { required: true }, required: {}, multi: {}, config: {} },
     handler: async (env, params) => ({
@@ -779,7 +779,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_property: {
     description:
-      "Update a property (rename, toggle required/multi, reorder, replace config). The datatype is immutable. single→multi is free; multi→single is rejected if any item has multiple values. Params: item_type_id, property_id, name?, required?, multi?, config?, sort_order?.",
+      "Update a property (rename, toggle required/multi, reorder, replace config). The datatype is immutable. single→multi is free; multi→single is rejected if any item has multiple values. config replaces the stored config whole. Switching a date property's config.precision rewrites its values: to \"day\", values at exactly midnight UTC become YYYY-MM-DD and any other value refuses the switch, naming up to five items to fix first; to \"instant\" (or precision left out), each day becomes midnight UTC. Params: item_type_id, property_id, name?, required?, multi?, config?, sort_order?.",
     capability: "edit_bundles",
     params: { item_type_id: { required: true }, property_id: { required: true }, name: {}, required: {}, multi: {}, config: {}, sort_order: {} },
     handler: async (env, params) => ({

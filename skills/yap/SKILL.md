@@ -64,12 +64,12 @@ npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/ya
 **An instance is a directory.** One-shot setup:
 
 ```sh
-yap create my-yap --user ada      # mkdir + init + start + user create
+yap create my-yap --user ada      # mkdir + init + start + user create --save
 ```
 
-Or stepwise, from inside the directory: `yap init` (writes `.env` with generated sysadmin + master keys — printed once; vendors the server into the directory at the latest release, `--version vX.Y.Z` to pin, `--port n` to change 8787) → `yap start` → `yap user create ada`.
+Or stepwise, from inside the directory: `yap init` (writes `.env` with generated sysadmin + master keys — printed once; vendors the server into the directory at the latest release, `--version vX.Y.Z` to pin, `--port n` to change 8787) → `yap start` → `yap user create ada --save`.
 
-`yap user create` **prints the user's access key once** — that's the credential to give MCP/REST clients — and saves it to `.yap/credentials.json` (field `accessKey`, mode 0600), making the CLI an API client as that user. Mint additional keys later with `yap keys create`.
+`yap user create` **prints the user's access key once** — that's the credential to give MCP/REST clients — and saves nothing by default. With `--save` it also writes the key to `.yap/credentials.json` (field `accessKey`, mode 0600), making the CLI an API client as that user; an existing credential is never overwritten. `yap create` passes `--save`. Mint additional keys later with `yap keys create`.
 
 All commands resolve the instance from the current directory — run them inside it. To target a **remote** instance instead, pass `--url <url> --key <accessKey>` (or set `YAP_URL`/`YAP_KEY`): manage commands only — sysadmin-lane (`users …`, `user create`, `api --sysadmin`) and lifecycle commands (`start`, `logs`, `upgrade`, …) refuse remotely and must run on the instance host. Local `.env`/`.yap/` are never read in remote mode; the key must be explicit.
 

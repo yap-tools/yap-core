@@ -30,6 +30,7 @@ import { DRIVER_API, type BundleFile, type BundleReader, type BundleWriter, type
 import { listFilesUnchecked, openDownloadStream } from "../../src/core/files.js";
 import { createItemType } from "../../src/core/itemTypes.js";
 import { createItems, getItems, queryItems } from "../../src/core/items.js";
+import type { EditOp } from "../../src/core/textEdits.js";
 import { getRun, runService, type RunEnv } from "../../src/core/runs.js";
 import {
   createService,
@@ -310,6 +311,14 @@ const writingDriver: DriverDefinition = {
       ],
       timeoutMs: 5_000,
     },
+    bad_edit: {
+      description: "Attempts a text edit with a misnamed operand key.",
+      params: [
+        { name: "id", required: true },
+        { name: "suffix", required: true },
+      ],
+      timeoutMs: 5_000,
+    },
     detached_update: {
       description: "Starts an item update without awaiting it and returns at once.",
       params: [
@@ -455,6 +464,12 @@ const writingDriver: DriverDefinition = {
       const [item] = await writer.updateItems([
         { id: ctx.params.id!, edits: { title: [{ op: "append", content: ctx.params.suffix! }] } },
       ]);
+      return { id: item!.id, values: item!.values };
+    }
+    if (ctx.action === "bad_edit") {
+      // `value` where the op takes `content`: an untyped driver can send this.
+      const op = { op: "append", value: ctx.params.suffix! } as unknown as EditOp;
+      const [item] = await writer.updateItems([{ id: ctx.params.id!, edits: { title: [op] } }]);
       return { id: item!.id, values: item!.values };
     }
     return { ids: await writer.createItems(ctx.params.itemType!, [{ title: ctx.params.title }]) };
@@ -1437,6 +1452,28 @@ describeEachAdapter("services core", (adapter) => {
       expect(run.status).toBe("succeeded");
       expect(run.result).toEqual({ id: item!.id, values: { title: "transcript ready" } });
       expect(run.writes).toEqual([{ type: "items", itemType: "Note", ids: [item!.id], op: "update" }]);
+    });
+
+    it("refuses a malformed edit op through the driver's update handle", async () => {
+      const [item] = await createItems(app.db, aliceId, bundleId, {
+        itemType: "Note",
+        items: [{ title: "untouched" }],
+      });
+      await createService(env, aliceId, bundleId, { name: "bad-editor", driver: "writer", config: {} });
+
+      const run = await runService(env, aliceId, bundleId, {
+        source: "rest",
+        service: "bad-editor",
+        action: "bad_edit",
+        params: { id: item!.id, suffix: " oops" },
+        waitMs: 5_000,
+      });
+
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain('unknown key "value" for op "append"; expected {op, content}');
+      expect(run.writes).toEqual([]);
+      const [reread] = await getItems(app.db, aliceId, bundleId, [item!.id]);
+      expect(reread!.values.title).toBe("untouched");
     });
 
     it("validates file refs through the driver's update handle", async () => {

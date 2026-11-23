@@ -8,8 +8,9 @@
  */
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
-import type { BlobStore } from "../blob/index.js";
+import { deleteBlobsAfterCommit, type BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
+import type { YapLogger } from "../logger.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertCanCreateSpaces } from "./authScope.js";
 import { KNOWN_CAPABILITIES, effectiveCapabilities, hasAnyCapability, requireCapability, type SpaceRef } from "./capabilities.js";
@@ -56,18 +57,22 @@ export async function createSpace(
     createdAt: now,
     updatedAt: now,
   };
-  await db.client.insert(spaces).values(space);
-  await db.client.insert(grants).values(
-    KNOWN_CAPABILITIES.map((capability) => ({
-      id: newId(),
-      userId,
-      resourceType: "space",
-      resourceId: space.id,
-      capability,
-      effect: "allow",
-      createdAt: now,
-    })),
-  );
+  // The space and its owner's grants are one transaction: either both land
+  // or neither does.
+  await db.transaction(function* (tx) {
+    yield tx.insert(spaces).values(space);
+    yield tx.insert(grants).values(
+      KNOWN_CAPABILITIES.map((capability) => ({
+        id: newId(),
+        userId,
+        resourceType: "space",
+        resourceId: space.id,
+        capability,
+        effect: "allow",
+        createdAt: now,
+      })),
+    );
+  });
   return space;
 }
 
@@ -189,27 +194,43 @@ export async function updateSpace(
   return getSpaceRow(db, spaceId);
 }
 
-export async function deleteSpace(db: Db, userId: string, spaceId: string, blob: BlobStore): Promise<void> {
+export async function deleteSpace(
+  db: Db,
+  userId: string,
+  spaceId: string,
+  blob: BlobStore,
+  logger?: Pick<YapLogger, "warn">,
+): Promise<void> {
   const space = await getSpaceRow(db, spaceId);
   if (space.personal) throw invalid("the personal space cannot be deleted");
   await requireCapability(db, userId, "manage_space", { space: toSpaceRef(space) });
   const { spaces, grants, bundles, files } = db.tables;
-  // Grant rows reference resources by id without FK (resource may be a space
-  // or a bundle), so clean up explicitly — including rows on cascaded bundles.
-  const bundleRows = await db.client.select({ id: bundles.id }).from(bundles).where(eq(bundles.spaceId, spaceId));
-  // Capture blob keys before the file rows cascade away.
-  const fileRows = await db.client.select({ storageKey: files.storageKey }).from(files).where(eq(files.spaceId, spaceId));
-  await db.client.delete(spaces).where(eq(spaces.id, spaceId));
-  for (const row of fileRows) await blob.delete(row.storageKey);
-  await db.client
-    .delete(grants)
-    .where(and(eq(grants.resourceType, "space"), eq(grants.resourceId, spaceId)));
-  if (bundleRows.length > 0) {
-    await db.client.delete(grants).where(
-      and(
-        eq(grants.resourceType, "bundle"),
-        inArray(grants.resourceId, bundleRows.map((b) => b.id)),
-      ),
-    );
-  }
+  // The database side is one transaction; the blob deletes run after commit,
+  // because a rollback cannot bring a blob back.
+  const storageKeys = await db.transaction(function* (tx) {
+    // Grant rows reference resources by id without FK (resource may be a
+    // space or a bundle), so clean up explicitly — including rows on
+    // cascaded bundles.
+    const bundleRows: { id: string }[] = yield tx
+      .select({ id: bundles.id })
+      .from(bundles)
+      .where(eq(bundles.spaceId, spaceId));
+    // Capture blob keys before the file rows cascade away.
+    const fileRows: { storageKey: string }[] = yield tx
+      .select({ storageKey: files.storageKey })
+      .from(files)
+      .where(eq(files.spaceId, spaceId));
+    yield tx.delete(spaces).where(eq(spaces.id, spaceId));
+    yield tx.delete(grants).where(and(eq(grants.resourceType, "space"), eq(grants.resourceId, spaceId)));
+    if (bundleRows.length > 0) {
+      yield tx.delete(grants).where(
+        and(
+          eq(grants.resourceType, "bundle"),
+          inArray(grants.resourceId, bundleRows.map((b) => b.id)),
+        ),
+      );
+    }
+    return fileRows.map((r) => r.storageKey);
+  });
+  await deleteBlobsAfterCommit(blob, storageKeys, logger);
 }

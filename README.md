@@ -53,10 +53,10 @@ npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/ya
 mkdir my-yap && cd my-yap
 yap init                  # scaffold + install the server into this directory
 yap start                 # serve it in the background
-yap user create ada       # create your user; the CLI keeps the access key
+yap user create ada --save  # create your user; --save keeps the access key for the CLI
 ```
 
-Or all of that in one go: `yap create my-yap --user ada`.
+Or all of that in one go: `yap create my-yap --user ada` (which saves the key).
 
 **An instance is a directory.** `yap init` writes a `.env` (generated
 **sysadmin key** and master key — printed once, never overwritten), a `data/`
@@ -70,8 +70,10 @@ instances as you like — one directory each; `yap upgrade` moves a single
 instance forward when you choose.
 
 `yap user create` is the bootstrap: it reads the sysadmin key from `.env`,
-creates the user over the instance's own API, and stores the returned access
-key in `.yap/credentials.json` (0600). From then on the CLI — like every
+creates the user over the instance's own API, and prints the returned access
+key once. With `--save` it also stores the key in `.yap/credentials.json`
+(0600), unless one is already there; without it nothing is saved, so creating
+accounts for other people leaves their keys off this machine. From then on the CLI — like every
 other client — is just an API consumer authenticated as that user. Connect
 any MCP client to `http://localhost:8787/mcp` with the same key as a bearer
 token (or `?key=` as a fallback for URL-only clients — bearer is preferred;
@@ -293,7 +295,19 @@ Items conform to per-bundle **item-types** — a set of typed **properties**.
 Datatypes: `text`, `number`, `boolean`, `date`, plus two references —
 `item` (another item in the same bundle, stored as `item://<id>`) and `file`
 (a finalized file, `file://<id>`). Values are validated on write and cast on
-read; a reference is checked to exist in the bundle at write time (a later
+read. A `date` takes exactly two forms: a bare day, `YYYY-MM-DD` (stored as
+midnight UTC), or a timestamp with its zone, `Z` or an offset such as
+`2026-11-16T09:00:00+01:00` (stored as that instant in UTC); anything else,
+a zoneless timestamp included, is refused. Dates read back as UTC ISO-8601
+(`2026-11-16T08:00:00.000Z`). A `date` property that holds a day rather than a
+moment (a due date, a birthday) declares `config: {"precision": "day"}`: it
+then takes only `YYYY-MM-DD`, stores and returns it exactly as sent
+(`2026-11-16`), refuses timestamps, and filters and sorts by day. An existing
+property can be switched; its stored values are converted only when every one
+is exactly midnight UTC, and the switch is refused, naming the items,
+otherwise. See [docs/dates.md](docs/dates.md), which also carries the upgrade
+notes: nothing changes for a property until it sets `precision`. For the
+other datatypes, a reference is checked to exist in the bundle at write time (a later
 delete leaves a dangling reference that resolves to `not_found`, matching the
 loose EAV model). A property may be **multi-valued** (`multi: true`), holding an
 ordered list of its datatype; such fields are read and written as arrays
@@ -304,6 +318,18 @@ long values within Postgres's limit on index entries; filters and `unique`
 still compare the whole value, so two values that differ only after that
 prefix stay distinct.
 
+**Writes are all-or-nothing.** A create or update call is validated as a
+whole batch before anything is written, and its writes then run as one
+database transaction: if any item is invalid, or the database fails part-way,
+nothing from the call lands. The same holds for the other writes that take
+several statements — creating an item-type with its properties, a bundle with
+its seeded docs and types, a space with its owner's grants, and deleting a
+bundle or a space. Deleting a bundle or a space removes its files' stored
+bytes only after the transaction has committed; a byte delete that fails then
+is logged, not raised, and leaves orphaned bytes rather than a broken record. Service runs
+are the exception: a run's writer applies each call on its own, so a run that
+fails halfway keeps what it already wrote.
+
 A property may declare a **`config`** of constraints, enforced at the core
 (so REST and MCP can't drift):
 
@@ -312,6 +338,7 @@ A property may declare a **`config`** of constraints, enforced at the core
 | `text` | `{ pattern }` | value must match the regex (`RegExp.test`; anchor with `^…$` for a full match) |
 | `text` | `{ enum }` | value must be one of the listed strings (exact, case-sensitive); with `multi` it is a multi-select |
 | `number` | `{ min, max, decimals }` | inclusive bounds; at most `decimals` fractional digits (**default 2**) — out-of-precision writes are rejected |
+| `date` | `{ precision }` | `"day"`: holds a calendar day, sent and returned as `YYYY-MM-DD`; `"instant"` or left out: a UTC instant. Switching an existing property converts its values — see [docs/dates.md](docs/dates.md) |
 | `item` | `{ itemType }` | the referent must be of this item-type (same bundle); send its name or id, it is stored and read back as the id — see [docs/item-links.md](docs/item-links.md) |
 | any `multi` | `{ minItems, maxItems }` | bounds on the number of elements (when populated) |
 | single-valued `text` / `number` | `{ unique }` | no two items of the type may share a value (exact match on the stored value; absent values never collide) — for ids and other identity fields |
@@ -324,7 +351,13 @@ would be a lie if duplicates were grandfathered: enabling it on a property
 whose items already share values is rejected (with the shared values named)
 until the data is deduplicated. Uniqueness is enforced at the application
 layer on the API write paths, like every other constraint — a backup restore
-does not re-validate it.
+does not re-validate it. The other exception is a date's `precision`, the one
+config change that rewrites stored values: switching to `day` converts values
+that are exactly midnight UTC to their day, in the same transaction as the
+config, and is rejected (naming up to five items) if any other value is
+stored; switching back turns each day into midnight UTC. Since an update
+replaces `config` whole, a config patch without `precision` switches a day
+property back to instant.
 
 Query filters AND-combine and are datatype-aware. Comparison ops — `eq`,
 `neq`, `contains`, `gt`, `gte`, `lt`, `lte`, `in` — take an optional

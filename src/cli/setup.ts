@@ -60,7 +60,7 @@ export async function cmdInit(dir: string, argv: string[]): Promise<void> {
   console.log("");
   console.log("Next steps:");
   console.log("  yap start                 # serve this instance in the background");
-  console.log("  yap user create <name>    # create your user; saves the CLI credential");
+  console.log("  yap user create <name> --save   # create your user; --save keeps its key as the CLI credential");
   console.log("");
   console.log(`Then connect any MCP client to http://localhost:${values.port ?? 8787}/mcp with that user's key.`);
 }
@@ -137,7 +137,7 @@ export async function cmdCreate(argv: string[]): Promise<void> {
   await cmdInit(dir, initArgs);
   console.log("");
   await cmdStart(dir);
-  await cmdUserCreate(localTarget(dir), dir, [values.user ?? "admin"]);
+  await cmdUserCreate(localTarget(dir), dir, [values.user ?? "admin", "--save"]);
   console.log("");
   console.log(`Instance ready in ${dir}.`);
 }

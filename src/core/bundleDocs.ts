@@ -9,7 +9,7 @@ import { and, asc, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/index.js";
 import { getBundleContext, requireBundleCapability, requireBundleReadAccess } from "./bundles.js";
 import { invalid, notFound } from "./errors.js";
-import { applyEdits, type EditOp } from "./textEdits.js";
+import { applyEdits } from "./textEdits.js";
 import { newId, nowIso } from "./util.js";
 
 export interface BundleDocInfo {
@@ -157,7 +157,7 @@ export async function patchDoc(
   userId: string,
   bundleId: string,
   ref: string,
-  ops: EditOp[],
+  ops: unknown,
 ): Promise<BundleDoc> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleCapability(db, userId, "edit_docs", ctx);

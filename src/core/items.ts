@@ -22,11 +22,18 @@ import {
   resolveItemType,
   type BundleContext,
 } from "./bundles.js";
+import { DATE_INPUT_HINT, DAY_INPUT_HINT, parseDateInput, parseDayInput } from "./dates.js";
 import { invalid, notFound } from "./errors.js";
-import type { Property } from "./itemTypes.js";
+import { guardDatePrecision, type Property } from "./itemTypes.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
-import { countDecimals, NUMBER_DEFAULT_DECIMALS, parseConfig, type PropertyConfig } from "./propertyConfig.js";
-import { applyEdits, type EditOp } from "./textEdits.js";
+import {
+  countDecimals,
+  isDayPrecision,
+  NUMBER_DEFAULT_DECIMALS,
+  parseConfig,
+  type PropertyConfig,
+} from "./propertyConfig.js";
+import { applyEdits } from "./textEdits.js";
 import { displayValue, newId, nowIso } from "./util.js";
 
 /** Element-wise comparison operators. On a multi-valued property they apply
@@ -114,10 +121,12 @@ export function refId(value: string): string {
  * Validates a write value against the property datatype; returns the stored
  * text. When `config` is supplied (the write path) the declared constraints are
  * enforced too — regex for text, bounds/decimals for number. It is omitted on
- * the filter path, where operands are only type-checked and canonicalized.
+ * the filter path, where operands are only type-checked and canonicalized. A
+ * date's precision is not a constraint but what the value is, so it is read
+ * from the property itself on both paths.
  */
 export function normalizeValue(
-  property: Pick<Property, "name" | "datatype">,
+  property: Pick<Property, "name" | "datatype"> & { config?: string },
   value: unknown,
   config?: PropertyConfig,
 ): string {
@@ -157,12 +166,8 @@ export function normalizeValue(
         throw invalid(`property "${property.name}" expects a boolean`);
       }
       return value ? "true" : "false";
-    case "date": {
-      if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-        throw invalid(`property "${property.name}" expects an ISO-8601 date string`);
-      }
-      return new Date(value).toISOString();
-    }
+    case "date":
+      return dateValue(`property "${property.name}"`, value, isDayPrecision(parseConfig(property.config)));
     case "item":
       return normalizeRef("item", property.name, value);
     case "file":
@@ -170,6 +175,20 @@ export function normalizeValue(
     default:
       throw invalid(`property "${property.name}" has unknown datatype ${property.datatype}`);
   }
+}
+
+/**
+ * A date input in its stored form, or a validation error that names the
+ * property, shows the value and says what to send. One parser for item writes
+ * and filter operands alike; `config.precision` picks a day (`YYYY-MM-DD`,
+ * stored as sent) or an instant (stored as UTC). See src/core/dates.ts for
+ * the accepted forms.
+ */
+function dateValue(subject: string, value: unknown, day: boolean): string {
+  const stored = day ? parseDayInput(value) : parseDateInput(value);
+  if (stored !== null) return stored;
+  const shown = typeof value === "string" ? displayValue(value) : (JSON.stringify(value) ?? String(value)).slice(0, 60);
+  throw invalid(`${subject} expects ${day ? "a day" : "a date"}, got ${shown}: ${day ? DAY_INPUT_HINT : DATE_INPUT_HINT}`);
 }
 
 /** Casts stored text back to the declared datatype for reading. */
@@ -229,7 +248,7 @@ function storedValueExpr(property: Pick<Property, "datatype">): SQL {
 }
 
 /** Normalizes a filter operand for comparison against stored values. */
-function compareOperand(property: Pick<Property, "name" | "datatype">, value: unknown): string | number {
+function compareOperand(property: Pick<Property, "name" | "datatype" | "config">, value: unknown): string | number {
   if (property.datatype === "number") {
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) throw invalid(`filter on "${property.name}" expects a number`);
@@ -241,10 +260,7 @@ function compareOperand(property: Pick<Property, "name" | "datatype">, value: un
     throw invalid(`filter on "${property.name}" expects a boolean`);
   }
   if (property.datatype === "date") {
-    if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-      throw invalid(`filter on "${property.name}" expects an ISO-8601 date string`);
-    }
-    return new Date(value).toISOString();
+    return dateValue(`filter on "${property.name}"`, value, isDayPrecision(parseConfig(property.config)));
   }
   if (property.datatype === "item" || property.datatype === "file") {
     // Canonicalize so a filter operand matches stored "<scheme>://<id>".
@@ -268,7 +284,8 @@ function valueIn(property: Property, expr: SQL, operands: (string | number)[]): 
 const RANGE_SQL = { gt: ">", gte: ">=", lt: "<", lte: "<=" } as const;
 
 /**
- * A range comparison. Dates are stored as canonical ISO-8601 strings, always
+ * A range comparison. Dates are stored as fixed-width text (a UTC instant
+ * `2026-11-16T08:00:00.000Z`, or on a day property `2026-11-16`), always
  * shorter than the indexed prefix, so for them the prefix bound equals the
  * full one and is stated too, letting the value index serve date ranges. For
  * text of any length a prefix bound is unsound under a linguistic collation
@@ -589,7 +606,8 @@ export async function createItemsUnchecked(
   const itemType = await resolveItemType(db, bundleId, input.itemType);
   const props = await loadProperties(db, itemType.id);
 
-  // Validate the whole batch before writing anything (never partially applied).
+  // Validate the whole batch before writing anything; the writes below are one
+  // transaction, so the call is never partially applied.
   const errors: string[] = [];
   const refs: ValueEntry[] = [];
   const uniques: ValueEntry[] = [];
@@ -630,19 +648,26 @@ export async function createItemsUnchecked(
   errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid items: ${errors.join("; ")}`, { errors });
 
+  // The whole batch is one transaction: a database error on any item leaves
+  // none of them written.
   const { items, itemValues } = db.tables;
   const now = nowIso();
-  const created: { id: string; createdAt: string; updatedAt: string }[] = [];
-  for (const rows of normalized) {
-    const item = { id: newId(), bundleId, itemTypeId: itemType.id, createdAt: now, updatedAt: now };
-    await db.client.insert(items).values(item);
-    if (rows.length > 0) {
-      await db.client.insert(itemValues).values(
-        rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value, position: r.position })),
-      );
+  const written = new Set(normalized.flat().map((r) => r.propertyId));
+  const created = await db.transaction(function* (tx) {
+    yield* guardDatePrecision(db, tx, props.filter((p) => written.has(p.id)));
+    const created: { id: string; createdAt: string; updatedAt: string }[] = [];
+    for (const rows of normalized) {
+      const item = { id: newId(), bundleId, itemTypeId: itemType.id, createdAt: now, updatedAt: now };
+      yield tx.insert(items).values(item);
+      if (rows.length > 0) {
+        yield tx.insert(itemValues).values(
+          rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value, position: r.position })),
+        );
+      }
+      created.push(item);
     }
-    created.push(item);
-  }
+    return created;
+  });
   return materialize(db, created, itemType.name, props);
 }
 
@@ -680,7 +705,8 @@ export async function getItemsUnchecked(db: Db, bundleId: string, ids: string[])
   });
 }
 
-export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, EditOp[]> };
+/** `edits` maps a text property to its ops; `applyEdits` validates them. */
+export type ItemUpdateInput = { id: string; set?: Record<string, unknown>; edits?: Record<string, unknown> };
 
 export async function updateItems(
   db: Db,
@@ -696,7 +722,7 @@ export async function updateItems(
 /**
  * Internal: update without the capability check. Service drivers use this
  * through their bundle-scoped writer; validation, reference checks, uniqueness,
- * and all-or-nothing per-item semantics are identical to the gated path.
+ * and all-or-nothing per-call semantics are identical to the gated path.
  */
 export async function updateItemsUnchecked(
   db: Db,
@@ -784,8 +810,8 @@ export async function updateItemsUnchecked(
           .limit(1);
         const currentText = valueRow[0]?.value ?? "";
         const newText = applyEdits(currentText, editOps);
-        normalizeValue(prop, newText, parseConfig(prop.config));
-        plan.ops.push({ prop, rows: [{ value: newText, position: 0 }] });
+        const stored = normalizeValue(prop, newText, parseConfig(prop.config));
+        plan.ops.push({ prop, rows: [{ value: stored, position: 0 }] });
       } catch (err) {
         errors.push(`updates[${i}]: edits for "${name}": ${(err as Error).message}`);
       }
@@ -812,26 +838,31 @@ export async function updateItemsUnchecked(
   errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid updates: ${errors.join("; ")}`, { errors });
 
+  // The whole batch is one transaction, so a failed insert never leaves a
+  // value deleted and an item half-updated: either every plan lands or none.
   const now = nowIso();
-  for (const plan of plans) {
-    for (const op of plan.ops) {
-      await db.client
-        .delete(itemValues)
-        .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, op.prop.id)));
-      if (op.rows.length > 0) {
-        await db.client.insert(itemValues).values(
-          op.rows.map((r) => ({
-            id: newId(),
-            itemId: plan.itemId,
-            propertyId: op.prop.id,
-            value: r.value,
-            position: r.position,
-          })),
-        );
+  await db.transaction(function* (tx) {
+    yield* guardDatePrecision(db, tx, plans.flatMap((plan) => plan.ops.map((op) => op.prop)));
+    for (const plan of plans) {
+      for (const op of plan.ops) {
+        yield tx
+          .delete(itemValues)
+          .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, op.prop.id)));
+        if (op.rows.length > 0) {
+          yield tx.insert(itemValues).values(
+            op.rows.map((r) => ({
+              id: newId(),
+              itemId: plan.itemId,
+              propertyId: op.prop.id,
+              value: r.value,
+              position: r.position,
+            })),
+          );
+        }
       }
+      yield tx.update(items).set({ updatedAt: now }).where(eq(items.id, plan.itemId));
     }
-    await db.client.update(items).set({ updatedAt: now }).where(eq(items.id, plan.itemId));
-  }
+  });
 
   // Re-materialize the updated items, grouped per item-type.
   const result: MaterializedItem[] = [];

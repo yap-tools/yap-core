@@ -47,7 +47,9 @@ Drivers (service backends installed into this instance):
   driver list                         List installed drivers
 
 Manage (over the instance API, authenticated via .yap/credentials.json):
-  user create <name>                  Create a user (sysadmin lane); saves the CLI credential
+  user create <name> [--save]         Create a user (sysadmin lane); prints the key once.
+                                      --save also keeps it as the CLI credential (.yap/credentials.json,
+                                      never overwriting an existing one)
   api <METHOD> </path> [body|-] [--sysadmin]   Raw API passthrough — the full /v1 surface
   users list|delete                   keys list|create [--role r]|rotate|delete
   spaces list|show|create|delete      bundles list <spaceId> | show <id>
@@ -122,7 +124,7 @@ try {
       await cmdDriver(dir, rest);
       break;
     case "user": {
-      if (rest[0] !== "create") throw new CliError("usage: yap user create <name>");
+      if (rest[0] !== "create") throw new CliError("usage: yap user create <name> [--save]");
       await cmdUserCreate(target, dir, rest.slice(1));
       break;
     }

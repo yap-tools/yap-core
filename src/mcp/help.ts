@@ -21,8 +21,13 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   Properties are typed (text, number, boolean, date, plus item — a reference to
   another item in the same bundle, item://<id> — and file — a reference to a
   finalized file, file://<id>) and may be multi-valued (an ordered list of that
-  datatype). A property may declare config constraints, enforced on every
-  write: text {pattern, enum}; number {min, max, decimals} (default 2 decimals,
+  datatype). A date holds an instant by default: it takes YYYY-MM-DD (stored as
+  midnight UTC) or a timestamp with Z or an offset (2026-11-16T09:00:00+01:00);
+  anything else, a zoneless timestamp included, is refused, and it reads back
+  as UTC ISO-8601. A date with config {precision: "day"} holds a calendar day
+  (a due date, a birthday): it takes only YYYY-MM-DD, reads back exactly as
+  sent (2026-11-16) and refuses timestamps. A property may declare config
+  constraints, enforced on every write: text {pattern, enum}; date {precision}; number {min, max, decimals} (default 2 decimals,
   out-of-precision writes rejected); item {itemType} to pin the referent's
   type (send a name or id; it is stored and read back as the type's id, so a
   rename never breaks the link); any multi field {minItems, maxItems}; single-valued text/number
@@ -142,6 +147,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    delete (anchor ops: splice at the raw character offset, include newlines
    yourself), replace_lines, delete_lines (1-based inclusive, line-aware).
    update_items also accepts an edits key alongside set for text properties.
+   Each op takes exactly its own keys — prepend and append take content, as in
+   edits: {log: [{op: "prepend", content: "2026-11-05 note\\n"}]} — and a
+   missing, null or misnamed key is refused with invalid_request, nothing
+   written. The tool descriptions (get_tools) list every op's shape.
 
 Run the discovery chain silently — do not narrate loading steps.
 

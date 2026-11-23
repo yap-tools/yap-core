@@ -82,7 +82,7 @@ export function localTarget(cwd: string, env: Env = process.env): Target {
       const creds = readCredentials(cwd);
       if (!creds) {
         throw new CliError(
-          "no CLI credential in .yap/ — run `yap user create <name>` once, or save an access key there",
+          "no CLI credential in .yap/ — run `yap user create <name> --save` once, or save an access key there",
         );
       }
       return creds.accessKey;

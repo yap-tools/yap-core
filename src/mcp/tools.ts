@@ -29,13 +29,13 @@ import { listSchedulesUnchecked } from "../core/schedules.js";
 import { listServicesUnchecked } from "../core/services.js";
 import { canReachSpace, createSpace, getSpaceRow, listSpacesWithRole, spaceRole } from "../core/spaces.js";
 import * as userDocsCore from "../core/userDocs.js";
+import { EDIT_OP_RULES, EDIT_OP_SHAPES } from "../core/textEdits.js";
 import * as usersCore from "../core/users.js";
 import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
 import { HELP_TEXT } from "./help.js";
-import { editOpSchema, type EditOp } from "../core/textEdits.js";
 
 function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -627,7 +627,7 @@ Input format:
 - docs: named markdown docs, [{ name, content?, autoload? }] — set autoload: true for operating instructions agents must always see; leave it off for reference material loaded on demand
 - item_types: array of schemas, each { name, properties: [{ name, datatype: ${DATATYPES.join(" | ")}, required?, multi?, config? }] }
 
-Datatypes: text, number, boolean, date, plus item (a reference to another item in this bundle, item://<id>) and file (a reference to a finalized file, file://<id>). A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. config declares constraints, enforced on every write: text {pattern, enum} (enum restricts to a fixed set of strings; with multi it is a multi-select); number {min, max, decimals} (decimals default 2, out-of-precision writes rejected); item {itemType} (pin the referent's type: the name of an item_type in this same call or bundle, stored and read back as that type's id, so renames never break the link); any multi field {minItems, maxItems}; single-valued text/number {unique} (no two items of the type may share a value — for ids and other identity fields). Properties can be renamed/added/removed later without touching stored data.`,
+Datatypes: text, number, boolean, date, plus item (a reference to another item in this bundle, item://<id>) and file (a reference to a finalized file, file://<id>). A date property holds an instant unless its config says {precision: "day"}. An instant takes YYYY-MM-DD (stored as midnight UTC) or a timestamp with Z or an offset (2026-11-16T09:00:00+01:00); anything else, a zoneless timestamp included, is refused; it reads back as UTC ISO-8601. A day property takes only YYYY-MM-DD (2026-11-16), reads back exactly as sent, and refuses timestamps. This holds on writes and in filters. A property with multi: true holds an ordered list of values of its datatype (e.g. a multi text "tags" holds ["a","b"]); items then read/write that field as an array. config declares constraints, enforced on every write: text {pattern, enum} (enum restricts to a fixed set of strings; with multi it is a multi-select); number {min, max, decimals} (decimals default 2, out-of-precision writes rejected); date {precision: "day" | "instant"} (use "day" for a due date or a birthday, so no time zone can shift it); item {itemType} (pin the referent's type: the name of an item_type in this same call or bundle, stored and read back as that type's id, so renames never break the link); any multi field {minItems, maxItems}; single-valued text/number {unique} (no two items of the type may share a value — for ids and other identity fields). Properties can be renamed/added/removed later without touching stored data.`,
     parameters: z.object({
       space_id: z.string(),
       name: z.string(),
@@ -757,15 +757,15 @@ Datatypes: text, number, boolean, date, plus item (a reference to another item i
   addTool({
     name: "patch_user_doc",
     description:
-      "Surgically edit a user doc without replacing the entire content. Applied in order, all-or-nothing. Params: id, edits — array of: prepend/append {content}, search_replace {search, replace, all?} (default: error if not exactly one match; all:true replaces all), insert_before/insert_after {target, content}, delete {target}, replace_lines/delete_lines {from, to[, content]} (1-based line numbers, inclusive). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (e.g. insert_before a line you must include the trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.",
+      `Surgically edit a user doc with text ops ({op: "append", content} and the like). Params: id, edits — array of ops, applied in order, all-or-nothing. The ops: ${EDIT_OP_SHAPES}. ${EDIT_OP_RULES} Example: edits: [{op: "append", content: "\\n## Notes\\n"}]. search_replace errors unless there is exactly one match; all: true replaces every occurrence. insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility (to insert_before a line, include its trailing \\n in content). replace_lines/delete_lines are line-aware and handle newlines automatically.`,
     parameters: z.object({
       id: z.string(),
-      edits: z.array(editOpSchema).min(1),
+      edits: z.array(z.unknown()),
     }),
     execute: async (args, ctx) => {
       try {
         const userId = sessionUser(ctx.session);
-        return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits as EditOp[]));
+        return asJson(await userDocsCore.patchUserDoc(db, userId, args.id, args.edits));
       } catch (err) {
         rethrow(err);
       }
