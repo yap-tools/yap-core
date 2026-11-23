@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 
 import { CliError } from "../instance/errors.js";
 import { apiRequest, requireOk } from "./client.js";
-import { readCredentials, writeCredentials } from "./credentials.js";
+import { type Credentials, readCredentials, writeCredentials } from "./credentials.js";
 import { table } from "./table.js";
 import type { Target } from "./target.js";
 
@@ -32,14 +32,20 @@ interface CreateUserResponse {
   initialKey: { key: string };
 }
 
+/** Who the CLI acts as, given the credential saved in .yap/ (if any). */
+function cliIdentity(creds: Credentials | undefined): string {
+  if (!creds) return "The CLI has no credential yet.";
+  return `The CLI still authenticates as ${creds.userName ?? "the user in .yap/credentials.json"}.`;
+}
+
 export async function cmdUserCreate(target: Target, dir: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { "no-save": { type: "boolean" } },
+    options: { save: { type: "boolean" } },
     allowPositionals: true,
   });
   const name = positionals[0];
-  if (!name) throw new CliError("usage: yap user create <name>");
+  if (!name) throw new CliError("usage: yap user create <name> [--save]");
 
   const body = (await call(target, "POST", "/v1/users", target.sysKey(), { name })) as CreateUserResponse;
   console.log(`created user ${body.user.name} (${body.user.id}), personal space ${body.personalSpaceId}`);
@@ -47,10 +53,15 @@ export async function cmdUserCreate(target: Target, dir: string, argv: string[])
   console.log("Access key (shown once — store it wherever this user connects from):");
   console.log(`  ${body.initialKey.key}`);
 
-  if (!values["no-save"] && !readCredentials(dir)) {
+  console.log("");
+  const existing = readCredentials(dir);
+  if (values.save && !existing) {
     writeCredentials(dir, { accessKey: body.initialKey.key, userId: body.user.id, userName: body.user.name });
-    console.log("");
-    console.log("Saved to .yap/credentials.json — the CLI now authenticates as this user.");
+    console.log(`Saved to .yap/credentials.json — the CLI now authenticates as ${body.user.name}.`);
+  } else if (values.save) {
+    console.log(`Not saved: .yap/credentials.json already holds a key, so it was left as is. ${cliIdentity(existing)}`);
+  } else {
+    console.log(`Not saved (pass --save to keep it as the CLI credential). ${cliIdentity(existing)}`);
   }
 }
 

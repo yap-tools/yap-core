@@ -53,10 +53,10 @@ npm install -g https://github.com/yap-tools/yap-core/releases/latest/download/ya
 mkdir my-yap && cd my-yap
 yap init                  # scaffold + install the server into this directory
 yap start                 # serve it in the background
-yap user create ada       # create your user; the CLI keeps the access key
+yap user create ada --save  # create your user; --save keeps the access key for the CLI
 ```
 
-Or all of that in one go: `yap create my-yap --user ada`.
+Or all of that in one go: `yap create my-yap --user ada` (which saves the key).
 
 **An instance is a directory.** `yap init` writes a `.env` (generated
 **sysadmin key** and master key — printed once, never overwritten), a `data/`
@@ -70,8 +70,10 @@ instances as you like — one directory each; `yap upgrade` moves a single
 instance forward when you choose.
 
 `yap user create` is the bootstrap: it reads the sysadmin key from `.env`,
-creates the user over the instance's own API, and stores the returned access
-key in `.yap/credentials.json` (0600). From then on the CLI — like every
+creates the user over the instance's own API, and prints the returned access
+key once. With `--save` it also stores the key in `.yap/credentials.json`
+(0600), unless one is already there; without it nothing is saved, so creating
+accounts for other people leaves their keys off this machine. From then on the CLI — like every
 other client — is just an API consumer authenticated as that user. Connect
 any MCP client to `http://localhost:8787/mcp` with the same key as a bearer
 token (or `?key=` as a fallback for URL-only clients — bearer is preferred;
