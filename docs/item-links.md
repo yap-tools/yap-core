@@ -28,10 +28,10 @@ target.
   The whole design is validated before anything is written, so a target that
   is not one of the call's own types refuses the call and no bundle is
   created. Core then writes every item type first and the properties after,
-  with their targets resolved to the new ids. (Bundle creation is not a
-  database transaction: a storage failure part-way through can still leave a
-  partial bundle, as before. Link resolution adds no new way for that to
-  happen, because it cannot fail once validation has passed.)
+  with their targets resolved to the new ids. The bundle, its docs, types and
+  properties are written in one database transaction, so a storage failure
+  part-way through leaves no partial bundle. Link resolution cannot fail once
+  validation has passed, so it never aborts that transaction.
 - **On read** — REST schema responses, the MCP `load_bundle` output and every
   other read path return `config.itemType` as stored: the id, except for the
   rows the upgrade below had to leave alone, which still read back as the

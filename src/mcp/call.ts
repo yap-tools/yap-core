@@ -216,7 +216,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   create_items: {
     description:
-      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}].',
+      'Batch-create items of an item-type with write-time validation. Params: item_type, items (array of {propertyName: value} objects; for a multi-valued property pass an array of values) — e.g. items: [{title: "Book travel", status: "open", tags: ["work", "urgent"]}]. All-or-nothing per call: if any item is invalid or a write fails, none of them is created.',
     capability: "edit_items",
     params: { item_type: { required: true }, items: { required: true } },
     handler: async (env, params) => ({
@@ -228,7 +228,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   update_items: {
     description:
-      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. Applied all-or-nothing per item.",
+      "Batch-update item values. Params: updates — array of {id, set?, edits?}. set: {propertyName: value | null} does a full property replacement (null clears an optional property). edits: {propertyName: EditOp[]} applies surgical ops to text properties without replacing the whole value — ops: prepend/append {content}, search_replace {search, replace, all?}, insert_before/insert_after/delete {target[, content]}, replace_lines/delete_lines {from, to[, content]} (1-based). Note: insert_before/insert_after/delete splice at the raw character offset — newlines are your responsibility; replace_lines/delete_lines are line-aware. A property must not appear in both set and edits for the same item. All-or-nothing per call: if any update is invalid or a write fails, none of them is applied.",
     capability: "edit_items",
     params: { updates: { required: true } },
     handler: async (env, params) => ({
@@ -661,7 +661,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     params: noParams,
     targets: ["space"],
     handler: async (env) => {
-      await spacesCore.deleteSpace(env.db, env.userId, env.spaceId, env.blob);
+      await spacesCore.deleteSpace(env.db, env.userId, env.spaceId, env.blob, env.logger);
       return { result: { deleted: true } };
     },
   },
@@ -722,7 +722,7 @@ export const secondTier: Record<string, SecondTierTool> = {
     capability: "edit_bundles",
     params: noParams,
     handler: async (env) => {
-      await bundlesCore.deleteBundle(env.db, env.userId, env.bundleId, env.blob);
+      await bundlesCore.deleteBundle(env.db, env.userId, env.bundleId, env.blob, env.logger);
       return { result: { deleted: true } };
     },
   },

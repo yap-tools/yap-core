@@ -50,7 +50,7 @@ Schemas are freely mutable (EAV): renames touch no values, removals drop values,
 ### Items
 | Method & path | Shape |
 |---|---|
-| `POST /v1/bundles/:id/items` | `{"itemType": "Todo", "items": [{...}, ...]}` → 201 |
+| `POST /v1/bundles/:id/items` | `{"itemType": "Todo", "items": [{...}, ...]}` → 201; all-or-nothing: one invalid item or a failed write creates none |
 | `GET /v1/bundles/:id/items?itemType=T` | query; or `?ids=a,b,c` to fetch by id |
 | `PATCH /v1/items/:id` | `{"set"?: {"prop": value}, "edits"?: {"textProp": [EditOp, ...]}}` — at least one required; `set` replaces values, `edits` applies surgical ops to text properties |
 | `DELETE /v1/items/:id` | |

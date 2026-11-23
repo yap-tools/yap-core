@@ -6,8 +6,9 @@
  */
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import type { BlobStore } from "../blob/index.js";
+import { deleteBlobsAfterCommit, type BlobStore } from "../blob/index.js";
 import type { Db } from "../db/index.js";
+import type { YapLogger } from "../logger.js";
 import { effectiveCapabilities, hasAnyCapability, requireCapability, resolveCapability } from "./capabilities.js";
 import { forbidden, invalid, notFound } from "./errors.js";
 import type { GrantTarget } from "./grants.js";
@@ -152,30 +153,11 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
     createdAt: now,
     updatedAt: now,
   };
-  await db.client.insert(bundles).values(bundle);
-  if ((input.docs ?? []).length > 0) {
-    await db.client.insert(bundleDocs).values(
-      (input.docs ?? []).map((doc) => ({
-        id: newId(),
-        bundleId: bundle.id,
-        name: doc.name.trim(),
-        content: doc.content ?? "",
-        autoload: doc.autoload ? 1 : 0,
-        createdAt: now,
-        updatedAt: now,
-      })),
-    );
-  }
   // Types first, then properties: a link property stores its target's id, and
   // seeded types may link to each other in any order, so every id must exist
   // before the first property is written. validateBundleInput has already
   // refused any target outside this call, so resolution cannot fail here.
   const seeded = (input.itemTypes ?? []).map((itemType) => ({ itemType, id: newId(), name: itemType.name.trim() }));
-  if (seeded.length > 0) {
-    await db.client
-      .insert(itemTypes)
-      .values(seeded.map((t) => ({ id: t.id, bundleId: bundle.id, name: t.name, createdAt: now })));
-  }
   const candidates: LinkTargetCandidate[] = seeded.map((t) => ({ id: t.id, name: t.name }));
   const propRows = seeded.flatMap(({ itemType, id: itemTypeId }) =>
     itemType.properties.map((prop, order) => ({
@@ -189,7 +171,30 @@ export async function createBundle(db: Db, userId: string, spaceId: string, inpu
       sortOrder: order,
     })),
   );
-  if (propRows.length > 0) await db.client.insert(properties).values(propRows);
+  // One transaction: the bundle, its docs, types and properties land together
+  // or not at all, so a failed seed never leaves a half-built bundle behind.
+  await db.transaction(function* (tx) {
+    yield tx.insert(bundles).values(bundle);
+    if ((input.docs ?? []).length > 0) {
+      yield tx.insert(bundleDocs).values(
+        (input.docs ?? []).map((doc) => ({
+          id: newId(),
+          bundleId: bundle.id,
+          name: doc.name.trim(),
+          content: doc.content ?? "",
+          autoload: doc.autoload ? 1 : 0,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+    }
+    if (seeded.length > 0) {
+      yield tx
+        .insert(itemTypes)
+        .values(seeded.map((t) => ({ id: t.id, bundleId: bundle.id, name: t.name, createdAt: now })));
+    }
+    if (propRows.length > 0) yield tx.insert(properties).values(propRows);
+  });
   return bundle;
 }
 
@@ -344,21 +349,32 @@ export async function updateBundle(
   return getBundleRow(db, bundleId);
 }
 
-export async function deleteBundle(db: Db, userId: string, bundleId: string, blob: BlobStore): Promise<void> {
+export async function deleteBundle(
+  db: Db,
+  userId: string,
+  bundleId: string,
+  blob: BlobStore,
+  logger?: Pick<YapLogger, "warn">,
+): Promise<void> {
   const ctx = await getBundleContext(db, bundleId);
   await requireBundleReadAccess(db, userId, ctx);
   await requireCapability(db, userId, "edit_bundles", bundleCapabilityCtx(ctx));
   const { bundles, grants, files } = db.tables;
-  // Capture blob keys before the file rows cascade away (FK), then delete the
-  // bytes — "deleting a file record deletes the underlying blob immediately"
-  // applies to cascade deletions too, not just the single-file path.
-  const fileRows = await db.client.select({ storageKey: files.storageKey }).from(files).where(eq(files.bundleId, bundleId));
-  await db.client.delete(bundles).where(eq(bundles.id, bundleId));
-  for (const row of fileRows) await blob.delete(row.storageKey);
-  // Grant rows have no FK to resources; clean up bundle-level rows explicitly.
-  await db.client
-    .delete(grants)
-    .where(and(eq(grants.resourceType, "bundle"), eq(grants.resourceId, bundleId)));
+  // The database side is one transaction: capture the blob keys before the
+  // file rows cascade away (FK), delete the bundle, and clean up its grant
+  // rows (they have no FK to resources). The bytes go after commit, because
+  // "deleting a file record deletes the underlying blob immediately" applies
+  // to cascade deletions too, and a rollback cannot bring a blob back.
+  const storageKeys = await db.transaction(function* (tx) {
+    const fileRows: { storageKey: string }[] = yield tx
+      .select({ storageKey: files.storageKey })
+      .from(files)
+      .where(eq(files.bundleId, bundleId));
+    yield tx.delete(bundles).where(eq(bundles.id, bundleId));
+    yield tx.delete(grants).where(and(eq(grants.resourceType, "bundle"), eq(grants.resourceId, bundleId)));
+    return fileRows.map((r) => r.storageKey);
+  });
+  await deleteBlobsAfterCommit(blob, storageKeys, logger);
 }
 
 /**

@@ -119,21 +119,24 @@ export async function createItemType(
     : [];
   const configs = propInputs.map((prop) => withResolvedLinkTarget(prop.name.trim(), prop.config, candidates));
 
-  await db.client.insert(itemTypes).values({ id, bundleId, name, createdAt: nowIso() });
-  if (propInputs.length > 0) {
-    await db.client.insert(properties).values(
-      propInputs.map((prop, order) => ({
-        id: newId(),
-        itemTypeId: id,
-        name: prop.name.trim(),
-        datatype: prop.datatype,
-        required: prop.required ? 1 : 0,
-        multi: prop.multi ? 1 : 0,
-        config: serializeConfig(configs[order]),
-        sortOrder: order,
-      })),
-    );
-  }
+  // The type and its properties are one transaction: no type without them.
+  await db.transaction(function* (tx) {
+    yield tx.insert(itemTypes).values({ id, bundleId, name, createdAt: nowIso() });
+    if (propInputs.length > 0) {
+      yield tx.insert(properties).values(
+        propInputs.map((prop, order) => ({
+          id: newId(),
+          itemTypeId: id,
+          name: prop.name.trim(),
+          datatype: prop.datatype,
+          required: prop.required ? 1 : 0,
+          multi: prop.multi ? 1 : 0,
+          config: serializeConfig(configs[order]),
+          sortOrder: order,
+        })),
+      );
+    }
+  });
   const all = await listItemTypesUnchecked(db, bundleId);
   return all.find((t) => t.id === id)!;
 }

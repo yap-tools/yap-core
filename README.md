@@ -304,6 +304,18 @@ long values within Postgres's limit on index entries; filters and `unique`
 still compare the whole value, so two values that differ only after that
 prefix stay distinct.
 
+**Writes are all-or-nothing.** A create or update call is validated as a
+whole batch before anything is written, and its writes then run as one
+database transaction: if any item is invalid, or the database fails part-way,
+nothing from the call lands. The same holds for the other writes that take
+several statements — creating an item-type with its properties, a bundle with
+its seeded docs and types, a space with its owner's grants, and deleting a
+bundle or a space. Deleting a bundle or a space removes its files' stored
+bytes only after the transaction has committed; a byte delete that fails then
+is logged, not raised, and leaves orphaned bytes rather than a broken record. Service runs
+are the exception: a run's writer applies each call on its own, so a run that
+fails halfway keeps what it already wrote.
+
 A property may declare a **`config`** of constraints, enforced at the core
 (so REST and MCP can't drift):
 

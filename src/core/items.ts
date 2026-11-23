@@ -589,7 +589,8 @@ export async function createItemsUnchecked(
   const itemType = await resolveItemType(db, bundleId, input.itemType);
   const props = await loadProperties(db, itemType.id);
 
-  // Validate the whole batch before writing anything (never partially applied).
+  // Validate the whole batch before writing anything; the writes below are one
+  // transaction, so the call is never partially applied.
   const errors: string[] = [];
   const refs: ValueEntry[] = [];
   const uniques: ValueEntry[] = [];
@@ -630,19 +631,24 @@ export async function createItemsUnchecked(
   errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid items: ${errors.join("; ")}`, { errors });
 
+  // The whole batch is one transaction: a database error on any item leaves
+  // none of them written.
   const { items, itemValues } = db.tables;
   const now = nowIso();
-  const created: { id: string; createdAt: string; updatedAt: string }[] = [];
-  for (const rows of normalized) {
-    const item = { id: newId(), bundleId, itemTypeId: itemType.id, createdAt: now, updatedAt: now };
-    await db.client.insert(items).values(item);
-    if (rows.length > 0) {
-      await db.client.insert(itemValues).values(
-        rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value, position: r.position })),
-      );
+  const created = await db.transaction(function* (tx) {
+    const created: { id: string; createdAt: string; updatedAt: string }[] = [];
+    for (const rows of normalized) {
+      const item = { id: newId(), bundleId, itemTypeId: itemType.id, createdAt: now, updatedAt: now };
+      yield tx.insert(items).values(item);
+      if (rows.length > 0) {
+        yield tx.insert(itemValues).values(
+          rows.map((r) => ({ id: newId(), itemId: item.id, propertyId: r.propertyId, value: r.value, position: r.position })),
+        );
+      }
+      created.push(item);
     }
-    created.push(item);
-  }
+    return created;
+  });
   return materialize(db, created, itemType.name, props);
 }
 
@@ -696,7 +702,7 @@ export async function updateItems(
 /**
  * Internal: update without the capability check. Service drivers use this
  * through their bundle-scoped writer; validation, reference checks, uniqueness,
- * and all-or-nothing per-item semantics are identical to the gated path.
+ * and all-or-nothing per-call semantics are identical to the gated path.
  */
 export async function updateItemsUnchecked(
   db: Db,
@@ -812,26 +818,30 @@ export async function updateItemsUnchecked(
   errors.push(...refErrors, ...uniqueErrors);
   if (errors.length > 0) throw invalid(`invalid updates: ${errors.join("; ")}`, { errors });
 
+  // The whole batch is one transaction, so a failed insert never leaves a
+  // value deleted and an item half-updated: either every plan lands or none.
   const now = nowIso();
-  for (const plan of plans) {
-    for (const op of plan.ops) {
-      await db.client
-        .delete(itemValues)
-        .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, op.prop.id)));
-      if (op.rows.length > 0) {
-        await db.client.insert(itemValues).values(
-          op.rows.map((r) => ({
-            id: newId(),
-            itemId: plan.itemId,
-            propertyId: op.prop.id,
-            value: r.value,
-            position: r.position,
-          })),
-        );
+  await db.transaction(function* (tx) {
+    for (const plan of plans) {
+      for (const op of plan.ops) {
+        yield tx
+          .delete(itemValues)
+          .where(and(eq(itemValues.itemId, plan.itemId), eq(itemValues.propertyId, op.prop.id)));
+        if (op.rows.length > 0) {
+          yield tx.insert(itemValues).values(
+            op.rows.map((r) => ({
+              id: newId(),
+              itemId: plan.itemId,
+              propertyId: op.prop.id,
+              value: r.value,
+              position: r.position,
+            })),
+          );
+        }
       }
+      yield tx.update(items).set({ updatedAt: now }).where(eq(items.id, plan.itemId));
     }
-    await db.client.update(items).set({ updatedAt: now }).where(eq(items.id, plan.itemId));
-  }
+  });
 
   // Re-materialize the updated items, grouped per item-type.
   const result: MaterializedItem[] = [];

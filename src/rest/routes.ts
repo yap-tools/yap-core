@@ -399,7 +399,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/spaces/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      await spacesCore.deleteSpace(db, userId, param(c, "id"), blob);
+      await spacesCore.deleteSpace(db, userId, param(c, "id"), blob, logger);
       return c.json({ deleted: true });
     }),
   );
@@ -548,7 +548,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/bundles/:id",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      await bundlesCore.deleteBundle(db, userId, param(c, "id"), blob);
+      await bundlesCore.deleteBundle(db, userId, param(c, "id"), blob, logger);
       return c.json({ deleted: true });
     }),
   );
