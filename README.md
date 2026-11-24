@@ -113,7 +113,7 @@ yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
 yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
 yap api --sysadmin PATCH /v1/users/<id> '{"deniedCapabilities": ["manage_keys"]}'  # restrict an account
-yap api --sysadmin PATCH /v1/users/<id> '{"email": "ada@example.com"}'  # invite: a provider login with this verified email claims the account
+yap api --sysadmin PATCH /v1/users/<id> '{"email": "ada@example.com"}'  # invite: a provider login with this email (verified, or trusted for that provider) claims the account
 yap api --sysadmin PATCH /v1/users/<id> '{"providerLoginOnly": false}'  # let a provider-login user have a key again (e.g. for the CLI)
 yap api --sysadmin GET /v1/users/<id>/oauth-grants  # any user's connected apps; DELETE …/oauth-grants/<grantId> revokes one
 ```
@@ -191,6 +191,7 @@ local dev.
 | `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
 | `YAP_OAUTH_MAX_ROLE` | *(unset = admin)* | Highest role the consent screen offers and grants (`admin`, `member`, `read-only`), whatever the login method |
 | `YAP_OIDC_PROVIDERS` / `YAP_OIDC_<NAME>_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_LABEL` / `_GRANT_MAX_DAYS` | *(none)* | OpenID Connect login providers for Core's own pages; needs `YAP_BASE_URL` ([docs/oidc-login.md](docs/oidc-login.md)) |
+| `YAP_OIDC_<NAME>_PRESET` / `_EMAIL_CLAIM` / `_TRUST_EMAIL` / `_SUBJECT_CLAIM` | `generic` (`google` for Google's issuer) | How a provider's ID token is read: a preset (`generic`, `google`, `entra`) and per-claim overrides ([docs/oidc-login.md](docs/oidc-login.md#provider-presets)) |
 | `YAP_OIDC_GRANT_MAX_DAYS` / `YAP_OIDC_SIGNUP` / `YAP_OIDC_ALLOW` | 30 / `false` / *(empty)* | Lifetime of a grant made after a provider login; sign-up on a first login; the sign-up allowlist (addresses and `@domain`) |
 | `YAP_KEY_LOGIN` | `true` | `false` switches access-key login off for the whole instance: pages offer only the providers, no user key can be made, and user keys are refused on `/v1` and `/mcp`. Needs a provider, or startup fails ([docs/key-login.md](docs/key-login.md)) |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |

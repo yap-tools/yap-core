@@ -48,7 +48,7 @@ export async function cmdUserCreate(target: Target, dir: string, argv: string[])
   const name = positionals[0];
   if (!name) throw new CliError("usage: yap user create <name> [--email <address>] [--save]");
 
-  // --email invites: the first provider login with that verified address claims the account.
+  // --email invites: the first provider login with that address (verified, or trusted for the provider) claims the account.
   const request = values.email === undefined ? { name } : { name, email: values.email };
   const body = (await call(target, "POST", "/v1/users", target.sysKey(), request)) as CreateUserResponse;
   console.log(`created user ${body.user.name} (${body.user.id}), personal space ${body.personalSpaceId}`);

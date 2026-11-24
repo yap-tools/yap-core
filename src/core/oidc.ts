@@ -22,12 +22,15 @@
  * 3. `spendLoginTicket`: the page posts the decision with the ticket, which is
  *    good once, for that page and what it was about, for a few minutes.
  *
- * Who a login is: a returning person is recognised by the provider's issuer
- * and subject (`user_identities`), never by email. A first login links to an
- * invite (a user the operator created with that email and no identity yet)
- * when the provider says the email is verified, or, when sign-up is on and the
- * address is on the allowlist, creates a user with a personal space and no
- * access key. Either way the user is then set to provider login only
+ * Who a login is: the provider's claim mapping (`mapClaims`, from its preset
+ * and env overrides) reads the ID token into a subject, an email it vouches
+ * for, a name and whether it vouches for the email's domain. A returning
+ * person is recognised by the provider's issuer and that subject
+ * (`user_identities`), never by email. A first login links to an invite (a
+ * user the operator created with that email and no identity yet) when the
+ * mapping yields an email (verified, or trusted for that provider), or, when
+ * sign-up is on and the address is on the allowlist, creates a user with a
+ * personal space and no access key. Either way the user is then set to provider login only
  * (keyLogin.ts): a claimed invite's keys stop working and the OAuth grants
  * they authorized are deleted. Anyone else is turned away.
  *
@@ -277,7 +280,7 @@ export async function finishLogin(
     verifier: decryptSecret(tx.codeVerifier, config.masterKey),
   });
   const claims = await verifyIdToken(provider, meta, idToken, decryptSecret(tx.nonce, config.masterKey));
-  const user = await resolvePerson(db, config, provider, claims);
+  const user = await resolvePerson(db, config, provider, mapClaims(provider, claims));
 
   const ticket = generateSecret();
   const ticketExpiresAt = isoIn(LOGIN_TTL_SECONDS);
@@ -368,37 +371,67 @@ async function verifyIdToken(
 
 // ---- Who the login is -------------------------------------------------------------
 
-const GOOGLE_ISSUER = "https://accounts.google.com";
-
-/** The address the provider vouches for, or null: only `email_verified: true` counts. */
-function verifiedEmail(claims: JWTPayload): string | null {
-  if (claims.email_verified !== true || typeof claims.email !== "string") return null;
-  const email = claims.email.trim().toLowerCase();
-  return email.includes("@") ? email : null;
+/**
+ * What a login says about the person, read from the ID token by the
+ * provider's claim mapping (its preset plus env overrides, config.ts). This is
+ * all `resolvePerson` sees: which claims a provider uses lives here only.
+ */
+export interface MappedLogin {
+  /** Identifies a returning person, with the provider's issuer. */
+  subject: string;
+  /** The address the provider vouches for (lowercased), or null: then it cannot claim an invite or sign up. */
+  email: string | null;
+  /** The display name for a user a sign-up creates. */
+  name: string;
+  /** Whether an `@domain` allowlist entry may admit `email` (Google's `hd` names the domain; true without a domain claim). */
+  domainVouched: boolean;
 }
 
 /**
- * Whether sign-up admits this address: an exact entry, or an `@domain` entry.
- * A Google account can carry a company address without belonging to the
- * company's Workspace, so via Google a domain entry also needs the `hd`
- * (hosted domain) claim to name that domain.
+ * Reads an ID token's claims through the provider's mapping. The email is the
+ * first of `emailClaims` that holds an address; it counts only with
+ * `email_verified: true` (a boolean), unless the provider is set to trust it.
+ * (Config refuses any claim but `email` on an untrusted provider, since
+ * `email_verified` speaks for `email` alone.)
+ * Throws when the subject claim is missing, since then nobody can be recognised.
  */
-export function signupAllows(
-  allow: string[],
-  email: string,
-  claims: Record<string, unknown>,
-  issuer: string,
-): boolean {
-  if (allow.includes(email)) return true;
-  const domain = email.slice(email.lastIndexOf("@") + 1);
-  if (!allow.includes(`@${domain}`)) return false;
-  if (issuer === GOOGLE_ISSUER) return typeof claims.hd === "string" && claims.hd.toLowerCase() === domain;
-  return true;
+export function mapClaims(provider: OidcProviderConfig, claims: Record<string, unknown>): MappedLogin {
+  const map = provider.claims;
+  const subject = claims[map.subjectClaim];
+  if (typeof subject !== "string" || subject === "") {
+    throw new OidcLoginError(`The ID token from ${provider.label} names nobody (no ${map.subjectClaim} claim).`);
+  }
+  let email: string | null = null;
+  if (map.trustEmail || claims.email_verified === true) {
+    for (const claim of map.emailClaims) {
+      const value = claims[claim];
+      if (typeof value !== "string") continue;
+      const candidate = value.trim().toLowerCase();
+      if (candidate.includes("@")) {
+        email = candidate;
+        break;
+      }
+    }
+  }
+  const rawName = typeof claims.name === "string" ? claims.name.trim() : "";
+  const name = (rawName || email || "").slice(0, 200);
+  let domainVouched = true;
+  if (map.domainClaim !== null) {
+    const vouched = claims[map.domainClaim];
+    domainVouched =
+      email !== null && typeof vouched === "string" && vouched.toLowerCase() === email.slice(email.lastIndexOf("@") + 1);
+  }
+  return { subject, email, name, domainVouched };
 }
 
-function displayName(claims: JWTPayload, email: string): string {
-  const name = typeof claims.name === "string" ? claims.name.trim() : "";
-  return (name || email).slice(0, 200);
+/**
+ * Whether sign-up admits this address: an exact entry, or an `@domain` entry
+ * when the login vouches for the domain (`MappedLogin.domainVouched`).
+ */
+export function signupAllows(allow: string[], email: string, domainVouched: boolean): boolean {
+  if (allow.includes(email)) return true;
+  const domain = email.slice(email.lastIndexOf("@") + 1);
+  return allow.includes(`@${domain}`) && domainVouched;
 }
 
 async function linkedUser(db: Db, issuer: string, subject: string): Promise<{ id: string; name: string } | null> {
@@ -418,14 +451,13 @@ async function resolvePerson(
   db: Db,
   config: YapConfig,
   provider: OidcProviderConfig,
-  claims: JWTPayload,
+  login: MappedLogin,
 ): Promise<{ id: string; name: string }> {
   const issuer = provider.issuer;
-  const subject = claims.sub!;
+  const { subject, email } = login;
   const known = await linkedUser(db, issuer, subject);
   if (known) return known;
 
-  const email = verifiedEmail(claims);
   if (!email) throw new OidcLoginError(NO_ACCOUNT);
   const { users, userIdentities } = db.tables;
 
@@ -448,13 +480,13 @@ async function resolvePerson(
     return invite;
   }
 
-  if (!config.oidc.signup || !signupAllows(config.oidc.allow, email, claims, issuer)) throw new OidcLoginError(NO_ACCOUNT);
+  if (!config.oidc.signup || !signupAllows(config.oidc.allow, email, login.domainVouched)) throw new OidcLoginError(NO_ACCOUNT);
   // Created without its email, which is set only once the identity is linked:
   // until then the new user must not look like an invite to a concurrent login.
   const created = await createUser(
     db,
     config,
-    { name: displayName(claims, email), providerLoginOnly: true },
+    { name: login.name, providerLoginOnly: true },
     { initialKey: false },
   );
   try {

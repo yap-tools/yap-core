@@ -18,6 +18,8 @@ export interface FakeLogin {
   email_verified?: unknown;
   name?: string;
   hd?: string;
+  /** Any other claim, e.g. Entra's `oid` and `preferred_username`. */
+  [claim: string]: unknown;
 }
 
 export interface Tamper {

@@ -30,6 +30,10 @@ to true.
 | `YAP_OIDC_<NAME>_CLIENT_ID` / `_CLIENT_SECRET` | *(required)* | The client Core is registered as at the provider |
 | `YAP_OIDC_<NAME>_LABEL` | the name, capitalised | Button text: "Continue with {label}" |
 | `YAP_OIDC_<NAME>_GRANT_MAX_DAYS` | `YAP_OIDC_GRANT_MAX_DAYS` | This provider's grant lifetime (see below) |
+| `YAP_OIDC_<NAME>_PRESET` | `generic` (`google` for `https://accounts.google.com`) | How the provider's ID token is read: `generic`, `google` or `entra` ([Provider presets](#provider-presets)) |
+| `YAP_OIDC_<NAME>_EMAIL_CLAIM` | the preset's | The claim holding the email, or a comma list tried in order: the first that holds an address is used. Any claim but `email` needs `_TRUST_EMAIL=true` |
+| `YAP_OIDC_<NAME>_TRUST_EMAIL` | the preset's | `true`: accept that email without `email_verified: true` |
+| `YAP_OIDC_<NAME>_SUBJECT_CLAIM` | the preset's | The claim that identifies a returning person |
 | `YAP_OIDC_GRANT_MAX_DAYS` | `30` | How long an OAuth grant made after a provider login lives, counted from its creation |
 | `YAP_OIDC_SIGNUP` | `false` | Whether a first login without an account may create one |
 | `YAP_OIDC_ALLOW` | *(empty)* | Who sign-up admits: exact addresses and `@domain` entries, comma-separated |
@@ -48,6 +52,110 @@ it for an hour. The issuer in it must equal the configured one, and its
 endpoints must be https. Outbound requests to the provider are plain `fetch`
 calls, not driver egress, so a provider on a private network (a self-hosted
 Keycloak) needs no `YAP_HOOK_ALLOW_HOSTS` entry.
+
+## Provider presets
+
+Providers differ in which claims their ID tokens carry, not in how the login
+works. So each provider gets a **preset**, a small table of claim-reading
+defaults (`OIDC_PRESETS` in `src/config.ts`), and the three env overrides
+above change single entries of it. `mapClaims` in `src/core/oidc.ts` reads the
+verified ID token through that table into a subject, an email, a name and
+whether the provider vouches for the email's domain. Everything after it
+(invites, sign-up, returning people) sees only that result. A bad preset name,
+trust value or claim name fails startup. So does an `_EMAIL_CLAIM` naming
+any claim but `email` on a provider not set to trust its email:
+`email_verified` speaks for the `email` claim only, so an address from another
+claim is unverified by definition.
+
+| Preset | Email from | Needs `email_verified: true` | Subject | `@domain` allowlist entries |
+|---|---|---|---|---|
+| `generic` | `email` | yes | `sub` | admit any address in the domain |
+| `google` | `email` | yes | `sub` | also need `hd` to name the domain |
+| `entra` | `email`, else `preferred_username` | no (trusted) | `oid` | admit any address in the domain |
+
+Without `_PRESET`, a provider gets `generic`, except one whose issuer is
+`https://accounts.google.com`, which gets `google`. That is how providers
+behaved before presets existed.
+
+### generic
+
+Plain OpenID Connect, for Okta, Keycloak, Auth0 and the like. An email counts
+only when the token says `email_verified: true` (a boolean). For a provider
+that never sends `email_verified`, set `_TRUST_EMAIL=true`; for one that sends
+its address in another claim, set `_EMAIL_CLAIM` too (it needs
+`_TRUST_EMAIL=true`). Trusting the
+email means anyone who can set that attribute at the provider can claim an
+invite with it, so trust only a provider whose admins control it.
+
+### google
+
+As `generic`, plus a check on the hosted domain. A Google account can carry a
+company address without belonging to that company's Workspace. So under
+`google`, an `@domain` entry on `YAP_OIDC_ALLOW` admits an address only when
+the ID token's `hd` claim names that domain. An exact address needs no `hd`.
+The check follows the preset, not the issuer.
+
+```sh
+YAP_OIDC_PROVIDERS=google
+YAP_OIDC_GOOGLE_ISSUER=https://accounts.google.com
+YAP_OIDC_GOOGLE_CLIENT_ID=…
+YAP_OIDC_GOOGLE_CLIENT_SECRET=…
+```
+
+### entra
+
+Microsoft Entra ID, v2.0 tokens. They carry no `email_verified`, and `email`
+only when the tenant has a mail address for the person and the app asks for it
+as an optional claim. So the preset falls back to `preferred_username` (the
+sign-in name, usually the UPN) and trusts the address. A returning person is
+recognised by `oid`, the person's object id in the tenant. Entra's `sub` is
+pairwise: it differs for each app registration, so replacing the registration
+would make every existing user a stranger. `oid` stays the same.
+
+```sh
+YAP_OIDC_PROVIDERS=microsoft
+YAP_OIDC_MICROSOFT_PRESET=entra
+YAP_OIDC_MICROSOFT_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+YAP_OIDC_MICROSOFT_CLIENT_ID=…
+YAP_OIDC_MICROSOFT_CLIENT_SECRET=…
+YAP_OIDC_MICROSOFT_LABEL=Microsoft
+```
+
+- **Use the single-tenant issuer**, `https://login.microsoftonline.com/<tenant-id>/v2.0`,
+  with the tenant's id. The multi-tenant endpoints (`common`, `organizations`)
+  publish a templated issuer that does not equal the configured one, so
+  discovery refuses them.
+- **Invite people by the address the mapping produces**: `email` when the token
+  has it, else `preferred_username`. The UPN can differ from the mail address
+  (`ann@tenant.onmicrosoft.com` rather than `ann@example.com`), and an invite
+  matches `users.email` exactly. When in doubt, look at the token's claims for
+  a test user.
+- **Trusting the email** means the invite and the allowlist rely on the
+  tenant's admins controlling that attribute. Anyone who can change a user's
+  UPN or mail in the tenant can make it match an invite.
+
+#### Restricting login to a group
+
+Core does not check groups, and is not meant to. Use Entra's own control: on
+the app's **Enterprise application**, set **Assignment required** to **Yes**
+and assign the users or groups who may log in. Entra then refuses everyone
+else before the login reaches Core. Per Microsoft's documentation
+([access management](https://learn.microsoft.com/entra/identity/enterprise-apps/what-is-access-management),
+[assigning users and groups](https://learn.microsoft.com/entra/identity/enterprise-apps/assign-user-or-group-access-portal)):
+
+- Assigning a **group** needs Entra ID P1 or P2. Assigning individual users
+  does not.
+- **Nested groups** are not honoured: only direct members of an assigned group
+  get in.
+- An app that requires assignment needs **tenant-wide admin consent**; users
+  cannot consent to it themselves.
+- **Removing someone** from the group stops their new logins, but does not
+  revoke grants already issued. Those live until the grant's maximum lifetime
+  (`YAP_OIDC_<NAME>_GRANT_MAX_DAYS`) or until the person or the sysadmin
+  revokes them.
+- **Access keys bypass Entra** entirely. If assignment is meant to be the gate,
+  switch key login off, for the instance (`YAP_KEY_LOGIN=false`) or per user
+  ([key-login.md](key-login.md)).
 
 ## The round trip
 
@@ -106,13 +214,15 @@ again. The provider's own session makes that a quick redirect.
 ## Who a login is
 
 - **A returning person** is recognised by the provider's issuer and its
-  subject id (`sub`), stored in `user_identities` (unique per issuer and
-  subject). Never by email: addresses change and get reused.
+  subject id (the preset's subject claim: `sub`, or `oid` under `entra`),
+  stored in `user_identities` (unique per issuer and subject). Never by email:
+  addresses change and get reused.
 - **An invite** is a user the operator created with an email
   (`POST /v1/users {"name", "email"}`, or `PATCH /v1/users/:id {"email"}` on an
   existing user) and no linked identity yet. The first login whose
-  provider-verified email (`email_verified: true`, a boolean) matches claims
-  it: the identity is linked, and from then on the email no longer matters.
+  email matches claims it. The email must be one the provider vouches for:
+  `email_verified: true` (a boolean), or any address from a provider set to
+  trust it (the `entra` preset, or `_TRUST_EMAIL=true`). the identity is linked, and from then on the email no longer matters.
   The claim checks the user still carries that email, so clearing or changing
   it withdraws the invite.
   Two logins claiming the same invite at once are serialised: the second finds
@@ -120,11 +230,10 @@ again. The provider's own session makes that a quick redirect.
   only on a user you mean to invite. If several unclaimed users carry the same
   email, the login is refused until the operator sorts it out.
 - **Sign-up**, only with `YAP_OIDC_SIGNUP=true`: a first login with no account
-  and no invite creates one when the verified email is on `YAP_OIDC_ALLOW`,
-  either as an exact address or under an `@domain` entry. A Google account can
-  carry a company address without belonging to that company's Workspace. So
-  for Google (`https://accounts.google.com`), a domain entry also needs the
-  ID token's `hd` claim to name that domain. The new user gets a personal space
+  and no invite creates one when that email is on `YAP_OIDC_ALLOW`, either as
+  an exact address or under an `@domain` entry. Under the `google` preset a
+  domain entry also needs the ID token's `hd` claim to name that domain (see
+  [google](#google)). The new user gets a personal space
   and **no access key**. The allowlist only decides who may create an account.
   After that the user is recognised by their identity.
 - Anyone else sees "There is no Yap account for this login."
@@ -179,6 +288,10 @@ the operator switched it off.
   [key-login.md](key-login.md). What a page offers comes from one function,
   `loginOptions` in `src/core/oidc.ts`; its `keyLogin` is false where key login
   is off for the instance.
+- **Group or role checks.** Core admits by invite and allowlist only. Restrict
+  who can log in at the provider (for Entra, [Assignment required](#restricting-login-to-a-group)).
+- **Multi-tenant Entra** (any tenant's users, checked by `tid`) is not
+  supported; configure one provider per tenant.
 - **Re-checking the provider on refresh** (keeping its refresh token) is not
   done. The grant lifetime bounds how long a closed provider account keeps
   access.
@@ -188,7 +301,7 @@ the operator switched it off.
   someone is, so it belongs in Core or in code the operator installs and pins,
   never in code an agent can add.
 
-Code: `src/core/oidc.ts` (the round trip, ID-token checks, matching the
-person), `src/core/personLogin.ts` (the shared "identify the person" step,
+Code: `src/core/oidc.ts` (the round trip, ID-token checks, reading the
+claims, matching the person), `src/config.ts` (the presets), `src/core/personLogin.ts` (the shared "identify the person" step,
 key or ticket), `src/rest/oauth.ts` (the routes and pages), migration
 `0017_oidc_login`.

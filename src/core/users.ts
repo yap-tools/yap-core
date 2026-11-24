@@ -265,7 +265,8 @@ export async function getUser(db: Db, userId: string): Promise<User> {
  * account-level capabilities, replaced whole (an empty list clears it), the
  * email address (null clears it), and whether they log in through a provider
  * only. Setting an email on a user with no linked identity invites them: the
- * first provider login with that verified address claims the account.
+ * first provider login with that address (verified by the provider, or trusted
+ * for it) claims the account.
  * Setting `providerLoginOnly` refuses their keys from the next request on and
  * deletes the OAuth grants (and unexchanged codes) their keys authorized, in
  * the same transaction, so a client connected through a key reconnects
