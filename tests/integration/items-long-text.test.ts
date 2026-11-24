@@ -10,6 +10,7 @@
 import { randomBytes } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import { createBundle } from "../../src/core/bundles.js";
 import { createItems, getItems, type ItemFilter, queryItems, updateItems } from "../../src/core/items.js";
@@ -46,7 +47,7 @@ describeEachAdapter("long text values", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    const { user } = await createUser(db, { name: "Owner" });
+    const { user } = await createUser(db, KEY_LOGIN_ON, { name: "Owner" });
     userId = user.id;
     const spaceId = (await createSpace(db, userId, { name: "S" })).id;
     const bundle = await createBundle(db, userId, spaceId, {

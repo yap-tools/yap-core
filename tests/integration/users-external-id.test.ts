@@ -78,6 +78,7 @@ describeEachAdapter("users: externalId", (adapter) => {
       name: "Grace",
       externalId: "ext-grace",
       deniedCapabilities: [],
+      providerLoginOnly: false,
     });
   });
 

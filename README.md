@@ -78,7 +78,9 @@ other client — is just an API consumer authenticated as that user. Connect
 any MCP client to `http://localhost:8787/mcp` with the same key as a bearer
 token (or `?key=` as a fallback for URL-only clients — bearer is preferred;
 query strings leak into logs, and Yap redacts keys from its own logs for
-exactly that reason).
+exactly that reason). Where the operator has switched key login off
+(`YAP_KEY_LOGIN=false`, see *Switching key login off*), a key is refused
+there, `?key=` included, and clients connect through OAuth instead.
 
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
@@ -111,6 +113,9 @@ yap api POST /v1/spaces '{"name": "Docs"}'
 yap users list                  # sysadmin-lane commands read .env on demand
 yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
 yap api --sysadmin PATCH /v1/users/<id> '{"deniedCapabilities": ["manage_keys"]}'  # restrict an account
+yap api --sysadmin PATCH /v1/users/<id> '{"email": "ada@example.com"}'  # invite: a provider login with this verified email claims the account
+yap api --sysadmin PATCH /v1/users/<id> '{"providerLoginOnly": false}'  # let a provider-login user have a key again (e.g. for the CLI)
+yap api --sysadmin GET /v1/users/<id>/oauth-grants  # any user's connected apps; DELETE …/oauth-grants/<grantId> revokes one
 ```
 
 The manage commands also work against an instance running elsewhere — pass
@@ -184,6 +189,10 @@ local dev.
 | `YAP_MIME_ALLOWLIST` | `*` | Comma list; supports `type/*` patterns |
 | `YAP_UPLOAD_TTL_SECONDS` / `YAP_DOWNLOAD_TTL_SECONDS` / `YAP_WIDGET_TOKEN_TTL_SECONDS` / `YAP_SECRET_REQUEST_TTL_SECONDS` | 600 / 14400 / 600 / 600 | Link/token lifetimes; the last is how long a secret form or a service approve page stays open |
 | `YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS` / `YAP_OAUTH_CODE_TTL_SECONDS` | 3600 / 30 days / 60 | OAuth token and authorization-code lifetimes |
+| `YAP_OAUTH_MAX_ROLE` | *(unset = admin)* | Highest role the consent screen offers and grants (`admin`, `member`, `read-only`), whatever the login method |
+| `YAP_OIDC_PROVIDERS` / `YAP_OIDC_<NAME>_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_LABEL` / `_GRANT_MAX_DAYS` | *(none)* | OpenID Connect login providers for Core's own pages; needs `YAP_BASE_URL` ([docs/oidc-login.md](docs/oidc-login.md)) |
+| `YAP_OIDC_GRANT_MAX_DAYS` / `YAP_OIDC_SIGNUP` / `YAP_OIDC_ALLOW` | 30 / `false` / *(empty)* | Lifetime of a grant made after a provider login; sign-up on a first login; the sign-up allowlist (addresses and `@domain`) |
+| `YAP_KEY_LOGIN` | `true` | `false` switches access-key login off for the whole instance: pages offer only the providers, no user key can be made, and user keys are refused on `/v1` and `/mcp`. Needs a provider, or startup fails ([docs/key-login.md](docs/key-login.md)) |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
 | `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
@@ -450,6 +459,30 @@ current denials are in `GET /v1/whoami` and the MCP `whoami` tool, so a
 client can hide what would be refused; a refused call is a `403` naming the
 capability.
 
+### Switching key login off
+
+Once a login provider is configured, access keys can be switched off, so that
+people only ever log in through their provider:
+
+- **For the instance**, `YAP_KEY_LOGIN=false`. The pages Core serves show only
+  the provider buttons and never mention keys. No user key can be made by
+  anyone, the sysadmin lane included (`POST /v1/users` then creates users
+  without one). A user key is refused on `/v1` and `/mcp`, bearer and `?key=`
+  alike, with a `401` saying to connect through the provider. OAuth tokens
+  from a provider login keep working. Tokens of a grant made with a key are
+  refused, not deleted, so switching back on restores them. The sysadmin key
+  is unaffected. Startup fails if no provider is configured.
+- **For one user**, `providerLoginOnly` on `POST /v1/users` and
+  `PATCH /v1/users/:id`, reported by `whoami`. Their keys are refused on the
+  pages, on `/v1` and on `/mcp`, and no key can be made or rotated for them,
+  by anyone. Setting it deletes the OAuth grants their keys authorized; grants
+  made after a provider login stay. Users a provider login creates (sign-up,
+  or a claimed invite) have it on; the sysadmin clears it to give one a key.
+
+The CLI can only connect with an access key, so it cannot reach an instance or
+an account where keys are switched off; it says so instead of a bare `401`.
+How it works: [docs/key-login.md](docs/key-login.md).
+
 ## OAuth (connecting apps)
 
 Every instance is its own **OAuth 2.1 authorization server** — no central
@@ -462,6 +495,20 @@ The authorize screen — served by Core itself — authenticates by a full
 revokes every delegation made with it. Tokens are opaque, hashed at rest,
 short-lived, and renewed by rotating refresh tokens (reuse kills the grant).
 
+The operator can also configure **login providers** (OpenID Connect: Google,
+Microsoft, Okta, Keycloak, Auth0 or their own). Then the consent screen, the
+connected-apps page, a service's approve page and its secret form lead with
+"Continue with {provider}", with the access key as the second option. A
+provider login only identifies the person: the decision is always made on the
+page rendered after the login, with their name on it. A grant made after a
+provider login has no key behind it, belongs to the user, and lives at most
+`YAP_OIDC_GRANT_MAX_DAYS` (default 30) from its creation. A first login can
+claim an invite (a user the operator created with an `email`) or, with sign-up
+on, create an account for an allowlisted address, with a personal space and
+no access key. Either way the user is then set to provider login only (see
+*Switching key login off*). `YAP_OAUTH_MAX_ROLE` caps the role the consent screen offers
+for every login method. How it works: [docs/oidc-login.md](docs/oidc-login.md).
+
 A token's scope is `role:admin | role:member | role:read-only` plus optional
 `space:<id>` / `bundle:<id>` restrictions; every authorization resolves as
 *live grants ∧ scope*, so a delegation can never out-power the key behind it
@@ -469,8 +516,8 @@ and role changes apply to outstanding tokens immediately. The default
 (unrequested) scope is `member`: content work, but no credential, role, or
 space management — minting keys or managing connected apps over the token
 lane requires `role:admin`. Connected apps are listed and revocable at
-`/v1/oauth/grants`, on the self-served `/oauth/connections` page, and via
-RFC 7009 `/oauth/revoke`. Both lanes — keys and
+`/v1/oauth/grants`, on the self-served `/oauth/connections` page, via
+RFC 7009 `/oauth/revoke`, and by the operator at `/v1/users/:id/oauth-grants`. Both lanes — keys and
 tokens — work on every REST and MCP endpoint. OAuth needs `YAP_BASE_URL` to
 be the instance's externally reachable origin (https except on loopback).
 
@@ -529,7 +576,8 @@ be the instance's externally reachable origin (https except on loopback).
   `update_service` take the settings, refuse any value at a secret path, and
   check the config as if the missing secrets were filled in; `secret_request`
   then hands the user a one-off form (an MCP widget, or a signed page) whose
-  password fields post straight to the server, with the person's access key:
+  password fields post straight to the server, with the person's login (an
+  access key, or a configured login provider):
   the agent can see the form's token, so the token alone does not save a
   secret. The form takes one
   submission, closes if the service's config changes, and expires after `YAP_SECRET_REQUEST_TTL_SECONDS` (default
@@ -545,7 +593,8 @@ be the instance's externally reachable origin (https except on loopback).
   there in what it does or where data goes, until someone approves it.
   `approval_request` gives them a one-off page (widget or signed link) that
   shows the service as the server has it, where data goes first, and
-  approves it once they log in with a full user access key and hold
+  approves it once they log in (a full user access key, or a configured login
+  provider) and hold
   `edit_services`; the link alone, an OAuth token, a scoped key and the
   sysadmin key are not enough. Services written over REST with a full key,
   and every service from before, count as approved, and listings show `approved`. Entering a secret
@@ -768,8 +817,9 @@ be the instance's externally reachable origin (https except on loopback).
   audio and video play inline (audio with its filename above the player),
   and every card has exactly one Download link.
   The secret input (`secret_request`'s pointer) shows where the secrets will
-  be sent, one password field per requested secret path and a field for the
-  person's access key, posts them straight to
+  be sent, one password field per requested secret path and the person's
+  login (provider buttons first when the operator configured any, which open a
+  tab of their own inside a host's frame, then a field for an access key), posts them straight to
   `POST /v1/secret-requests/:id/submit` with its own signed token (saving
   needs the login, as approving does), and then shows "Saved" and nothing else; its origin page is
   `/w/secret-input?token=…`. The service approve page (`approval_request`'s

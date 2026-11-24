@@ -25,9 +25,38 @@ export const users = sqliteTable(
     // Account-level capabilities the operator has denied this user, as a JSON
     // array of names (see core/accountCapabilities.ts). Empty: unrestricted.
     deniedCapabilities: text("denied_capabilities").notNull().default("[]"),
+    // An email address the operator gave the user (an invite) or a provider
+    // vouched for at sign-up, lowercased. Used only to match a first provider
+    // login to an invite and to check the sign-up allowlist; never to
+    // recognise a returning user (see user_identities). Not unique.
+    email: text("email"),
+    // 1: this user logs in only through a login provider. Their access keys
+    // are refused everywhere and none can be made for them (core/keyLogin.ts).
+    // Set by the sysadmin, and on for users a provider login created.
+    providerLoginOnly: integer("provider_login_only").notNull().default(0),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId)],
+  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId), index("users_email_idx").on(t.email)],
+);
+
+/** Login-provider identities linked to a user (core/oidc.ts): the provider's
+ * issuer and its stable subject id. A returning provider login is recognised
+ * by this pair alone, never by email. Dies with its user. */
+export const userIdentities = sqliteTable(
+  "user_identities",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("user_identities_issuer_subject_idx").on(t.issuer, t.subject),
+    index("user_identities_user_idx").on(t.userId),
+  ],
 );
 
 export const accessKeys = sqliteTable(
@@ -387,20 +416,24 @@ export const oauthCodes = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    keyId: text("key_id")
-      .notNull()
-      .references(() => accessKeys.id, { onDelete: "cascade" }),
+    // The access key the person logged in with; null when they logged in
+    // through a login provider (the grant then belongs to the user directly).
+    keyId: text("key_id").references(() => accessKeys.id, { onDelete: "cascade" }),
     scope: text("scope").notNull(), // JSON TokenScope
     codeChallenge: text("code_challenge").notNull(), // PKCE S256
     redirectUri: text("redirect_uri").notNull(),
     expiresAt: text("expires_at").notNull(),
+    // The end of the grant this code becomes: set for a provider login only.
+    grantExpiresAt: text("grant_expires_at"),
   },
   (t) => [uniqueIndex("oauth_codes_code_hash_idx").on(t.codeHash)],
 );
 
 /** One row per user↔client consent — the "connected apps" view. key_id binds
- * the grant to the access key presented at the authorize screen so revoking
- * that key kills the grant (and, via FK cascade, its tokens). */
+ * a grant to the access key presented at the authorize screen so revoking
+ * that key kills the grant (and, via FK cascade, its tokens). A grant made
+ * after a provider login has no key: it belongs to the user, dies with them
+ * or when disconnected, and ends at expires_at. */
 export const oauthGrants = sqliteTable(
   "oauth_grants",
   {
@@ -408,15 +441,19 @@ export const oauthGrants = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    keyId: text("key_id")
-      .notNull()
-      .references(() => accessKeys.id, { onDelete: "cascade" }),
+    // The access key the person logged in with; null when they logged in
+    // through a login provider (the grant then belongs to the user directly).
+    keyId: text("key_id").references(() => accessKeys.id, { onDelete: "cascade" }),
     clientId: text("client_id")
       .notNull()
       .references(() => oauthClients.id, { onDelete: "cascade" }),
     scope: text("scope").notNull(), // JSON TokenScope
     createdAt: text("created_at").notNull(),
     lastUsedAt: text("last_used_at").notNull(),
+    // A provider-login grant's maximum lifetime, counted from createdAt and
+    // never extended by refresh: past it, refresh fails and its tokens stop
+    // working. Null for a key-backed grant, which lives until revoked.
+    expiresAt: text("expires_at"),
   },
   (t) => [index("oauth_grants_user_idx").on(t.userId), index("oauth_grants_key_idx").on(t.keyId)],
 );
@@ -436,6 +473,38 @@ export const oauthTokens = sqliteTable(
     revokedAt: text("revoked_at"),
   },
   (t) => [uniqueIndex("oauth_tokens_token_hash_idx").on(t.tokenHash), index("oauth_tokens_grant_idx").on(t.grantId)],
+);
+
+/** One login-provider round trip (core/oidc.ts): created when a page sends
+ * the person to their provider, claimed once by the callback, and then holding
+ * a one-off login ticket that the page rendered after the callback presents
+ * with the person's decision. Expires; swept on the next start. */
+export const oidcTransactions = sqliteTable(
+  "oidc_transactions",
+  {
+    id: text("id").primaryKey(),
+    stateHash: text("state_hash").notNull(),
+    provider: text("provider").notNull(), // the configured provider's name
+    purpose: text("purpose").notNull(), // the page: consent | connections | service-approve | secret-input
+    context: text("context").notNull(), // JSON: what the page was about (authorize params, request id)
+    nonce: text("nonce").notNull(), // encrypted
+    codeVerifier: text("code_verifier").notNull(), // PKCE, encrypted
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    // Set by the one callback that claims the row.
+    calledBackAt: text("called_back_at"),
+    // The person the callback identified, and the ticket the page carries.
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    ticketHash: text("ticket_hash"),
+    ticketExpiresAt: text("ticket_expires_at"),
+    // Set by the one decision that spends the ticket.
+    usedAt: text("used_at"),
+  },
+  (t) => [
+    uniqueIndex("oidc_transactions_state_idx").on(t.stateHash),
+    uniqueIndex("oidc_transactions_ticket_idx").on(t.ticketHash),
+    index("oidc_transactions_expires_idx").on(t.expiresAt),
+  ],
 );
 
 export const userDocs = sqliteTable(

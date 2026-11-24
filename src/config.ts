@@ -68,6 +68,37 @@ export interface BackupConfig {
   keep?: number;
 }
 
+/**
+ * One OpenID Connect provider a person can log in with on the pages Core
+ * serves itself (see core/oidc.ts). Core is a plain OIDC client of it: the
+ * operator registers Core there with the callback
+ * `<YAP_BASE_URL>/oidc/<name>/callback` and puts the client id and secret here.
+ */
+export interface OidcProviderConfig {
+  /** Lowercase name from YAP_OIDC_PROVIDERS; it names the env vars and the callback path. */
+  name: string;
+  /** The provider's issuer URL, exactly as its discovery document states it. */
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  /** Shown on the button: "Continue with {label}". */
+  label: string;
+  /** How long a grant made after this provider's login lives, counted from its creation. */
+  grantMaxDays: number;
+}
+
+export interface OidcConfig {
+  /** Empty: key login only, exactly as before providers existed. */
+  providers: OidcProviderConfig[];
+  /** Whether a first provider login with no Yap account may create one (allowlist permitting). */
+  signup: boolean;
+  /** Who sign-up admits: exact lowercase addresses and `@domain` entries. */
+  allow: string[];
+}
+
+/** The roles an OAuth grant can carry, lowest first. */
+export type OAuthRole = "read-only" | "member" | "admin";
+
 export interface YapConfig {
   port: number;
   host: string;
@@ -88,6 +119,18 @@ export interface YapConfig {
   oauthAccessTokenTtlSeconds: number;
   oauthRefreshTokenTtlSeconds: number;
   oauthCodeTtlSeconds: number;
+  /** The highest role the consent screen offers, whatever the login method; unset = admin. */
+  oauthMaxRole?: OAuthRole;
+  /** Login providers for the pages Core serves itself. */
+  oidc: OidcConfig;
+  /**
+   * Whether access keys log people in and authenticate API calls. On unless
+   * YAP_KEY_LOGIN=false. Off, the pages offer only the login providers, no
+   * user key can be made, and a user key is refused on /v1 and /mcp; OAuth
+   * tokens from a provider login and the sysadmin key keep working (see
+   * core/keyLogin.ts).
+   */
+  keyLogin: boolean;
   maxFileSizeBytes: number;
   /** "*" allows all MIME types. */
   mimeAllowlist: string[] | "*";
@@ -170,6 +213,76 @@ function listEnv(env: Env, name: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+const OIDC_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+/** A grant lifetime longer than ten years is a typo, not a policy. */
+const MAX_GRANT_DAYS = 3650;
+
+/** https, or http on a loopback host (a provider running beside a test or dev instance). */
+function isSecureOrLoopback(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+}
+
+/**
+ * YAP_OIDC_PROVIDERS=google,okta, then per name YAP_OIDC_<NAME>_ISSUER,
+ * _CLIENT_ID, _CLIENT_SECRET, optional _LABEL and _GRANT_MAX_DAYS. Every
+ * mistake fails startup: a login method that half works is worse than none.
+ */
+function loadOidc(env: Env, baseUrlSet: boolean): OidcConfig {
+  const names = listEnv(env, "YAP_OIDC_PROVIDERS").map((n) => n.toLowerCase());
+  const grantMaxDays = intEnv(env, "YAP_OIDC_GRANT_MAX_DAYS", 30, MAX_GRANT_DAYS);
+  if (names.length > 0 && !baseUrlSet) {
+    throw new ConfigError(
+      "YAP_OIDC_PROVIDERS needs YAP_BASE_URL: the provider callback URL is built from it, never from the request",
+    );
+  }
+  const providers: OidcProviderConfig[] = [];
+  for (const name of names) {
+    if (!OIDC_NAME.test(name)) {
+      throw new ConfigError(`YAP_OIDC_PROVIDERS: ${JSON.stringify(name)} is not a valid name (a-z, 0-9, _; starting with a letter)`);
+    }
+    if (providers.some((p) => p.name === name)) throw new ConfigError(`YAP_OIDC_PROVIDERS names ${name} twice`);
+    const prefix = `YAP_OIDC_${name.toUpperCase()}_`;
+    // Kept exactly as given: it must equal the issuer the provider states in
+    // its discovery document and its ID tokens (some end with a slash).
+    const issuer = env[`${prefix}ISSUER`] ?? "";
+    const clientId = env[`${prefix}CLIENT_ID`] ?? "";
+    const clientSecret = env[`${prefix}CLIENT_SECRET`] ?? "";
+    if (!issuer || !clientId || !clientSecret) {
+      throw new ConfigError(`provider ${name} needs ${prefix}ISSUER, ${prefix}CLIENT_ID and ${prefix}CLIENT_SECRET`);
+    }
+    if (!isSecureOrLoopback(issuer)) {
+      throw new ConfigError(`${prefix}ISSUER must be an https URL (http only on a loopback host), got ${JSON.stringify(issuer)}`);
+    }
+    providers.push({
+      name,
+      issuer,
+      clientId,
+      clientSecret,
+      label: env[`${prefix}LABEL`] || name.charAt(0).toUpperCase() + name.slice(1),
+      grantMaxDays: intEnv(env, `${prefix}GRANT_MAX_DAYS`, grantMaxDays, MAX_GRANT_DAYS),
+    });
+  }
+  const signupRaw = env.YAP_OIDC_SIGNUP || "false";
+  if (signupRaw !== "true" && signupRaw !== "false") {
+    throw new ConfigError(`YAP_OIDC_SIGNUP must be "true" or "false", got ${JSON.stringify(signupRaw)}`);
+  }
+  const allow = listEnv(env, "YAP_OIDC_ALLOW").map((entry) => entry.toLowerCase());
+  for (const entry of allow) {
+    const at = entry.indexOf("@");
+    if (at < 0 || entry.indexOf("@", at + 1) >= 0 || at === entry.length - 1) {
+      throw new ConfigError(`YAP_OIDC_ALLOW: ${JSON.stringify(entry)} is neither an address nor an @domain`);
+    }
+  }
+  return { providers, signup: signupRaw === "true", allow };
 }
 
 export function loadConfig(env: Env = process.env): YapConfig {
@@ -275,6 +388,18 @@ export function loadConfig(env: Env = process.env): YapConfig {
     throw new ConfigError(`YAP_SCHEDULER must be "on" or "off", got ${JSON.stringify(schedulerRaw)}`);
   }
 
+  const maxRoleRaw = env.YAP_OAUTH_MAX_ROLE || undefined;
+  if (maxRoleRaw !== undefined && maxRoleRaw !== "admin" && maxRoleRaw !== "member" && maxRoleRaw !== "read-only") {
+    throw new ConfigError(`YAP_OAUTH_MAX_ROLE must be "admin", "member" or "read-only", got ${JSON.stringify(maxRoleRaw)}`);
+  }
+  const oidc = loadOidc(env, Boolean(env.YAP_BASE_URL));
+  const keyLogin = env.YAP_KEY_LOGIN !== "false";
+  if (!keyLogin && oidc.providers.length === 0) {
+    throw new ConfigError(
+      "YAP_KEY_LOGIN=false needs a login provider (YAP_OIDC_PROVIDERS): without one nobody could log in",
+    );
+  }
+
   const mimeRaw = env.YAP_MIME_ALLOWLIST;
   const mimeAllowlist: YapConfig["mimeAllowlist"] =
     !mimeRaw || mimeRaw === "*" ? "*" : listEnv(env, "YAP_MIME_ALLOWLIST");
@@ -295,6 +420,9 @@ export function loadConfig(env: Env = process.env): YapConfig {
     oauthAccessTokenTtlSeconds: intEnv(env, "YAP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", 3600),
     oauthRefreshTokenTtlSeconds: intEnv(env, "YAP_OAUTH_REFRESH_TOKEN_TTL_SECONDS", 30 * 24 * 3600),
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
+    oauthMaxRole: maxRoleRaw,
+    oidc,
+    keyLogin,
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
     sideloadEnabled: env.YAP_SIDELOAD_ENABLED !== "false",

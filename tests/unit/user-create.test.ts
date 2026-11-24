@@ -18,10 +18,15 @@ let server: Server;
 let target: Target;
 let dir: string;
 let out: string[];
+let bodies: unknown[];
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "yap-user-create-"));
+  bodies = [];
   server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => bodies.push(raw ? JSON.parse(raw) : null));
     res.setHeader("content-type", "application/json");
     res.statusCode = 201;
     res.end(
@@ -65,6 +70,12 @@ describe("cmdUserCreate", () => {
     await cmdUserCreate(target, dir, ["bea"]);
     expect(readCredentials(dir)?.accessKey).toBe("yk_old");
     expect(out.join("\n")).toContain("still authenticates as ada");
+  });
+
+  it("--email sends the address, which invites the user", async () => {
+    await cmdUserCreate(target, dir, ["bea", "--email", "bea@example.com"]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(bodies).toEqual([{ name: "bea", email: "bea@example.com" }]);
   });
 
   it("--save writes the credential", async () => {

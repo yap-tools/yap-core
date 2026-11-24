@@ -22,6 +22,8 @@ const PG_URL = process.env.YAP_TEST_PG_URL;
 // Tables in FK-safe truncation order (children first; TRUNCATE ... CASCADE
 // makes order moot on pg, but keep the list explicit and complete).
 const ALL_TABLES = [
+  "oidc_transactions",
+  "user_identities",
   "item_values",
   "items",
   "properties",

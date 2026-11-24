@@ -24,7 +24,7 @@ Autoloaded bundle docs are where binding operating instructions belong; non-auto
 
 ## Connect
 
-**MCP** (preferred for agents): streamable HTTP at `http://<host>:8787/mcp`, access key as bearer token (`?key=` works as a fallback for URL-only clients):
+**MCP** (preferred for agents): streamable HTTP at `http://<host>:8787/mcp`, access key as bearer token (`?key=` works as a fallback for URL-only clients; where the operator switched key login off, keys are refused and clients connect through OAuth):
 
 ```sh
 claude mcp add --transport http yap http://localhost:8787/mcp \
@@ -69,7 +69,7 @@ yap create my-yap --user ada      # mkdir + init + start + user create --save
 
 Or stepwise, from inside the directory: `yap init` (writes `.env` with generated sysadmin + master keys — printed once; vendors the server into the directory at the latest release, `--version vX.Y.Z` to pin, `--port n` to change 8787) → `yap start` → `yap user create ada --save`.
 
-`yap user create` **prints the user's access key once** — that's the credential to give MCP/REST clients — and saves nothing by default. With `--save` it also writes the key to `.yap/credentials.json` (field `accessKey`, mode 0600), making the CLI an API client as that user; an existing credential is never overwritten. `yap create` passes `--save`. Mint additional keys later with `yap keys create`.
+`yap user create` **prints the user's access key once** — that's the credential to give MCP/REST clients — and saves nothing by default. With `--save` it also writes the key to `.yap/credentials.json` (field `accessKey`, mode 0600), making the CLI an API client as that user; an existing credential is never overwritten. `yap create` passes `--save`. Mint additional keys later with `yap keys create`. `--email <address>` records an email on the user, which invites them: when the operator configured a login provider (`YAP_OIDC_*`, see the repo's `docs/oidc-login.md`), the first provider login with that verified address claims the account.
 
 All commands resolve the instance from the current directory — run them inside it. To target a **remote** instance instead, pass `--url <url> --key <accessKey>` (or set `YAP_URL`/`YAP_KEY`): manage commands only — sysadmin-lane (`users …`, `user create`, `api --sysadmin`) and lifecycle commands (`start`, `logs`, `upgrade`, …) refuse remotely and must run on the instance host. Local `.env`/`.yap/` are never read in remote mode; the key must be explicit.
 

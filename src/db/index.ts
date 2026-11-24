@@ -117,6 +117,30 @@ function quoteIdent(name: string): string {
   return `"${name}"`;
 }
 
+/**
+ * Runs SQLite migrations with foreign-key enforcement off, then checks every
+ * foreign key before turning it back on. SQLite cannot change a column's
+ * constraints in place, so a migration that does rebuilds the table (create a
+ * copy, move the rows, drop the old one, rename). The migrator runs inside a
+ * transaction, where the `PRAGMA foreign_keys=OFF` drizzle-kit writes into
+ * such a migration is a no-op; with enforcement on, the DROP would cascade-
+ * delete every row that references the old table (oauth_grants → oauth_tokens
+ * in 0017). The pragma takes effect only outside a transaction, so it is set
+ * here, around the migrator.
+ */
+function withForeignKeysOff(sqlite: BetterSqlite3.Database, run: () => void): void {
+  sqlite.pragma("foreign_keys = OFF");
+  try {
+    run();
+    const violations = sqlite.pragma("foreign_key_check") as unknown[];
+    if (violations.length > 0) {
+      throw new Error(`migration left ${violations.length} foreign-key violation(s): ${JSON.stringify(violations.slice(0, 5))}`);
+    }
+  } finally {
+    sqlite.pragma("foreign_keys = ON");
+  }
+}
+
 export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db> {
   if (config.dialect === "sqlite") {
     if (config.path !== ":memory:") {
@@ -150,12 +174,12 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
           })
           .immediate(),
       migrate: async () => {
-        migrateSqlite(client, { migrationsFolder: resolve(repoRoot, "drizzle/sqlite") });
+        withForeignKeysOff(sqlite, () => migrateSqlite(client, { migrationsFolder: resolve(repoRoot, "drizzle/sqlite") }));
       },
       migrateTo: async (index) => {
         const folder = truncatedMigrationsFolder("sqlite", index);
         try {
-          migrateSqlite(client, { migrationsFolder: folder });
+          withForeignKeysOff(sqlite, () => migrateSqlite(client, { migrationsFolder: folder }));
         } finally {
           rmSync(folder, { recursive: true, force: true });
         }

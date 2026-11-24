@@ -11,10 +11,16 @@
  * per request, MCP per session). `scopeOf` gives the context to run under, for a
  * token and for a scoped key alike; an unscoped key has none and runs as
  * before.
+ *
+ * Where key login is switched off (keyLogin.ts), a user key resolves to
+ * `key-refused` with the reason, never to `invalid-key`, so each transport can
+ * tell the caller to connect through a provider instead.
  */
 import { OAUTH_ACCESS_TOKEN_PREFIX, constantTimeEqual } from "../crypto.js";
+import type { YapConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { KeyAuth, ScopedAuth, TokenAuth } from "./authScope.js";
+import { apiKeyRefusedMessage, type KeyRefusal } from "./keyLogin.js";
 import { authenticateKey } from "./keys.js";
 import { authenticateToken } from "./oauth.js";
 
@@ -29,7 +35,13 @@ export type CredentialOutcome =
     }
   | { kind: "token"; userId: string; tokenAuth: TokenAuth }
   | { kind: "invalid-token" }
-  | { kind: "invalid-key" };
+  | { kind: "invalid-key" }
+  | {
+      kind: "key-refused";
+      reason: KeyRefusal;
+      /** The words for an API caller, from the instance's providers. */
+      message: string;
+    };
 
 /** Extracts the bearer secret from an Authorization header value. */
 export function bearerToken(header: string | null | undefined): string | null {
@@ -40,17 +52,20 @@ export function bearerToken(header: string | null | undefined): string | null {
 
 export async function resolveCredential(
   db: Db,
-  config: { sysadminKey: string },
+  config: Pick<YapConfig, "sysadminKey" | "keyLogin" | "oidc">,
   presented: string | null | undefined,
 ): Promise<CredentialOutcome> {
   if (!presented) return { kind: "missing" };
   if (constantTimeEqual(presented, config.sysadminKey)) return { kind: "sysadmin" };
   if (presented.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
-    const tokenAuth = await authenticateToken(db, presented);
+    const tokenAuth = await authenticateToken(db, config, presented);
     return tokenAuth ? { kind: "token", userId: tokenAuth.userId, tokenAuth } : { kind: "invalid-token" };
   }
-  const key = await authenticateKey(db, presented);
-  if (!key) return { kind: "invalid-key" };
+  const key = await authenticateKey(db, config, presented);
+  if (!key.ok) {
+    if (key.reason === "invalid") return { kind: "invalid-key" };
+    return { kind: "key-refused", reason: key.reason, message: apiKeyRefusedMessage(config, key.reason) };
+  }
   const { userId, keyId, scope } = key;
   return scope ? { kind: "user", userId, keyAuth: { source: "key", userId, keyId, scope } } : { kind: "user", userId };
 }

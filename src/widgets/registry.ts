@@ -31,6 +31,8 @@ export interface WidgetDef {
   name: string;
   uri: string;
   description: string;
+  /** The description an instance with key login switched off advertises, where `description` mentions access keys. */
+  descriptionWithoutKeys?: string;
   /** Body renderer + styles; the bridge is shared. */
   style: string;
   render: string;
@@ -155,6 +157,37 @@ export const SERVER_CALL_JS = `
   function loadView(d, path, done, failed) {
     if (document.documentElement.getAttribute("data-yap-mode") === "origin" && window.__YAP_DATA__ === d) { done(d); return; }
     serverCall(path, { token: d.token }, done, function (message) { failed(message || "This page could not be loaded. Ask for a new one."); });
+  }
+  // Who decides, as this page knows it. After a provider login the server
+  // renders the page itself with d.login, its own data and never a host's, and
+  // the decision carries that login's one-off ticket. Otherwise the page
+  // offers the instance's login providers first, as links that start a login
+  // for this very page (in a host's frame they open a tab of their own, where
+  // the login and the decision happen), and an access key second, unless the
+  // instance switched key login off: then the page has no key field at all and
+  // the decision waits for the provider login.
+  function keyLoginOn(logins) { return !(logins && logins.keyLogin === false); }
+  function providerLogin(d) {
+    var origin = document.documentElement.getAttribute("data-yap-mode") === "origin" && window.__YAP_DATA__ === d;
+    return origin && d.login && d.login.ticket ? d.login : null;
+  }
+  function loggedInHtml(login) {
+    return '<p>Logged in as <strong>' + esc(login.user && login.user.name) + '</strong> with ' + esc(login.provider && login.provider.label) + '.</p>';
+  }
+  function providerLinksHtml(d, logins, purpose) {
+    var providers = logins && Array.isArray(logins.providers) ? logins.providers : [];
+    if (!providers.length || !window.__YAP_BASE__) return "";
+    var inFrame = document.documentElement.getAttribute("data-yap-mode") !== "origin";
+    var out = '<div class="logins">';
+    for (var i = 0; i < providers.length; i++) {
+      var p = providers[i] || {};
+      var href = window.__YAP_BASE__ + "/oidc/" + encodeURIComponent(String(p.id)) + "/start?for=" + purpose +
+        "&request=" + encodeURIComponent(d.request_id) + "&token=" + encodeURIComponent(d.token);
+      out += '<a href="' + esc(href) + '"' + (inFrame ? ' target="_blank" rel="noopener"' : '') + '>Continue with ' + esc(p.label) + '</a>';
+    }
+    out += '</div>';
+    if (inFrame) out += '<p class="muted">The login opens in a tab of its own; you decide there.</p>';
+    return keyLoginOn(logins) ? out + '<p class="muted">Or use an access key:</p>' : out;
   }
   function destinationsHtml(dests) {
     var out = "";
@@ -305,6 +338,9 @@ const BASE_STYLE = `
   .err { color: var(--yap-danger); }
   button { font: inherit; color: inherit; padding: 6px 14px; border-radius: var(--border-radius-small, 8px);
            border: 1px solid var(--yap-border); background: var(--yap-surface); cursor: pointer; }
+  .logins { display: flex; flex-direction: column; gap: 8px; margin: 0 0 10px; }
+  .logins a { display: block; text-align: center; padding: 7px 14px; border-radius: var(--border-radius-small, 8px);
+              border: 1px solid var(--yap-border); background: var(--yap-surface); color: inherit; text-decoration: none; font-weight: 600; }
 `;
 
 export const WIDGETS: Record<string, WidgetDef> = {
@@ -770,7 +806,9 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "secret-input",
     uri: `${UI_SCHEME_PREFIX}secret-input`,
     description:
-      "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's access key, which saving needs. In a host's frame it fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
+      "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's login, which saving needs: one of the instance's login providers (in a host's frame it opens a tab of its own) or their access key. In a host's frame it fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
+    descriptionWithoutKeys:
+      "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's login through one of the instance's login providers, which saving needs (in a host's frame it opens a tab of its own, where the person fills in and saves the form). It fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
     originHostable: true,
     style: `
       form { display: block; }
@@ -817,15 +855,28 @@ export const WIDGETS: Record<string, WidgetDef> = {
             (f.description ? '<span class="muted">' + esc(f.description) + '</span>' : '') +
             '<input type="password" id="secret-' + i + '" autocomplete="new-password" spellcheck="false" autocapitalize="off"></label>';
         }
-        html += '<label class="field" for="secret-key"><span class="label">Your access key</span>' +
-          '<span class="muted">Saving needs your login. The key goes only to this Yap and is not stored.</span>' +
-          '<input type="password" id="secret-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>';
-        html += '<p><button type="submit" id="secret-save">Save</button></p><p class="err" id="secret-msg" role="alert"></p></form>';
+        var login = providerLogin(d);
+        var keys = keyLoginOn(form.logins);
+        if (login) {
+          html += loggedInHtml(login);
+        } else {
+          if (!keys) html += '<p class="muted">Saving needs your login.</p>';
+          html += providerLinksHtml(d, form.logins, "secret-input");
+          if (keys) {
+            html += '<label class="field" for="secret-key"><span class="label">Your access key</span>' +
+              '<span class="muted">Saving needs your login. The key goes only to this Yap and is not stored.</span>' +
+              '<input type="password" id="secret-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>';
+          }
+        }
+        // Without a key field, saving waits for the provider login (the page after it has the button).
+        html += (login || keys ? '<p><button type="submit" id="secret-save">Save</button></p>' : '') +
+          '<p class="err" id="secret-msg" role="alert"></p></form>';
         root.innerHTML = html;
         var formEl = document.getElementById("secret-form");
         var save = document.getElementById("secret-save");
         var msg = document.getElementById("secret-msg");
         function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
+        function say2(text) { var m = document.getElementById("secret-msg"); if (m) m.textContent = text; requestAnimationFrame(announceHeight); }
         formEl.addEventListener("submit", function (e) {
           e.preventDefault();
           var values = {};
@@ -835,17 +886,27 @@ export const WIDGETS: Record<string, WidgetDef> = {
             if (v) { values[fields[i].path] = v; count++; }
           }
           if (count === 0) { say("Fill in at least one field."); return; }
-          var key = document.getElementById("secret-key");
-          if (!key.value) { say("Enter your access key to save."); return; }
+          var body = { token: d.token, values: values };
+          if (login) {
+            body.login_ticket = login.ticket;
+          } else {
+            var key = document.getElementById("secret-key");
+            if (!key) { say("Log in to save."); return; }
+            if (!key.value) { say("Enter your access key to save."); return; }
+            body.access_key = key.value;
+          }
           save.disabled = true;
           say("");
-          serverCall(base + "/submit", { token: d.token, values: values, access_key: key.value }, function (_body) {
+          serverCall(base + "/submit", body, function (_body) {
             window.__yapSecretSaved = true;
             root.innerHTML = '<div class="card done">Saved</div>';
             requestAnimationFrame(announceHeight);
           }, function (message) {
+            var text = message || "Saving failed. Ask for a new secret form and try again.";
+            // A provider login is good for one attempt: offer the logins again.
+            if (login) { d.login = null; show(root, d, base, form); say2(text); return; }
             save.disabled = false;
-            say(message || "Saving failed. Ask for a new secret form and try again.");
+            say(text);
           });
         });
         requestAnimationFrame(announceHeight);
@@ -857,7 +918,9 @@ export const WIDGETS: Record<string, WidgetDef> = {
     name: "service-approve",
     uri: `${UI_SCHEME_PREFIX}service-approve`,
     description:
-      "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs a login with a user access key, sent only to the instance the widget was served by; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
+      "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs the person's login: one of the instance's login providers, which opens in a tab of its own when the widget is in a host's frame, or a user access key, sent only to the instance the widget was served by; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
+    descriptionWithoutKeys:
+      "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs the person's login through one of the instance's login providers, which opens in a tab of its own when the widget is in a host's frame, where the person decides; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
     originHostable: true,
     style: `
       .dest { border: 2px solid var(--yap-border); border-radius: var(--border-radius-small, 8px); padding: 10px 12px; margin: 0 0 14px; }
@@ -885,11 +948,11 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var base = "/v1/service-approvals/" + encodeURIComponent(d.request_id);
         // What is shown is what the server has, never what the data says the
         // service is: in a host's frame the data came through the model.
-        loadView(d, base + "/view", function (got) { show(root, d, base, got.view, got.fingerprint); },
+        loadView(d, base + "/view", function (got) { show(root, d, base, got.view, got.fingerprint, got.logins); },
           function (message) { root.innerHTML = '<div class="card err">' + esc(message) + '</div>'; requestAnimationFrame(announceHeight); });
       });
       function list(items) { return items.length ? '<ul>' + items.join("") + '</ul>' : '<p class="muted">None.</p>'; }
-      function show(root, d, base, v, fingerprint) {
+      function show(root, d, base, v, fingerprint, logins) {
         if (!v || !v.service) { root.innerHTML = '<div class="card err">This approval page could not be read. Ask for a new one.</div>'; return; }
         var dests = Array.isArray(v.destinations) ? v.destinations : [];
         var html = '<div class="card">' +
@@ -918,11 +981,17 @@ export const WIDGETS: Record<string, WidgetDef> = {
           requestAnimationFrame(announceHeight);
           return;
         }
+        var login = providerLogin(d);
+        var keys = keyLoginOn(logins);
         html += '<form id="approve-form" autocomplete="off" novalidate>' +
-          '<label class="field" for="approve-key"><strong>Your access key</strong>' +
-          '<span class="muted"> Approving needs your login. The key goes only to this Yap and is not stored.</span>' +
-          '<input type="password" id="approve-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>' +
-          '<div class="row"><button type="button" id="approve-reject">Reject</button><button type="submit" id="approve-ok">Approve</button></div>' +
+          (login ? loggedInHtml(login) : (keys ? '' : '<p class="muted">Approving needs your login.</p>') +
+            providerLinksHtml(d, logins, "service-approve") +
+            (keys ? '<label class="field" for="approve-key"><strong>Your access key</strong>' +
+              '<span class="muted"> Approving needs your login. The key goes only to this Yap and is not stored.</span>' +
+              '<input type="password" id="approve-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>' : '')) +
+          // Without a key field, approving waits for the provider login (the page after it has the button).
+          '<div class="row"><button type="button" id="approve-reject">Reject</button>' +
+          (login || keys ? '<button type="submit" id="approve-ok">Approve</button>' : '') + '</div>' +
           '<p class="err" id="approve-msg" role="alert"></p></form></div>';
         root.innerHTML = html;
         var form = document.getElementById("approve-form");
@@ -931,7 +1000,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var key = document.getElementById("approve-key");
         var msg = document.getElementById("approve-msg");
         function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
-        function busy(on) { ok.disabled = on; reject.disabled = on; }
+        function busy(on) { if (ok) ok.disabled = on; reject.disabled = on; }
         function finish(text) {
           window.__yapApprovalDone = true;
           root.innerHTML = '<div class="card done">' + esc(text) + '</div>';
@@ -939,11 +1008,27 @@ export const WIDGETS: Record<string, WidgetDef> = {
         }
         form.addEventListener("submit", function (e) {
           e.preventDefault();
-          if (!key.value) { say("Enter your access key to approve."); return; }
+          var body = { token: d.token, decision: "approve", fingerprint: fingerprint };
+          if (login) {
+            body.login_ticket = login.ticket;
+          } else {
+            if (!key) { say("Log in to approve."); return; }
+            if (!key.value) { say("Enter your access key to approve."); return; }
+            body.access_key = key.value;
+          }
           busy(true); say("");
-          serverCall(base + "/decide", { token: d.token, decision: "approve", access_key: key.value, fingerprint: fingerprint },
-            function () { key.value = ""; finish("Approved. " + v.service.name + " can run now."); },
-            function (message) { busy(false); say(message || "Approving failed. Try again."); });
+          serverCall(base + "/decide", body,
+            function () { if (key) key.value = ""; finish("Approved. " + v.service.name + " can run now."); },
+            function (message) {
+              var text = message || "Approving failed. Try again.";
+              // A provider login is good for one attempt: offer the logins again.
+              if (login) {
+                d.login = null; show(root, d, base, v, fingerprint, logins);
+                var m = document.getElementById("approve-msg"); if (m) m.textContent = text;
+                return;
+              }
+              busy(false); say(text);
+            });
         });
         reject.addEventListener("click", function () {
           busy(true); say("");

@@ -80,12 +80,13 @@ In a host's frame the widget's data came through the model, so the widget shows 
 
 `paths` names concrete secret paths. A map path is named with its key: `headers.authorization`, not `headers.*`. Left out, it defaults to the secrets the service still lacks, worked out the way authoring checks a config (above): of the ways to fill in what is missing, the first the driver accepts. A mail service on a password gets `pass`; one with an `oauth2` block gets `oauth2.client_secret` and `oauth2.refresh_token`, and not `pass`. A service that lacks nothing gets every secret it holds, to replace them. A map path is never a default, so an http form always names its header.
 
-The form shows the service name, then where the secrets will be sent, then one password field per path, with the driver's label and description, saying when a path is already set, and last a field for the person's access key. "Where they will be sent" is every setting the requested secrets are bound to (`boundTo`), with the service's pins filled in: an http header shows the URL it goes to, a mail password the IMAP and SMTP servers. The same list is in the widget data and the view as `destinations` (see [service-approval.md](service-approval.md#destinations)). It POSTs straight to the server:
+The form shows the service name, then where the secrets will be sent, then one password field per path, with the driver's label and description, saying when a path is already set, and last the person's login: a "Continue with {provider}" link per configured login provider ([oidc-login.md](oidc-login.md); in a host's frame it opens a tab of its own), then a field for an access key. After a provider login the form is rendered again with "Logged in as {name}" in place of the key field. "Where they will be sent" is every setting the requested secrets are bound to (`boundTo`), with the service's pins filled in: an http header shows the URL it goes to, a mail password the IMAP and SMTP servers. The same list is in the widget data and the view as `destinations` (see [service-approval.md](service-approval.md#destinations)). It POSTs straight to the server:
 
 ```
 POST /v1/secret-requests/:id/submit
 { "token": "<the form's own signed token>", "access_key": "<the person's access key>",
   "values": { "headers.authorization": "Bearer …" } }
+   (or "login_ticket": "<the ticket of a provider login made for this form>" instead of "access_key")
 → 200 { "saved": true, "paths": ["headers.authorization"] }
 ```
 
@@ -93,7 +94,7 @@ On success it shows "Saved" and nothing else. The token travels in the body, not
 
 ### Rules
 
-- **A login.** Saving needs the person's full user access key in the body, checked by the same `pageLogin` as the service approve page ([service-approval.md](service-approval.md#who-may-approve)): the sysadmin key, an OAuth token and a scoped access key are refused (401), and the person must hold `edit_services` on the bundle (403), plus `edit_items` / `edit_files` for a driver that writes into it. The agent sees the form's token in `_meta`, so without the login it could enter a secret of its own (a bearer token for its own account at an approved API) into a service a person approved, and entering a secret does not take the approval away. With it, every stored secret is one a person entered. The row records who (`submitted_by`). A refused login leaves the form open.
+- **A login.** Saving needs the person's login in the body, a full user access key or a provider login's ticket, checked by the same `identifyPerson` as the service approve page ([service-approval.md](service-approval.md#who-may-approve)): the sysadmin key, an OAuth token and a scoped access key are refused (401), and so is every key where key login is switched off ([key-login.md](key-login.md)), and the person must hold `edit_services` on the bundle (403), plus `edit_items` / `edit_files` for a driver that writes into it. The agent sees the form's token in `_meta`, so without the login it could enter a secret of its own (a bearer token for its own account at an approved API) into a service a person approved, and entering a secret does not take the approval away. With it, every stored secret is one a person entered. The row records who (`submitted_by`). A refused login leaves the form open.
 - **One submission.** A form takes one successful submission. A second gets 409. Two submissions racing on one form store one set of values: the claim is a conditional update in the same transaction as the secret write.
 - **Expiry.** A form expires after `YAP_SECRET_REQUEST_TTL_SECONDS` (default 600, the same as an upload link). An expired form gets 401, on submission and on its page. Expired rows are swept whenever a new form is asked for.
 - **A refused submission leaves the form open.** Each submission runs the driver's checks on the config the service will now run with (the online one once nothing is missing). If they refuse it (400, with the driver's message), or the service changed while the form was open (409), nothing is stored and the same form can be submitted again.
@@ -119,9 +120,9 @@ An agent sets up an http service that posts to an API with a bearer token:
 
 1. `create_service` `{name: "notify", driver: "http", params: [{name: "text", required: true}], settings: {url: "https://api.example.com/notify", method: "POST", headers: {}, body_json: {text: "{{text}}"}}}`. The SSRF check runs on the URL. `secretsSet` is `[]`.
 2. `secret_request` `{id: "notify", paths: ["headers.authorization"]}`. The agent shows the widget or gives the user the link.
-3. The user types `Bearer <token>` into the field, enters their access key, and saves.
+3. The user types `Bearer <token>` into the field, logs in (their access key, or a configured provider), and saves.
 4. `get_service` `{id: "notify"}` shows `secretsSet: ["headers.authorization"]`.
 5. `run_service` `{id: "notify", params: {text: "hello"}}` is refused: the service waits for approval.
 6. `approval_request` `{id: "notify"}`. The agent shows the widget or gives the user the link.
-7. The user reads where the service sends data, enters their access key and approves.
+7. The user reads where the service sends data, logs in and approves.
 8. `run_service` `{id: "notify", params: {text: "hello"}}` sends the header.

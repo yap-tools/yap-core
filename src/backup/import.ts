@@ -12,6 +12,7 @@ import { MANIFEST_PATH, readArchive, readManifest, type BackupManifest } from ".
 /** Parents before children, verified against src/db/schema-sqlite.ts FKs. */
 const INSERT_ORDER = [
   "users",
+  "user_identities",
   "access_keys",
   "spaces",
   "grants",
@@ -32,6 +33,7 @@ const INSERT_ORDER = [
   "oauth_codes",
   "oauth_grants",
   "oauth_tokens",
+  "oidc_transactions",
 ];
 
 const BYTES_TAG = "$bytes";

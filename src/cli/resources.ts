@@ -29,7 +29,8 @@ function printJson(body: unknown): void {
 interface CreateUserResponse {
   user: { id: string; name: string };
   personalSpaceId: string;
-  initialKey: { key: string };
+  /** Absent where no key may be made: key login is off for the instance. */
+  initialKey?: { key: string };
 }
 
 /** Who the CLI acts as, given the credential saved in .yap/ (if any). */
@@ -41,14 +42,20 @@ function cliIdentity(creds: Credentials | undefined): string {
 export async function cmdUserCreate(target: Target, dir: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { save: { type: "boolean" } },
+    options: { save: { type: "boolean" }, email: { type: "string" } },
     allowPositionals: true,
   });
   const name = positionals[0];
-  if (!name) throw new CliError("usage: yap user create <name> [--save]");
+  if (!name) throw new CliError("usage: yap user create <name> [--email <address>] [--save]");
 
-  const body = (await call(target, "POST", "/v1/users", target.sysKey(), { name })) as CreateUserResponse;
+  // --email invites: the first provider login with that verified address claims the account.
+  const request = values.email === undefined ? { name } : { name, email: values.email };
+  const body = (await call(target, "POST", "/v1/users", target.sysKey(), request)) as CreateUserResponse;
   console.log(`created user ${body.user.name} (${body.user.id}), personal space ${body.personalSpaceId}`);
+  if (!body.initialKey) {
+    console.log("No access key: this instance accepts only provider login. The user logs in through a login provider.");
+    return;
+  }
   console.log("");
   console.log("Access key (shown once — store it wherever this user connects from):");
   console.log(`  ${body.initialKey.key}`);

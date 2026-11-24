@@ -197,18 +197,27 @@ export function registerRestRoutes(server: YapServer): void {
     name: z.string(),
     externalId: z.string().nullish(),
     deniedCapabilities: z.unknown().optional(),
+    email: z.string().nullish(),
+    providerLoginOnly: z.boolean().optional(),
   });
 
-  const userPatchSchema = z.strictObject({ deniedCapabilities: z.unknown().optional() });
+  const userPatchSchema = z.strictObject({
+    deniedCapabilities: z.unknown().optional(),
+    email: z.unknown().optional(),
+    providerLoginOnly: z.unknown().optional(),
+  });
 
   app.post(
     "/v1/users",
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createUserSchema, await jsonBody(c));
-      const result = await usersCore.createUser(db, body);
+      // With an initial key wherever one may be made: not where key login is
+      // off for the instance, and not for a user created provider-login-only.
+      const initialKey = config.keyLogin && body.providerLoginOnly !== true;
+      const { created, ...result } = await usersCore.createUser(db, config, body, { initialKey });
       // 200 without a key: the externalId already named a user, nothing was created.
-      return c.json(result, "initialKey" in result ? 201 : 200);
+      return c.json(result, created ? 201 : 200);
     }),
   );
 
@@ -256,7 +265,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createKeySchema, await optionalJsonBody(c));
-      return c.json(await keysCore.issueKeyForUser(db, param(c, "id"), body.name ?? "", body.scope), 201);
+      return c.json(await keysCore.issueKeyForUser(db, config, param(c, "id"), body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -277,6 +286,28 @@ export function registerRestRoutes(server: YapServer): void {
     }),
   );
 
+  // ---- A user's connected apps (sysadmin key) ----------------------------------
+  //
+  // Every OAuth grant of a user, key-backed or made after a provider login, and
+  // revoking one. Works whatever the user's own account capabilities.
+
+  app.get(
+    "/v1/users/:id/oauth-grants",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      return c.json({ data: await oauthCore.listGrantsForUser(db, param(c, "id")) });
+    }),
+  );
+
+  app.delete(
+    "/v1/users/:id/oauth-grants/:grantId",
+    handle(async (c, auth) => {
+      requireSysadmin(auth);
+      await oauthCore.revokeGrantForUser(db, param(c, "id"), param(c, "grantId"));
+      return c.json({ deleted: true });
+    }),
+  );
+
   // ---- Keys (self) ----------------------------------------------------------
 
   app.get(
@@ -292,7 +323,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(createKeySchema, await jsonBody(c));
-      return c.json(await keysCore.createKey(db, userId, body.name ?? "", body.scope), 201);
+      return c.json(await keysCore.createKey(db, config, userId, body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -308,7 +339,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/keys/:id/rotate",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      return c.json(await keysCore.rotateKey(db, userId, param(c, "id")));
+      return c.json(await keysCore.rotateKey(db, config, userId, param(c, "id")));
     }),
   );
 
@@ -1261,14 +1292,24 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c) => {
       const requestId = param(c, "id");
       const body = parseBody(
-        z.object({ token: z.string(), values: z.record(z.string(), z.unknown()), access_key: z.string().optional() }),
+        z.object({
+          token: z.string(),
+          values: z.record(z.string(), z.unknown()),
+          access_key: z.string().optional(),
+          login_ticket: z.string().optional(),
+        }),
         await jsonBody(c),
       );
       const payload = verifyToken(body.token, config.masterKey);
       if (!payload || payload.scope !== "secret-submit" || payload.requestId !== requestId) {
         throw unauthorized("this form has expired or its link is not valid: ask for a new one");
       }
-      return c.json(await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values, body.access_key));
+      return c.json(
+        await secretRequestsCore.submitSecrets(serviceEnv, requestId, body.values, {
+          accessKey: body.access_key,
+          loginTicket: body.login_ticket,
+        }),
+      );
     }),
   );
 
@@ -1321,6 +1362,7 @@ export function registerRestRoutes(server: YapServer): void {
           token: z.string(),
           decision: z.enum(["approve", "reject"]),
           access_key: z.string().optional(),
+          login_ticket: z.string().optional(),
           fingerprint: z.string().optional(),
         }),
         await jsonBody(c),
@@ -1330,6 +1372,7 @@ export function registerRestRoutes(server: YapServer): void {
         await serviceApprovalsCore.decideApproval(serviceEnv, requestId, {
           decision: body.decision,
           accessKey: body.access_key,
+          loginTicket: body.login_ticket,
           fingerprint: body.fingerprint,
         }),
       );

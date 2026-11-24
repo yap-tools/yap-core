@@ -64,14 +64,14 @@ The page shows the service as the server has it, never as the agent describes it
 5. The settings, as JSON.
 6. Which secret paths are set: names only.
 
-Then an access-key field and two buttons, Approve and Reject.
+Then the login and two buttons, Approve and Reject. The login is an access-key field, preceded by a "Continue with {provider}" link per login provider when the operator configured any ([oidc-login.md](oidc-login.md)). In a host's frame those links open a tab of their own, and the login and the decision happen there. After a provider login the page is rendered again with "Logged in as {name}" in place of the key field.
 
 On its origin page the view is built at serve time. In a host's frame the widget's data came through the model, which could put anything in it, so the widget ignores everything but `request_id` and `token` and fetches the view itself:
 
 ```
-POST /v1/service-approvals/:id/view     { "token": "…" }  →  { "view": {…}, "fingerprint": "…" }
+POST /v1/service-approvals/:id/view     { "token": "…" }  →  { "view": {…}, "fingerprint": "…", "logins": { "providers": [{ "id", "label" }], "keyLogin": true } }
 POST /v1/service-approvals/:id/decide   { "token": "…", "decision": "approve" | "reject",
-                                          "access_key": "…", "fingerprint": "…" }
+                                          "access_key": "…" | "login_ticket": "…", "fingerprint": "…" }
                                         →  { "decision": "approved" | "rejected", "service": { "id", "name" } }
 ```
 
@@ -79,15 +79,15 @@ Both are public routes gated by the page's own signed token, sent in the body so
 
 ### Who may approve
 
-- **A login, not the link.** Approve needs a user access key in the body, checked by `pageLogin` (`src/core/keys.ts`), the same login the OAuth consent screen and the connected-apps page use. The sysadmin key is refused (an operator credential, not a person). An OAuth access token is refused, so an agent connected over OAuth, which holds a token and never the key, cannot approve its own service. A scoped access key is refused at any role, admin included ("This key is limited. Log in with a full key."), so an agent given a scoped key cannot approve its own service either.
+- **A login, not the link.** Approve needs the person's login in the body: a user access key, or the `login_ticket` of a provider login made for this page. Both are checked by `identifyPerson` (`src/core/personLogin.ts`), the same step the OAuth consent screen, the connected-apps page and the secret form use. A ticket is good once, for this request only, and a body with both a key and a ticket is refused. For the access key, `pageLogin` (`src/core/keys.ts`) applies these rules: The sysadmin key is refused (an operator credential, not a person). An OAuth access token is refused, so an agent connected over OAuth, which holds a token and never the key, cannot approve its own service. A scoped access key is refused at any role, admin included ("This key is limited. Log in with a full key."), so an agent given a scoped key cannot approve its own service either. Where key login is switched off, for the instance or for the person ([key-login.md](key-login.md)), every key is refused and only the provider login remains; with it off for the instance the page shows no key field at all, and Approve appears on the page rendered after the provider login.
 - **The right person.** The key's user must hold `edit_services` on the bundle, plus `edit_items` / `edit_files` for a driver that writes into it, as an author must: approving is vouching for the service.
-- **Refusals leave the page open.** A missing or wrong key (401), a user without the capability (403) or a stale page (409) change nothing, and the same page can be used again.
+- **Refusals leave the page open.** A missing or wrong key (401), a user without the capability (403) or a stale page (409) change nothing, and the same page can be used again. The service is checked against the fingerprint before the login, so a stale page does not spend a provider login. Any later refusal does spend it, and the person logs in again.
 
-Core has no delegated login of its own; where a client logs a person in some other way, it can open the same page. If Core gains another login method for the consent screen, it goes into `pageLogin` and the approve page gets it too.
+A provider login is the stronger proof that a person approved: an agent holding the person's access key could paste it, but it cannot easily get through their provider's login. Configuring a provider is how an operator closes most of the known limit below. Login methods live in one place (`identifyPerson`), so a new one reaches this page, the consent screen and the secret form together.
 
 ### Known limit
 
-An agent that holds a full (unscoped) access key itself (a key pasted into its MCP configuration, a script that runs with one) can open the page and approve with that key, and enter secrets on a form with it. That is discouraged, not prevented. The way to prevent it is to give the agent a scoped key instead (`POST /v1/keys` with `{"scope": {"role": ...}}`): even a scoped `admin` key, which masks no capability, is refused here and on the secret form. Passkeys and a separate approval key were considered and not taken. The MCP help says this plainly.
+An agent that holds a full (unscoped) access key itself (a key pasted into its MCP configuration, a script that runs with one) can open the page and approve with that key, and enter secrets on a form with it. That is discouraged, not prevented. The way to prevent it is to give the agent a scoped key instead (`POST /v1/keys` with `{"scope": {"role": ...}}`): even a scoped `admin` key, which masks no capability, is refused here and on the secret form. Passkeys and a separate approval key were considered and not taken. The MCP help says this plainly. Switching key login off ([key-login.md](key-login.md)) closes this gap altogether: no key is accepted on the page.
 
 ### Approving what was shown
 
@@ -119,7 +119,7 @@ An http pin can change the path or query on the approved host, never the host it
 
 ## The secret form needs the same login
 
-The agent that asked for a secret form sees its token. If the token alone could save a secret, the agent could enter one itself, say a bearer token for its own account at the same API, into a service a person approved, and runs would send data into that account; since entering a secret keeps the approval, nothing would stop it. So saving a secret form needs the same login as approving: a user access key (`pageLogin`), whose user holds `edit_services` on the bundle. Every stored secret is then one a person entered, and keeping the approval across it is safe. Details in [mcp-service-authoring.md](mcp-service-authoring.md#rules).
+The agent that asked for a secret form sees its token. If the token alone could save a secret, the agent could enter one itself, say a bearer token for its own account at the same API, into a service a person approved, and runs would send data into that account; since entering a secret keeps the approval, nothing would stop it. So saving a secret form needs the same login as approving: a user access key (`pageLogin`) or the ticket of a provider login made for this form (`identifyPerson`), whose user holds `edit_services` on the bundle. Every stored secret is then one a person entered, and keeping the approval across it is safe. Details in [mcp-service-authoring.md](mcp-service-authoring.md#rules).
 
 ## The secret form shows where its secrets go
 

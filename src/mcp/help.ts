@@ -1,6 +1,14 @@
-/** Static reference documentation returned by the `help` tool. */
+/**
+ * Reference documentation returned by the `help` tool. Mostly static; the
+ * passages about how a person logs in follow the instance's configuration, so
+ * where key login is switched off (core/keyLogin.ts) agents are never told
+ * about access keys.
+ */
+import type { YapConfig } from "../config.js";
 
-export const HELP_TEXT = `# Yap reference
+export function helpText(config: Pick<YapConfig, "keyLogin">): string {
+  const keys = config.keyLogin;
+  return `# Yap reference
 
 Yap stores navigable context. The tree: context (root) → spaces → bundles.
 A bundle holds docs, item-types (schemas with items), static files, and services.
@@ -53,8 +61,10 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   to paste a secret into the chat either. Instead call secret_request for the
   paths you need: it returns a one-off form (a secret-input widget, and an
   origin_url to give the user) whose password fields go straight to the
-  server; the user saves it with their own full access key, so you cannot fill
-  it in yourself. You see the paths, their labels and whether each is set, never a
+  server; the user saves it with their own login (${
+    keys ? "a login provider the\n  operator configured, or a full access key" : "through a login provider the\n  operator configured"
+  }), so you cannot fill it in
+  yourself. You see the paths, their labels and whether each is set, never a
   value. The form takes one submission and expires. get_service shows an
   author the settings, pins and secretsSet; read it before update_service,
   whose settings replace the stored ones (a secret is kept while the object
@@ -69,17 +79,29 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   steered by something you read. run_service and schedules refuse it, and
   listings show approved: false. Changing its params, pins, actions or
   settings over MCP turns it off again; renaming it, or entering secrets
-  through secret_request, does not. Services written over REST with a full
-  key count as approved; with a scoped key they wait like yours do. Enter the secrets first, then call approval_request and give the
+  through secret_request, does not. ${
+    keys
+      ? `Services written over REST with a full
+  key count as approved; with a scoped key they wait like yours do.`
+      : "Services written over REST count as approved."
+  } Enter the secrets first, then call approval_request and give the
   user its page (a service-approve widget, or origin_url): it shows where
   data goes, the actions, params, pins, settings and which secrets are set,
-  and the person approves by logging in with one of their full access keys while
-  holding edit_services. The link alone is not enough, and an OAuth token or
+  and the person approves by logging in, ${
+    keys
+      ? `through a login provider the operator
+  configured or with one of their full access keys, while holding
+  edit_services. The link alone is not enough, and an OAuth token or
   a scoped access key is never accepted, so an agent connected over OAuth or
   with a scoped key cannot approve its own service. One known limit: an
   agent that holds a full access key itself (a key pasted into its MCP
   config, a script) could approve on the page with it. That is discouraged,
-  not prevented. Never ask the user for a key.
+  not prevented. Never ask the user for a key.`
+      : `through a login provider the operator
+  configured, while holding edit_services. The link alone is not enough,
+  and an OAuth token is never accepted, so you cannot approve your own
+  service.`
+  }
 - **Run** — one execution of a service, and always asynchronous. run_service
   starts one and returns the run record; poll get_run until status is
   succeeded or failed. wait_ms folds the first poll into the dispatch — if the
@@ -156,25 +178,28 @@ Run the discovery chain silently — do not narrate loading steps.
 
 ## Permissions
 
-Access keys identify you; roles (sets of capabilities granted on spaces and
+${keys ? "Access keys identify you" : "Your connection identifies you"}; roles (sets of capabilities granted on spaces and
 bundles) decide what you may do. A space grant is the baseline; bundle-level
 grants override per capability. Checks are per-capability (read_items,
 edit_items, edit_docs, read_files, edit_files, run_services, ...).
 
 The instance operator may also deny a user account-level capabilities —
-manage_keys (managing their own access keys, listing and disconnecting
+manage_keys (${keys ? "managing their own access keys, " : ""}listing and disconnecting
 connected apps) and
 create_spaces. whoami lists them as deniedCapabilities; a denied call fails
 with "account capability ... is denied for this user", and only the operator
 can change that.
 
-Sessions may also be authenticated by an OAuth token — a delegation of an
-access key, possibly narrowed to a role (admin | member | read-only) and/or
+${keys ? "Sessions may also be authenticated by an OAuth token" : "Sessions are authenticated by an OAuth token"} — a delegation of ${
+    keys ? "an\naccess key" : "the person's\nlogin"
+  }, possibly narrowed to a role (admin | member | read-only) and/or
 specific spaces or bundles. A narrowed session sees correspondingly smaller
 role lists from load, and denied calls report the missing capability; tell
 the user the authorization's scope doesn't cover the action (they can
 reconnect the app with a wider scope) rather than retrying.
-
+${
+  keys
+    ? `
 A session may also run on a scoped access key: a key fixed to one of the
 same roles, never to places. whoami then shows keyScope ({role}); denials
 report decidedBy "key_scope". A scoped key, at any role, cannot manage keys
@@ -182,7 +207,9 @@ or connected apps, cannot create spaces below admin, and is refused on the
 pages where a person decides (consent, secret forms, service approval).
 Tell the user the key is limited (they can give you a wider one) rather
 than retrying.
-
+`
+    : ""
+}
 ## Reference URIs
 
 Stored references stay opaque — resolve before showing them to a user:
@@ -192,3 +219,4 @@ Stored references stay opaque — resolve before showing them to a user:
 Never surface raw reference URIs, durable storage locations, or a service's
 destination to the user.
 `;
+}

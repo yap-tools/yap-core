@@ -22,7 +22,7 @@ import type { YapConfig } from "../../src/config.js";
 import type { Db } from "../../src/db/index.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
-import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
+import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp, KEY_LOGIN_ON } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
 
 const ACCEPTED: [string, string][] = [
@@ -43,7 +43,7 @@ describeEachAdapter("strict date input (core)", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    userId = (await createUser(db, { name: "Owner" })).user.id;
+    userId = (await createUser(db, KEY_LOGIN_ON, { name: "Owner" })).user.id;
     const space = await createSpace(db, userId, { name: "Work" });
     bundleId = (
       await createBundle(db, userId, space.id, {
@@ -188,7 +188,7 @@ describeEachAdapter("strict date input (backup)", (adapter) => {
     dirs.push(work);
     const blob = await createBlobStore({ blob: { driver: "fs", root: join(work, "blobs") }, masterKey: Buffer.alloc(32), baseUrl: "http://localhost:0" } as YapConfig);
     const source = await adapter.makeDb();
-    const userId = (await createUser(source, { name: "Owner" })).user.id;
+    const userId = (await createUser(source, KEY_LOGIN_ON, { name: "Owner" })).user.id;
     const space = await createSpace(source, userId, { name: "Work" });
     const bundleId = (
       await createBundle(source, userId, space.id, {

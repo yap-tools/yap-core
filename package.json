@@ -54,6 +54,7 @@
     "flydrive": "^2.1.0",
     "html-to-text": "^9.0.5",
     "iconv-lite": "^0.7.3",
+    "jose": "^5.10.0",
     "libmime": "^5.4.2",
     "pg": "^8.21.0",
     "tar-stream": "^3.2.0",
