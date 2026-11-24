@@ -108,9 +108,10 @@ describeEachAdapter("MCP surface", (adapter) => {
     const result = await alice.call("whoami");
     expect(result).toEqual({ id: aliceId, name: "Alice", externalId: null,
       deniedCapabilities: [],
+      providerLoginOnly: false,
       version: pkgVersion,
     });
-    expect(Object.keys(result).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name", "version"]);
+    expect(Object.keys(result).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name", "providerLoginOnly", "version"]);
   });
 
   describe("the discovery chain", () => {

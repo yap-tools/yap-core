@@ -64,7 +64,11 @@ export interface YapServer {
  * ?key= query fallback for URL-only clients) or an OAuth access token. 401s
  * carry the RFC 9728 resource-metadata pointer — that header is what lets a
  * compliant MCP client discover the authorize flow with no manual config.
- * The sysadmin key never authenticates MCP.
+ * The sysadmin key never authenticates MCP. Where key login is switched off
+ * (core/keyLogin.ts) an access key, ?key= included, gets a 401 that says to
+ * connect through the provider. The transport runs this on every request, not
+ * only when a session opens, so a key refused or a grant deleted meanwhile
+ * stops an open session on its next request.
  */
 async function authenticateMcp(
   request: { headers: Record<string, string | string[] | undefined>; url?: string },
@@ -96,13 +100,19 @@ async function authenticateMcp(
       return scopedAuth ? { userId: auth.userId, scopedAuth } : { userId: auth.userId };
     }
     case "missing":
-      return deny("access key or access token required (Authorization: Bearer or ?key= fallback)");
+      return deny(
+        config.keyLogin
+          ? "access key or access token required (Authorization: Bearer or ?key= fallback)"
+          : "access token required: connect through this server's OAuth flow",
+      );
     case "sysadmin":
       return deny("the sysadmin key cannot be used over MCP");
     case "invalid-token":
       return deny("invalid, expired, or revoked access token");
     case "invalid-key":
       return deny("invalid or revoked access key");
+    case "key-refused":
+      return deny(auth.message);
   }
 }
 

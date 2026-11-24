@@ -31,6 +31,8 @@ export interface WidgetDef {
   name: string;
   uri: string;
   description: string;
+  /** The description an instance with key login switched off advertises, where `description` mentions access keys. */
+  descriptionWithoutKeys?: string;
   /** Body renderer + styles; the bridge is shared. */
   style: string;
   render: string;
@@ -161,7 +163,10 @@ export const SERVER_CALL_JS = `
   // the decision carries that login's one-off ticket. Otherwise the page
   // offers the instance's login providers first, as links that start a login
   // for this very page (in a host's frame they open a tab of their own, where
-  // the login and the decision happen), and an access key second.
+  // the login and the decision happen), and an access key second, unless the
+  // instance switched key login off: then the page has no key field at all and
+  // the decision waits for the provider login.
+  function keyLoginOn(logins) { return !(logins && logins.keyLogin === false); }
   function providerLogin(d) {
     var origin = document.documentElement.getAttribute("data-yap-mode") === "origin" && window.__YAP_DATA__ === d;
     return origin && d.login && d.login.ticket ? d.login : null;
@@ -182,7 +187,7 @@ export const SERVER_CALL_JS = `
     }
     out += '</div>';
     if (inFrame) out += '<p class="muted">The login opens in a tab of its own; you decide there.</p>';
-    return out + '<p class="muted">Or use an access key:</p>';
+    return keyLoginOn(logins) ? out + '<p class="muted">Or use an access key:</p>' : out;
   }
   function destinationsHtml(dests) {
     var out = "";
@@ -802,6 +807,8 @@ export const WIDGETS: Record<string, WidgetDef> = {
     uri: `${UI_SCHEME_PREFIX}secret-input`,
     description:
       "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's login, which saving needs: one of the instance's login providers (in a host's frame it opens a tab of its own) or their access key. In a host's frame it fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
+    descriptionWithoutKeys:
+      "One-off form for a service's secrets: where they will be sent, then a password field per requested secret path, with the driver's label and description, and the person's login through one of the instance's login providers, which saving needs (in a host's frame it opens a tab of its own, where the person fills in and saves the form). It fetches the form from the instance it was served by before showing anything, and it POSTs the values only there, with its own signed token, so they never pass through the host or the model; then it shows \"Saved\" and nothing else. Data: secret_request's _meta.data ({ request_id, token, … }).",
     originHostable: true,
     style: `
       form { display: block; }
@@ -849,15 +856,21 @@ export const WIDGETS: Record<string, WidgetDef> = {
             '<input type="password" id="secret-' + i + '" autocomplete="new-password" spellcheck="false" autocapitalize="off"></label>';
         }
         var login = providerLogin(d);
+        var keys = keyLoginOn(form.logins);
         if (login) {
           html += loggedInHtml(login);
         } else {
+          if (!keys) html += '<p class="muted">Saving needs your login.</p>';
           html += providerLinksHtml(d, form.logins, "secret-input");
-          html += '<label class="field" for="secret-key"><span class="label">Your access key</span>' +
-            '<span class="muted">Saving needs your login. The key goes only to this Yap and is not stored.</span>' +
-            '<input type="password" id="secret-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>';
+          if (keys) {
+            html += '<label class="field" for="secret-key"><span class="label">Your access key</span>' +
+              '<span class="muted">Saving needs your login. The key goes only to this Yap and is not stored.</span>' +
+              '<input type="password" id="secret-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>';
+          }
         }
-        html += '<p><button type="submit" id="secret-save">Save</button></p><p class="err" id="secret-msg" role="alert"></p></form>';
+        // Without a key field, saving waits for the provider login (the page after it has the button).
+        html += (login || keys ? '<p><button type="submit" id="secret-save">Save</button></p>' : '') +
+          '<p class="err" id="secret-msg" role="alert"></p></form>';
         root.innerHTML = html;
         var formEl = document.getElementById("secret-form");
         var save = document.getElementById("secret-save");
@@ -878,6 +891,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
             body.login_ticket = login.ticket;
           } else {
             var key = document.getElementById("secret-key");
+            if (!key) { say("Log in to save."); return; }
             if (!key.value) { say("Enter your access key to save."); return; }
             body.access_key = key.value;
           }
@@ -905,6 +919,8 @@ export const WIDGETS: Record<string, WidgetDef> = {
     uri: `${UI_SCHEME_PREFIX}service-approve`,
     description:
       "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs the person's login: one of the instance's login providers, which opens in a tab of its own when the widget is in a host's frame, or a user access key, sent only to the instance the widget was served by; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
+    descriptionWithoutKeys:
+      "Approve page for a service written over MCP: shows, as the server has it, where the service sends data, its driver, allowed actions with their parameters, pins, settings, and which secret paths are set (names only), with Approve and Reject. Approving needs the person's login through one of the instance's login providers, which opens in a tab of its own when the widget is in a host's frame, where the person decides; the page's token alone is not enough. Data: approval_request's _meta.data ({ request_id, token }).",
     originHostable: true,
     style: `
       .dest { border: 2px solid var(--yap-border); border-radius: var(--border-radius-small, 8px); padding: 10px 12px; margin: 0 0 14px; }
@@ -966,12 +982,16 @@ export const WIDGETS: Record<string, WidgetDef> = {
           return;
         }
         var login = providerLogin(d);
+        var keys = keyLoginOn(logins);
         html += '<form id="approve-form" autocomplete="off" novalidate>' +
-          (login ? loggedInHtml(login) : providerLinksHtml(d, logins, "service-approve") +
-            '<label class="field" for="approve-key"><strong>Your access key</strong>' +
-            '<span class="muted"> Approving needs your login. The key goes only to this Yap and is not stored.</span>' +
-            '<input type="password" id="approve-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>') +
-          '<div class="row"><button type="button" id="approve-reject">Reject</button><button type="submit" id="approve-ok">Approve</button></div>' +
+          (login ? loggedInHtml(login) : (keys ? '' : '<p class="muted">Approving needs your login.</p>') +
+            providerLinksHtml(d, logins, "service-approve") +
+            (keys ? '<label class="field" for="approve-key"><strong>Your access key</strong>' +
+              '<span class="muted"> Approving needs your login. The key goes only to this Yap and is not stored.</span>' +
+              '<input type="password" id="approve-key" autocomplete="off" spellcheck="false" autocapitalize="off"></label>' : '')) +
+          // Without a key field, approving waits for the provider login (the page after it has the button).
+          '<div class="row"><button type="button" id="approve-reject">Reject</button>' +
+          (login || keys ? '<button type="submit" id="approve-ok">Approve</button>' : '') + '</div>' +
           '<p class="err" id="approve-msg" role="alert"></p></form></div>';
         root.innerHTML = html;
         var form = document.getElementById("approve-form");
@@ -980,7 +1000,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var key = document.getElementById("approve-key");
         var msg = document.getElementById("approve-msg");
         function say(text) { msg.textContent = text; requestAnimationFrame(announceHeight); }
-        function busy(on) { ok.disabled = on; reject.disabled = on; }
+        function busy(on) { if (ok) ok.disabled = on; reject.disabled = on; }
         function finish(text) {
           window.__yapApprovalDone = true;
           root.innerHTML = '<div class="card done">' + esc(text) + '</div>';
@@ -992,6 +1012,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           if (login) {
             body.login_ticket = login.ticket;
           } else {
+            if (!key) { say("Log in to approve."); return; }
             if (!key.value) { say("Enter your access key to approve."); return; }
             body.access_key = key.value;
           }

@@ -29,7 +29,8 @@ function printJson(body: unknown): void {
 interface CreateUserResponse {
   user: { id: string; name: string };
   personalSpaceId: string;
-  initialKey: { key: string };
+  /** Absent where no key may be made: key login is off for the instance. */
+  initialKey?: { key: string };
 }
 
 /** Who the CLI acts as, given the credential saved in .yap/ (if any). */
@@ -51,6 +52,10 @@ export async function cmdUserCreate(target: Target, dir: string, argv: string[])
   const request = values.email === undefined ? { name } : { name, email: values.email };
   const body = (await call(target, "POST", "/v1/users", target.sysKey(), request)) as CreateUserResponse;
   console.log(`created user ${body.user.name} (${body.user.id}), personal space ${body.personalSpaceId}`);
+  if (!body.initialKey) {
+    console.log("No access key: this instance accepts only provider login. The user logs in through a login provider.");
+    return;
+  }
   console.log("");
   console.log("Access key (shown once — store it wherever this user connects from):");
   console.log(`  ${body.initialKey.key}`);

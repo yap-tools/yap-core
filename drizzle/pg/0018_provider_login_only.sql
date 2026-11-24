@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "provider_login_only" integer DEFAULT 0 NOT NULL;

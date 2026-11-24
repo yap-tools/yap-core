@@ -6,8 +6,8 @@
  * refuses a secret value in them). To fill in the secrets it calls
  * `secret_request` for some of the driver's secret paths. That reserves a row
  * here and returns a widget pointer plus an origin URL, like `upload_request`.
- * The human opens the form, types each secret into a password field and
- * their access key, and the form POSTs straight to
+ * The human opens the form, types each secret into a password field, logs
+ * in, and the form POSTs straight to
  * `POST /v1/secret-requests/:id/submit` with its own signed token. The agent
  * sees the paths, their labels and whether each is set, never a value.
  *
@@ -28,9 +28,9 @@
  * - A submission sets the listed paths only. Every other secret and every
  *   setting stays as it is. Submitting a new form for the same path replaces
  *   that secret.
- * - Submitting needs a login, the same as the service approve page
- *   (`pageLogin`: an unscoped user access key, never the sysadmin key, an
- *   OAuth token or a scoped key). The agent can see the form's token, so the token alone must not
+ * - Submitting needs a person's login, the same as the service approve page
+ *   (personLogin.ts: a provider login, or an unscoped user access key where
+ *   key login is on, never the sysadmin key, an OAuth token or a scoped key). The agent can see the form's token, so the token alone must not
  *   be enough: otherwise an agent could put a credential of its own into a
  *   service a person approved (a bearer token for its own account at the same
  *   API), and a secret change does not take the approval away. With the
@@ -52,7 +52,7 @@ import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
 import { SCOPED_KEY_LOGIN_REFUSED } from "./keys.js";
 import { loginOptions, type LoginOptions } from "./oidc.js";
-import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "./personLogin.js";
+import { identifyPerson, loginRefusedMessage, type KeyLoginRefusalWords } from "./personLogin.js";
 import {
   isSplit,
   mergeConfig,
@@ -354,9 +354,7 @@ function checkValues(paths: string[], raw: unknown): Record<string, string> {
   return values;
 }
 
-const LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
-  "login-expired": LOGIN_EXPIRED,
-  "two-logins": TWO_LOGINS,
+const KEY_LOGIN_REFUSED: KeyLoginRefusalWords = {
   missing: "Enter your access key to save.",
   sysadmin: "The sysadmin key cannot enter a service's secrets: enter one of your user access keys.",
   "oauth-token": "An app's token cannot enter a service's secrets: enter one of your user access keys.",
@@ -386,7 +384,7 @@ export async function submitSecrets(
     purpose: "secret-input",
     context: { request_id: requestId },
   });
-  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
+  if (!login.ok) throw unauthorized(loginRefusedMessage(config, login.reason, KEY_LOGIN_REFUSED, "save"));
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, request.createdBy, "edit_services", ctx))) {
     throw forbidden("the user who asked for this form no longer holds edit_services on this bundle");

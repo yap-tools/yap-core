@@ -12,6 +12,7 @@ import { expect, it } from "vitest";
 import { authenticateToken } from "../../src/core/oauth.js";
 import { hashKey } from "../../src/crypto.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 const now = "2026-01-01T00:00:00.000Z";
 const later = "2099-01-01T00:00:00.000Z";
@@ -54,7 +55,7 @@ describeEachAdapter("migration-0017", (adapter) => {
       expect(await db.client.select().from(oauthGrants)).toMatchObject([{ id: "g1", keyId: "k1", expiresAt: null }]);
       expect(await db.client.select().from(oauthCodes)).toMatchObject([{ id: "code1", keyId: "k1", grantExpiresAt: null }]);
       expect(await db.client.select().from(oauthTokens)).toHaveLength(1);
-      expect(await authenticateToken(db, "yap_at_old")).toMatchObject({ userId: "u1", grantId: "g1" });
+      expect(await authenticateToken(db, KEY_LOGIN_ON, "yap_at_old")).toMatchObject({ userId: "u1", grantId: "g1" });
       expect(await db.client.select().from(userIdentities)).toEqual([]);
       expect(await db.client.select().from(oidcTransactions)).toEqual([]);
 

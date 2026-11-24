@@ -198,17 +198,24 @@ export function registerRestRoutes(server: YapServer): void {
     externalId: z.string().nullish(),
     deniedCapabilities: z.unknown().optional(),
     email: z.string().nullish(),
+    providerLoginOnly: z.boolean().optional(),
   });
 
-  const userPatchSchema = z.strictObject({ deniedCapabilities: z.unknown().optional(), email: z.unknown().optional() });
+  const userPatchSchema = z.strictObject({
+    deniedCapabilities: z.unknown().optional(),
+    email: z.unknown().optional(),
+    providerLoginOnly: z.unknown().optional(),
+  });
 
   app.post(
     "/v1/users",
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createUserSchema, await jsonBody(c));
-      // Always with an initial key: only sign-up on a provider login makes a user without one.
-      const { created, ...result } = await usersCore.createUser(db, body, { initialKey: true });
+      // With an initial key wherever one may be made: not where key login is
+      // off for the instance, and not for a user created provider-login-only.
+      const initialKey = config.keyLogin && body.providerLoginOnly !== true;
+      const { created, ...result } = await usersCore.createUser(db, config, body, { initialKey });
       // 200 without a key: the externalId already named a user, nothing was created.
       return c.json(result, created ? 201 : 200);
     }),
@@ -258,7 +265,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       requireSysadmin(auth);
       const body = parseBody(createKeySchema, await optionalJsonBody(c));
-      return c.json(await keysCore.issueKeyForUser(db, param(c, "id"), body.name ?? "", body.scope), 201);
+      return c.json(await keysCore.issueKeyForUser(db, config, param(c, "id"), body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -316,7 +323,7 @@ export function registerRestRoutes(server: YapServer): void {
     handle(async (c, auth) => {
       const userId = requireUser(auth);
       const body = parseBody(createKeySchema, await jsonBody(c));
-      return c.json(await keysCore.createKey(db, userId, body.name ?? "", body.scope), 201);
+      return c.json(await keysCore.createKey(db, config, userId, body.name ?? "", body.scope), 201);
     }),
   );
 
@@ -332,7 +339,7 @@ export function registerRestRoutes(server: YapServer): void {
     "/v1/keys/:id/rotate",
     handle(async (c, auth) => {
       const userId = requireUser(auth);
-      return c.json(await keysCore.rotateKey(db, userId, param(c, "id")));
+      return c.json(await keysCore.rotateKey(db, config, userId, param(c, "id")));
     }),
   );
 

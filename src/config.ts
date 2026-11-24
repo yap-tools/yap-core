@@ -123,6 +123,14 @@ export interface YapConfig {
   oauthMaxRole?: OAuthRole;
   /** Login providers for the pages Core serves itself. */
   oidc: OidcConfig;
+  /**
+   * Whether access keys log people in and authenticate API calls. On unless
+   * YAP_KEY_LOGIN=false. Off, the pages offer only the login providers, no
+   * user key can be made, and a user key is refused on /v1 and /mcp; OAuth
+   * tokens from a provider login and the sysadmin key keep working (see
+   * core/keyLogin.ts).
+   */
+  keyLogin: boolean;
   maxFileSizeBytes: number;
   /** "*" allows all MIME types. */
   mimeAllowlist: string[] | "*";
@@ -385,6 +393,12 @@ export function loadConfig(env: Env = process.env): YapConfig {
     throw new ConfigError(`YAP_OAUTH_MAX_ROLE must be "admin", "member" or "read-only", got ${JSON.stringify(maxRoleRaw)}`);
   }
   const oidc = loadOidc(env, Boolean(env.YAP_BASE_URL));
+  const keyLogin = env.YAP_KEY_LOGIN !== "false";
+  if (!keyLogin && oidc.providers.length === 0) {
+    throw new ConfigError(
+      "YAP_KEY_LOGIN=false needs a login provider (YAP_OIDC_PROVIDERS): without one nobody could log in",
+    );
+  }
 
   const mimeRaw = env.YAP_MIME_ALLOWLIST;
   const mimeAllowlist: YapConfig["mimeAllowlist"] =
@@ -408,6 +422,7 @@ export function loadConfig(env: Env = process.env): YapConfig {
     oauthCodeTtlSeconds: intEnv(env, "YAP_OAUTH_CODE_TTL_SECONDS", 60),
     oauthMaxRole: maxRoleRaw,
     oidc,
+    keyLogin,
     maxFileSizeBytes: intEnv(env, "YAP_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
     mimeAllowlist,
     sideloadEnabled: env.YAP_SIDELOAD_ENABLED !== "false",

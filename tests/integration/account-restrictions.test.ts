@@ -71,6 +71,7 @@ describeEachAdapter("account restrictions", (adapter) => {
       name: "Default",
       externalId: null,
       deniedCapabilities: [],
+      providerLoginOnly: false,
     });
 
     expect((await user.client.post("/v1/keys", { name: "laptop" })).status).toBe(201);

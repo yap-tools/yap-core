@@ -17,8 +17,9 @@
  *   actions with their parameters, pins, settings, and which secret paths are
  *   set (names only). In a host's frame the widget fetches that view itself,
  *   with the page's own signed token, from the instance it was served by.
- * - Approve needs a login: an unscoped user access key, through the same
- *   `pageLogin` the OAuth consent screen uses. The signed token alone is not
+ * - Approve needs a person's login, through the same personLogin.ts the
+ *   OAuth consent screen uses: a provider login, or an unscoped user access
+ *   key where key login is on. The signed token alone is not
  *   enough, and an OAuth token or a scoped key is refused, so an agent
  *   connected over OAuth or given a scoped key cannot approve. An agent
  *   holding a full access key itself can; that is discouraged, not
@@ -46,7 +47,7 @@ import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
 import { SCOPED_KEY_LOGIN_REFUSED } from "./keys.js";
 import { loginOptions, type LoginOptions } from "./oidc.js";
-import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "./personLogin.js";
+import { identifyPerson, loginRefusedMessage, type KeyLoginRefusalWords } from "./personLogin.js";
 import { isSplit, readParts, secretsSet, type ConfigObject } from "./serviceConfig.js";
 import {
   allowedActions,
@@ -332,9 +333,7 @@ export async function approvalPageData(env: ServiceEnv, requestId: string): Prom
   };
 }
 
-const LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
-  "login-expired": LOGIN_EXPIRED,
-  "two-logins": TWO_LOGINS,
+const KEY_LOGIN_REFUSED: KeyLoginRefusalWords = {
   missing: "Enter your access key to approve.",
   sysadmin: "The sysadmin key cannot approve a service: enter one of your user access keys.",
   "oauth-token": "An app's token cannot approve a service: enter one of your user access keys.",
@@ -390,7 +389,7 @@ export async function decideApproval(
     { accessKey: input.accessKey, loginTicket: input.loginTicket },
     { purpose: "service-approve", context: { request_id: requestId } },
   );
-  if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
+  if (!login.ok) throw unauthorized(loginRefusedMessage(config, login.reason, KEY_LOGIN_REFUSED, "approve"));
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, login.userId, "edit_services", ctx))) {
     throw forbidden("approving a service needs edit_services on its bundle, which this account does not hold");

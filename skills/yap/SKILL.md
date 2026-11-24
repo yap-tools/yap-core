@@ -24,7 +24,7 @@ Autoloaded bundle docs are where binding operating instructions belong; non-auto
 
 ## Connect
 
-**MCP** (preferred for agents): streamable HTTP at `http://<host>:8787/mcp`, access key as bearer token (`?key=` works as a fallback for URL-only clients):
+**MCP** (preferred for agents): streamable HTTP at `http://<host>:8787/mcp`, access key as bearer token (`?key=` works as a fallback for URL-only clients; where the operator switched key login off, keys are refused and clients connect through OAuth):
 
 ```sh
 claude mcp add --transport http yap http://localhost:8787/mcp \

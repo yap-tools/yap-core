@@ -9,7 +9,8 @@
 import type { Context } from "hono";
 
 import { bearerToken, type CredentialOutcome } from "../core/credential.js";
-import { unauthorized } from "../core/errors.js";
+import { unauthorized, YapError } from "../core/errors.js";
+import { refusalCode } from "../core/keyLogin.js";
 
 export function bearerFrom(c: Context): string | null {
   return bearerToken(c.req.header("authorization"));
@@ -29,6 +30,9 @@ export function requireUser(auth: CredentialOutcome): string {
       throw unauthorized("invalid, expired, or revoked access token");
     case "invalid-key":
       throw unauthorized("invalid or revoked access key");
+    case "key-refused":
+      // details.reason lets a client (the CLI) tell this from a bad key.
+      throw new YapError("unauthorized", auth.message, { reason: refusalCode(auth.reason) });
   }
 }
 

@@ -19,7 +19,7 @@ import { createUser } from "../../src/core/users.js";
 import type { Db } from "../../src/db/index.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
-import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
+import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp, KEY_LOGIN_ON } from "../helpers/app.js";
 import { connectMcp, type McpTestClient } from "../helpers/mcp.js";
 
 const DAY_REFUSED = [
@@ -46,7 +46,7 @@ describeEachAdapter("day-precision dates (core)", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    userId = (await createUser(db, { name: "Owner" })).user.id;
+    userId = (await createUser(db, KEY_LOGIN_ON, { name: "Owner" })).user.id;
     const space = await createSpace(db, userId, { name: "Work" });
     bundleId = (
       await createBundle(db, userId, space.id, {

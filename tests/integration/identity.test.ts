@@ -75,8 +75,9 @@ describeEachAdapter("identity & keys", (adapter) => {
       expect(res.body).toEqual({ id: created.body.user.id, name: created.body.user.name,
         externalId: null,
         deniedCapabilities: [],
+        providerLoginOnly: false,
       });
-      expect(Object.keys(res.body).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name"]);
+      expect(Object.keys(res.body).sort()).toEqual(["deniedCapabilities", "externalId", "id", "name", "providerLoginOnly"]);
       expect(res.body).not.toHaveProperty("createdAt");
       expect(res.body).not.toHaveProperty("key");
       expect(res.body).not.toHaveProperty("keyHash");

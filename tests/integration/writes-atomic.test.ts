@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import type { BlobStore } from "../../src/blob/index.js";
 import { createBundle, deleteBundle } from "../../src/core/bundles.js";
@@ -52,7 +53,7 @@ describeEachAdapter("writes: atomic multi-statement paths", (adapter) => {
 
   beforeEach(async () => {
     db = await adapter.makeDb();
-    userId = (await createUser(db, { name: "Owner" })).user.id;
+    userId = (await createUser(db, KEY_LOGIN_ON, { name: "Owner" })).user.id;
     spaceId = (await createSpace(db, userId, { name: "S" })).id;
     bundleId = (
       await createBundle(db, userId, spaceId, {

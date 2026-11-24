@@ -27,7 +27,9 @@
  * invite (a user the operator created with that email and no identity yet)
  * when the provider says the email is verified, or, when sign-up is on and the
  * address is on the allowlist, creates a user with a personal space and no
- * access key. Anyone else is turned away.
+ * access key. Either way the user is then set to provider login only
+ * (keyLogin.ts): a claimed invite's keys stop working and the OAuth grants
+ * they authorized are deleted. Anyone else is turned away.
  *
  * Other login methods (GitHub OAuth, SAML, passkeys) would sit beside this one
  * and hand the same thing back: a verified Yap user. Consent, token issuance
@@ -41,7 +43,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { OidcProviderConfig, YapConfig } from "../config.js";
 import { decryptSecret, encryptSecret, generateSecret, hashKey } from "../crypto.js";
 import type { Db } from "../db/index.js";
-import { createUser } from "./users.js";
+import { createUser, revokeKeyBackedGrants } from "./users.js";
 import { newId, nowIso } from "./util.js";
 
 /** The pages a provider login can be for. */
@@ -55,7 +57,13 @@ export const LOGIN_TTL_SECONDS = 600;
 /** A login that did not end in a person, with words for them. */
 export class OidcLoginError extends Error {}
 
-/** What a page offers to log in with. The one place a later switch can take key login away. */
+/**
+ * What a page offers to log in with: the providers, and whether it shows an
+ * access-key field at all. `keyLogin` is false only where key login is off for
+ * the whole instance; a page cannot know who someone is before they log in,
+ * so a provider-login-only user still sees the field elsewhere and is refused
+ * when they use it.
+ */
 export interface LoginOptions {
   providers: { id: string; label: string }[];
   keyLogin: boolean;
@@ -64,7 +72,7 @@ export interface LoginOptions {
 export function loginOptions(config: YapConfig): LoginOptions {
   return {
     providers: config.oidc.providers.map((p) => ({ id: p.name, label: p.label })),
-    keyLogin: true,
+    keyLogin: config.keyLogin,
   };
 }
 
@@ -443,7 +451,12 @@ async function resolvePerson(
   if (!config.oidc.signup || !signupAllows(config.oidc.allow, email, claims, issuer)) throw new OidcLoginError(NO_ACCOUNT);
   // Created without its email, which is set only once the identity is linked:
   // until then the new user must not look like an invite to a concurrent login.
-  const created = await createUser(db, { name: displayName(claims, email) }, { initialKey: false });
+  const created = await createUser(
+    db,
+    config,
+    { name: displayName(claims, email), providerLoginOnly: true },
+    { initialKey: false },
+  );
   try {
     await db.client.insert(userIdentities).values({ id: newId(), userId: created.user.id, issuer, subject, createdAt: nowIso() });
   } catch (err) {
@@ -458,24 +471,27 @@ async function resolvePerson(
 }
 
 /**
- * Links an identity to an invite, once. The no-op update locks the user row
- * first and only matches while the user still carries this email, so an
- * invite the operator withdrew or changed meanwhile is not claimed, and of two
- * different logins claiming the same invite at once, the second waits for the
- * first and then finds it claimed.
+ * Links an identity to an invite, once, and sets the user to provider login
+ * only, deleting the OAuth grants their keys authorized, in one transaction.
+ * The update locks the user row first and only matches while the user still
+ * carries this email, so an invite the operator withdrew or changed meanwhile
+ * is not claimed, and of two different logins claiming the same invite at
+ * once, the second waits for the first and then finds it claimed (and rolls
+ * back its flag with the rest).
  */
 async function claimInvite(db: Db, userId: string, issuer: string, subject: string, email: string): Promise<void> {
   const { users, userIdentities } = db.tables;
   await db.transaction(function* (tx) {
     const still: unknown[] = yield tx
       .update(users)
-      .set({ email })
+      .set({ email, providerLoginOnly: 1 })
       .where(and(eq(users.id, userId), eq(users.email, email)))
       .returning({ id: users.id });
     if (still.length === 0) throw new OidcLoginError(NO_ACCOUNT);
     const linked: unknown[] = yield tx.select({ id: userIdentities.id }).from(userIdentities).where(eq(userIdentities.userId, userId));
     if (linked.length > 0) throw new OidcLoginError("This invitation was just claimed by another login.");
     yield tx.insert(userIdentities).values({ id: newId(), userId, issuer, subject, createdAt: nowIso() });
+    yield* revokeKeyBackedGrants(tx, db.tables, userId);
   });
 }
 

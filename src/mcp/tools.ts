@@ -35,7 +35,7 @@ import { nowIso } from "../core/util.js";
 import type { SessionAuth, YapServer } from "../server.js";
 import { UI_SCHEME_PREFIX, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../widgets/registry.js";
 import { executeCall, INTERNAL_ERROR_MESSAGE, offeredSecondTier, type PerCallResult } from "./call.js";
-import { HELP_TEXT } from "./help.js";
+import { helpText } from "./help.js";
 
 function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -232,7 +232,7 @@ export function registerMcpTools(server: YapServer): void {
     mcp.addResource({
       uri: def.uri,
       name: `widget: ${def.name}`,
-      description: def.description,
+      description: config.keyLogin ? def.description : (def.descriptionWithoutKeys ?? def.description),
       // MCP Apps (SEP-1865) requires this exact profile on a UI resource;
       // hosts use it to decide a resource is a renderable app.
       mimeType: "text/html;profile=mcp-app",
@@ -308,7 +308,11 @@ export function registerMcpTools(server: YapServer): void {
 
   addTool({
     name: "whoami",
-    description: "Return the currently authenticated user's minimal identity (id, name and externalId), the account-level capabilities the instance operator has denied them (deniedCapabilities — empty when unrestricted; manage_keys and create_spaces are the ones that exist), keyScope when you connected with a scoped access key ({role}: what you may do is that role's share of the user's rights, and you cannot manage keys or approve on a person's pages) and the running Yap Core version.",
+    description: `Return the currently authenticated user's minimal identity (id, name and externalId), the account-level capabilities the instance operator has denied them (deniedCapabilities — empty when unrestricted; manage_keys and create_spaces are the ones that exist), providerLoginOnly (true when the user logs in only through a login provider), ${
+      config.keyLogin
+        ? "keyScope when you connected with a scoped access key ({role}: what you may do is that role's share of the user's rights, and you cannot manage keys or approve on a person's pages) "
+        : ""
+    }and the running Yap Core version.`,
     annotations: { readOnlyHint: true, title: "Who am I" },
     execute: async (_args, ctx) => {
       try {
@@ -459,7 +463,7 @@ export function registerMcpTools(server: YapServer): void {
     description:
       "Reference documentation for core Yap concepts (spaces, bundles, items, services and runs, user docs, widgets, MCP usage). Cheap to consult when discovery metadata alone doesn't disambiguate.",
     annotations: { readOnlyHint: true, title: "Help" },
-    execute: async () => HELP_TEXT,
+    execute: async () => helpText(config),
   });
 
   addTool({
@@ -598,7 +602,9 @@ export function registerMcpTools(server: YapServer): void {
   addTool({
     name: "space_create",
     description:
-      "Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces, and a scoped access key only at role admin; whoami shows both). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).",
+      `Create a new space owned by you (an account-level right — every user may create spaces unless the instance operator has denied them create_spaces${
+        config.keyLogin ? ", and a scoped access key only at role admin; whoami shows both" : "; whoami shows it"
+      }). Params: name, description?, keywords? (comma-separated, used for discovery matching), context? (instructions agents receive on load_space).`,
     parameters: z.object({
       name: z.string(),
       description: z.string().optional(),

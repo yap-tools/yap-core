@@ -37,7 +37,7 @@ describeEachAdapter("migration-0010", (adapter) => {
         ["u3", "[]"],
       ]);
       expect((await getUser(db, "u2")).deniedCapabilities).toEqual([]);
-      expect(await whoami(db, "u1")).toEqual({ id: "u1", name: "ada", externalId: null, deniedCapabilities: [] });
+      expect(await whoami(db, "u1")).toEqual({ id: "u1", name: "ada", externalId: null, deniedCapabilities: [], providerLoginOnly: false });
     } finally {
       await db.close();
     }

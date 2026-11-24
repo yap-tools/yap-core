@@ -78,7 +78,9 @@ other client — is just an API consumer authenticated as that user. Connect
 any MCP client to `http://localhost:8787/mcp` with the same key as a bearer
 token (or `?key=` as a fallback for URL-only clients — bearer is preferred;
 query strings leak into logs, and Yap redacts keys from its own logs for
-exactly that reason).
+exactly that reason). Where the operator has switched key login off
+(`YAP_KEY_LOGIN=false`, see *Switching key login off*), a key is refused
+there, `?key=` included, and clients connect through OAuth instead.
 
 The server listens on `:8787` (one process, one port): REST under `/v1`, MCP
 at `/mcp`, origin-hosted widget pages under `/w/`, health at `/health`.
@@ -112,6 +114,7 @@ yap users list                  # sysadmin-lane commands read .env on demand
 yap api --sysadmin POST /v1/users/<id>/keys '{"name": "recovery"}'  # issue a key for any user
 yap api --sysadmin PATCH /v1/users/<id> '{"deniedCapabilities": ["manage_keys"]}'  # restrict an account
 yap api --sysadmin PATCH /v1/users/<id> '{"email": "ada@example.com"}'  # invite: a provider login with this verified email claims the account
+yap api --sysadmin PATCH /v1/users/<id> '{"providerLoginOnly": false}'  # let a provider-login user have a key again (e.g. for the CLI)
 yap api --sysadmin GET /v1/users/<id>/oauth-grants  # any user's connected apps; DELETE …/oauth-grants/<grantId> revokes one
 ```
 
@@ -189,6 +192,7 @@ local dev.
 | `YAP_OAUTH_MAX_ROLE` | *(unset = admin)* | Highest role the consent screen offers and grants (`admin`, `member`, `read-only`), whatever the login method |
 | `YAP_OIDC_PROVIDERS` / `YAP_OIDC_<NAME>_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_LABEL` / `_GRANT_MAX_DAYS` | *(none)* | OpenID Connect login providers for Core's own pages; needs `YAP_BASE_URL` ([docs/oidc-login.md](docs/oidc-login.md)) |
 | `YAP_OIDC_GRANT_MAX_DAYS` / `YAP_OIDC_SIGNUP` / `YAP_OIDC_ALLOW` | 30 / `false` / *(empty)* | Lifetime of a grant made after a provider login; sign-up on a first login; the sign-up allowlist (addresses and `@domain`) |
+| `YAP_KEY_LOGIN` | `true` | `false` switches access-key login off for the whole instance: pages offer only the providers, no user key can be made, and user keys are refused on `/v1` and `/mcp`. Needs a provider, or startup fails ([docs/key-login.md](docs/key-login.md)) |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
 | `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
@@ -455,6 +459,30 @@ current denials are in `GET /v1/whoami` and the MCP `whoami` tool, so a
 client can hide what would be refused; a refused call is a `403` naming the
 capability.
 
+### Switching key login off
+
+Once a login provider is configured, access keys can be switched off, so that
+people only ever log in through their provider:
+
+- **For the instance**, `YAP_KEY_LOGIN=false`. The pages Core serves show only
+  the provider buttons and never mention keys. No user key can be made by
+  anyone, the sysadmin lane included (`POST /v1/users` then creates users
+  without one). A user key is refused on `/v1` and `/mcp`, bearer and `?key=`
+  alike, with a `401` saying to connect through the provider. OAuth tokens
+  from a provider login keep working. Tokens of a grant made with a key are
+  refused, not deleted, so switching back on restores them. The sysadmin key
+  is unaffected. Startup fails if no provider is configured.
+- **For one user**, `providerLoginOnly` on `POST /v1/users` and
+  `PATCH /v1/users/:id`, reported by `whoami`. Their keys are refused on the
+  pages, on `/v1` and on `/mcp`, and no key can be made or rotated for them,
+  by anyone. Setting it deletes the OAuth grants their keys authorized; grants
+  made after a provider login stay. Users a provider login creates (sign-up,
+  or a claimed invite) have it on; the sysadmin clears it to give one a key.
+
+The CLI can only connect with an access key, so it cannot reach an instance or
+an account where keys are switched off; it says so instead of a bare `401`.
+How it works: [docs/key-login.md](docs/key-login.md).
+
 ## OAuth (connecting apps)
 
 Every instance is its own **OAuth 2.1 authorization server** — no central
@@ -477,7 +505,8 @@ provider login has no key behind it, belongs to the user, and lives at most
 `YAP_OIDC_GRANT_MAX_DAYS` (default 30) from its creation. A first login can
 claim an invite (a user the operator created with an `email`) or, with sign-up
 on, create an account for an allowlisted address, with a personal space and
-no access key. `YAP_OAUTH_MAX_ROLE` caps the role the consent screen offers
+no access key. Either way the user is then set to provider login only (see
+*Switching key login off*). `YAP_OAUTH_MAX_ROLE` caps the role the consent screen offers
 for every login method. How it works: [docs/oidc-login.md](docs/oidc-login.md).
 
 A token's scope is `role:admin | role:member | role:read-only` plus optional

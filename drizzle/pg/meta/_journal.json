@@ -127,6 +127,13 @@
       "when": 1795505651752,
       "tag": "0017_oidc_login",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795509662648,
+      "tag": "0018_provider_login_only",
+      "breakpoints": true
     }
   ]
 }

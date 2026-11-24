@@ -4,6 +4,7 @@
  * key), after the user and space rows have been written.
  */
 import { afterEach, expect, it, vi } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import * as crypto from "../../src/crypto.js";
 import { createUser } from "../../src/core/users.js";
@@ -32,17 +33,17 @@ describeEachAdapter("users: atomic creation", (adapter) => {
   it("a failure mid-create leaves no user, space or key behind", async () => {
     const db = await adapter.makeDb();
     try {
-      await createUser(db, { name: "Survivor" });
+      await createUser(db, KEY_LOGIN_ON, { name: "Survivor" });
       const before = await rowCounts(db);
 
       vi.mocked(crypto.generateAccessKey).mockImplementationOnce(() => {
         throw new Error("boom");
       });
-      await expect(createUser(db, { name: "Doomed", externalId: "ext-doomed" })).rejects.toThrow("boom");
+      await expect(createUser(db, KEY_LOGIN_ON, { name: "Doomed", externalId: "ext-doomed" })).rejects.toThrow("boom");
       expect(await rowCounts(db)).toEqual(before);
 
       // Nothing was left holding the externalId: the retry is a clean create.
-      const retry = await createUser(db, { name: "Doomed", externalId: "ext-doomed" });
+      const retry = await createUser(db, KEY_LOGIN_ON, { name: "Doomed", externalId: "ext-doomed" });
       expect("initialKey" in retry).toBe(true);
       expect(await rowCounts(db)).toEqual({
         users: before.users + 1,
@@ -62,7 +63,7 @@ describeEachAdapter("users: atomic creation", (adapter) => {
         throw new Error("boom");
       });
       // Both start in the same tick; neither is awaited before the other begins.
-      const doomed = createUser(db, { name: "Doomed" });
+      const doomed = createUser(db, KEY_LOGIN_ON, { name: "Doomed" });
       const bystander = db.client
         .insert(users)
         .values({ id: "bystander", name: "Bystander", externalId: null, createdAt: "2026-01-01T00:00:00.000Z" })
@@ -79,16 +80,16 @@ describeEachAdapter("users: atomic creation", (adapter) => {
   it("a database error on the last insert rolls the earlier ones back", async () => {
     const db = await adapter.makeDb();
     try {
-      const first = await createUser(db, { name: "First" });
+      const first = await createUser(db, KEY_LOGIN_ON, { name: "First" });
       const before = await rowCounts(db);
 
       // Reusing the first user's key collides on access_keys.key_hash.
       vi.mocked(crypto.generateAccessKey).mockReturnValueOnce(first.initialKey.key);
-      await expect(createUser(db, { name: "Second" })).rejects.toThrow();
+      await expect(createUser(db, KEY_LOGIN_ON, { name: "Second" })).rejects.toThrow();
       expect(await rowCounts(db)).toEqual(before);
 
       // The connection is usable afterwards (no transaction left open).
-      await createUser(db, { name: "Third" });
+      await createUser(db, KEY_LOGIN_ON, { name: "Third" });
       expect((await rowCounts(db)).users).toBe(before.users + 1);
     } finally {
       await db.close();

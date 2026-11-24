@@ -28,7 +28,7 @@ import { createUser } from "../../src/core/users.js";
 import { widgetHtml } from "../../src/widgets/registry.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
-import { bootTestApp, TEST_SYSADMIN_KEY, testEnv, type TestApp } from "../helpers/app.js";
+import { bootTestApp, TEST_SYSADMIN_KEY, testEnv, type TestApp, KEY_LOGIN_ON } from "../helpers/app.js";
 import { connectMcp } from "../helpers/mcp.js";
 import { pkce, postAuthorize, REDIRECT_URI, registerClient, tokenRequest } from "../helpers/oauth.js";
 import { followLogin, startFakeProvider, ticketIn, type FakeProvider } from "../helpers/oidc.js";
@@ -187,6 +187,11 @@ describeEachAdapter("oidc login", (adapter) => {
       expect(html).toContain("Test App");
       const identities = await app.db.client.select().from(app.db.tables.userIdentities);
       expect(identities).toMatchObject([{ userId: adaId, issuer: idp.issuer, subject: "ada-sub" }]);
+      // Claiming the invite set Ada to provider login only: her key is refused
+      // from now on. The operator clears it, so the key keeps working below.
+      expect((await sysadmin.get(`/v1/users/${adaId}`)).body.providerLoginOnly).toBe(true);
+      expect((await apiClient(app.baseUrl, adaKey).get("/v1/whoami")).status).toBe(401);
+      expect((await sysadmin.patch(`/v1/users/${adaId}`, { providerLoginOnly: false })).status).toBe(200);
       // PKCE and the exact callback URL went to the provider.
       const sent = idp.tokenRequests.at(-1)!;
       expect(sent.get("redirect_uri")).toBe(`${app.baseUrl}/oidc/test/callback`);
@@ -470,6 +475,7 @@ describeEachAdapter("oidc login", (adapter) => {
       const sys = apiClient(signupApp.baseUrl, TEST_SYSADMIN_KEY);
       const carol = (await sys.get("/v1/users")).body.data.find((u: any) => u.name === "Carol");
       expect(carol.email).toBe("carol@corp.example");
+      expect(carol.providerLoginOnly).toBe(true);
       expect((await sys.get(`/v1/users/${carol.id}/keys`)).body.data).toEqual([]);
       const spaces = await signupApp.db.client.select().from(signupApp.db.tables.spaces).where(eq(signupApp.db.tables.spaces.ownerId, carol.id));
       expect(spaces).toMatchObject([{ personal: 1 }]);
@@ -527,7 +533,7 @@ describeEachAdapter("createUser without an initial key", (adapter) => {
   it("creates the personal space and no key; POST /v1/users still mints one and says 201/200", async () => {
     const app = await bootTestApp({}, await adapter.makeDb());
     try {
-      const made = await createUser(app.db, { name: "Keyless" }, { initialKey: false });
+      const made = await createUser(app.db, KEY_LOGIN_ON, { name: "Keyless" }, { initialKey: false });
       expect(made.created).toBe(true);
       expect(made).not.toHaveProperty("initialKey");
       const keys = await app.db.client.select().from(app.db.tables.accessKeys).where(eq(app.db.tables.accessKeys.userId, made.user.id));
@@ -542,7 +548,7 @@ describeEachAdapter("createUser without an initial key", (adapter) => {
       const again = await sys.post("/v1/users", { name: "Grace", externalId: "ext-g" });
       expect(again.status).toBe(200);
       expect(again.body).not.toHaveProperty("initialKey");
-      const repeat = await createUser(app.db, { name: "x", externalId: "ext-g" }, { initialKey: false });
+      const repeat = await createUser(app.db, KEY_LOGIN_ON, { name: "x", externalId: "ext-g" }, { initialKey: false });
       expect(repeat.created).toBe(false);
 
       // An email can be set and cleared later: setting one invites the user.

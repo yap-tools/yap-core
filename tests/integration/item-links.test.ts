@@ -6,6 +6,7 @@
  * become the target, and a target that matches nothing is refused.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import { createBundle } from "../../src/core/bundles.js";
 import { createItems } from "../../src/core/items.js";
@@ -30,7 +31,7 @@ describeEachAdapter("item links target item types by id", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    const { user } = await createUser(db, { name: "Owner" });
+    const { user } = await createUser(db, KEY_LOGIN_ON, { name: "Owner" });
     userId = user.id;
     spaceId = (await createSpace(db, userId, { name: "S" })).id;
   });

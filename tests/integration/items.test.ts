@@ -5,6 +5,7 @@
  */
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import { createBundle } from "../../src/core/bundles.js";
 import { YapError } from "../../src/core/errors.js";
@@ -36,7 +37,7 @@ describeEachAdapter("EAV items", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    const { user } = await createUser(db, { name: "Owner" });
+    const { user } = await createUser(db, KEY_LOGIN_ON, { name: "Owner" });
     userId = user.id;
     const space = await createSpace(db, userId, { name: "Work" });
     const bundle = await createBundle(db, userId, space.id, {
@@ -396,7 +397,7 @@ describeEachAdapter("EAV items", (adapter) => {
       // it exists: reads and writes alike return not_found, matching the
       // bundle resource. (A member who can see the bundle but lacks the
       // specific capability still gets forbidden — see bundle-existence.test.)
-      const { user: stranger } = await createUser(db, { name: "Stranger" });
+      const { user: stranger } = await createUser(db, KEY_LOGIN_ON, { name: "Stranger" });
       await expect(
         q().then(() => queryItems(db, stranger.id, bundleId, { itemType: "todo" })),
       ).rejects.toMatchObject({ code: "not_found" });

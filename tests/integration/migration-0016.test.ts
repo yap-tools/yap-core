@@ -9,6 +9,7 @@ import { expect, it } from "vitest";
 import { authenticateKey, listKeysForUser } from "../../src/core/keys.js";
 import { hashKey } from "../../src/crypto.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 const now = "2026-01-01T00:00:00.000Z";
 
@@ -26,7 +27,7 @@ describeEachAdapter("migration-0016", (adapter) => {
       expect(await db.appliedMigrations()).toBe(db.journalLength());
       const rows = await db.client.select().from(db.tables.accessKeys);
       expect(rows[0]).toMatchObject({ id: "k1", scope: null });
-      expect(await authenticateKey(db, "yap_old_key")).toEqual({ userId: "u1", keyId: "k1", scope: null });
+      expect(await authenticateKey(db, KEY_LOGIN_ON, "yap_old_key")).toEqual({ ok: true, userId: "u1", keyId: "k1", scope: null });
       expect((await listKeysForUser(db, "u1"))[0]!.scope).toBeNull();
     } finally {
       await db.close();

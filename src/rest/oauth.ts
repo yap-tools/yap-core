@@ -18,7 +18,7 @@ import type { OAuthRole, OidcProviderConfig } from "../config.js";
 import { signToken, verifyToken } from "../crypto.js";
 import { requireAccountCapability } from "../core/accountCapabilities.js";
 import { YapError } from "../core/errors.js";
-import { keyStillActive, pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "../core/keys.js";
+import { keyStillUsable, pageLogin, SCOPED_KEY_LOGIN_REFUSED } from "../core/keys.js";
 import * as oauth from "../core/oauth.js";
 import {
   findProvider,
@@ -31,7 +31,7 @@ import {
   type FinishedLogin,
   type LoginOptions,
 } from "../core/oidc.js";
-import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "../core/personLogin.js";
+import { identifyPerson, loginRefusedMessage, type KeyLoginRefusalWords } from "../core/personLogin.js";
 import { secretPageData } from "../core/secretRequests.js";
 import { approvalPageData } from "../core/serviceApprovals.js";
 import type { YapServer } from "../server.js";
@@ -132,9 +132,15 @@ const ROLE_OPTIONS: Array<{ value: OAuthRole; title: string; summary: string }> 
 
 const ROLE_RANK: Record<OAuthRole, number> = { "read-only": 0, member: 1, admin: 2 };
 
-/** The roles the consent screen offers: all of them, or up to YAP_OAUTH_MAX_ROLE. */
-function offeredRoles(max: OAuthRole | undefined): typeof ROLE_OPTIONS {
-  return max === undefined ? ROLE_OPTIONS : ROLE_OPTIONS.filter((r) => ROLE_RANK[r.value] <= ROLE_RANK[max]);
+/** The roles the consent screen offers: all of them, or up to YAP_OAUTH_MAX_ROLE. Where key
+ * login is off, nobody manages access keys, so the admin role does not mention them. */
+function offeredRoles(max: OAuthRole | undefined, keyLogin: boolean): typeof ROLE_OPTIONS {
+  const roles = max === undefined ? ROLE_OPTIONS : ROLE_OPTIONS.filter((r) => ROLE_RANK[r.value] <= ROLE_RANK[max]);
+  return keyLogin
+    ? roles
+    : roles.map((r) =>
+        r.value === "admin" ? { ...r, summary: "Act fully as you, including managing roles, spaces, and connected apps." } : r,
+      );
 }
 
 /** A role no higher than the cap. */
@@ -160,8 +166,8 @@ function providerButtons(logins: LoginOptions, kind: "form" | { href: (id: strin
   );
   return `<div class="logins">
       ${buttons.join("\n      ")}
-    </div>
-    <p class="or">Or use an access key</p>`;
+    </div>${logins.keyLogin ? `
+    <p class="or">Or use an access key</p>` : ""}`;
 }
 
 function loggedInNote(login: PageLogin): string {
@@ -189,6 +195,7 @@ function consentPage(input: {
   error?: string;
 }): string {
   const { params } = input;
+  const approvable = Boolean(input.login) || input.logins.keyLogin;
   const hidden = [
     ["client_id", params.clientId],
     ["redirect_uri", params.redirectUri],
@@ -216,16 +223,19 @@ function consentPage(input: {
     ${roles}
     </fieldset>
     ${input.restrictionNote ? `<p class="restriction">${esc(input.restrictionNote)}</p>` : ""}
-    ${input.login ? loggedInNote(input.login) : `${providerButtons(input.logins, "form")}
+    ${input.login ? loggedInNote(input.login) : `${providerButtons(input.logins, "form")}${input.logins.keyLogin ? `
     <label class="keylabel" for="key">Your access key</label>
-    <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>`}
+    <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>` : ""}`}
     ${input.error ? `<p class="error">${esc(input.error)}</p>` : ""}
     <div class="actions">
-      <button type="submit" name="decision" value="deny" class="quiet">Deny</button>
-      <button type="submit" name="decision" value="approve" class="primary">Approve</button>
+      <button type="submit" name="decision" value="deny" class="quiet">Deny</button>${
+        // Without a key field, approving needs a provider login first: the button comes with the page after it.
+        approvable ? `
+      <button type="submit" name="decision" value="approve" class="primary">Approve</button>` : ""
+      }
     </div>
   </form>
-  <p class="hint">Your ${input.login ? "login" : "key"} authenticates this approval and is never shared with the app — the app only receives
+  <p class="hint">Your ${input.login || !input.logins.keyLogin ? "login" : "key"} authenticates this approval and is never shared with the app — the app only receives
   tokens limited to the access selected above, revocable at any time on the
   <a href="/oauth/connections">connected apps page</a>.</p>`,
   );
@@ -249,18 +259,15 @@ function fmtWhen(iso: string): string {
 function connectionsPage(input: {
   grants?: oauth.GrantInfo[];
   session?: string;
-  logins?: LoginOptions;
+  logins: LoginOptions;
   login?: PageLogin;
   error?: string;
   notice?: string;
 }): string {
   let body: string;
   if (input.grants === undefined) {
-    body = `  <h1>Connected apps</h1>
-  <p class="hint" style="margin-top:0">Apps you have authorized to act on your Yap. Enter an access key to see
-  the connections of the account it belongs to.</p>
-    ${input.logins ? providerButtons(input.logins, { href: (id) => `/oidc/${encodeURIComponent(id)}/start?for=connections` }) : ""}
-  <form method="post" action="/oauth/connections">
+    const logins = input.logins;
+    const keyForm = `<form method="post" action="/oauth/connections">
     <label class="keylabel" for="key">Your access key</label>
     <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>
     ${input.error ? `<p class="error">${esc(input.error)}</p>` : ""}
@@ -268,6 +275,14 @@ function connectionsPage(input: {
       <button type="submit" class="primary">Show connections</button>
     </div>
   </form>`;
+    body = `  <h1>Connected apps</h1>
+  <p class="hint" style="margin-top:0">Apps you have authorized to act on your Yap. ${
+    logins.keyLogin
+      ? "Log in, or enter an access key, to see the connections of that account."
+      : "Log in to see the connections of your account."
+  }</p>
+    ${providerButtons(logins, { href: (id) => `/oidc/${encodeURIComponent(id)}/start?for=connections` })}
+  ${logins.keyLogin ? keyForm : input.error ? `<p class="error">${esc(input.error)}</p>` : ""}`;
   } else {
     const rows =
       input.grants.length === 0
@@ -294,7 +309,9 @@ function connectionsPage(input: {
   ${input.login ? loggedInNote(input.login) : ""}
   ${input.notice ? `<p class="notice">${esc(input.notice)}</p>` : ""}
     ${rows}
-  <p class="hint">Disconnecting an app revokes its tokens immediately; your access keys are untouched.
+  <p class="hint">Disconnecting an app revokes its tokens immediately${
+    input.logins.keyLogin ? "; your access keys are untouched" : ""
+  }.
   Apps reconnect through the normal authorize flow.</p>`;
   }
   return page("Connected apps", body);
@@ -302,10 +319,8 @@ function connectionsPage(input: {
 
 const ENTER_USER_KEY = "Enter one of your user access keys (the sysadmin key cannot authorize apps).";
 
-/** What the consent screen says for each refused login. */
-const CONSENT_LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
-  "login-expired": LOGIN_EXPIRED,
-  "two-logins": TWO_LOGINS,
+/** What the consent screen says for each refused key login (loginRefusedMessage words the rest). */
+const CONSENT_LOGIN_REFUSED: KeyLoginRefusalWords = {
   missing: ENTER_USER_KEY,
   sysadmin: ENTER_USER_KEY,
   "oauth-token": ENTER_USER_KEY,
@@ -496,7 +511,7 @@ export function registerOAuthRoutes(server: YapServer): void {
       params,
       selectedRole: capRole((selectedRole ?? scope.role) as OAuthRole, config.oauthMaxRole),
       restrictionNote,
-      roles: offeredRoles(config.oauthMaxRole),
+      roles: offeredRoles(config.oauthMaxRole, config.keyLogin),
       logins,
       login,
       error,
@@ -546,7 +561,13 @@ export function registerOAuthRoutes(server: YapServer): void {
         { purpose: "consent", context: authorizeContext(params) },
       );
       if (!login.ok) {
-        return renderConsent(c, client, params, scope.role, CONSENT_LOGIN_REFUSED[login.reason]);
+        return renderConsent(
+          c,
+          client,
+          params,
+          scope.role,
+          loginRefusedMessage(config, login.reason, CONSENT_LOGIN_REFUSED, "connect this app"),
+        );
       }
       const provider = login.provider === null ? null : findProvider(config, login.provider);
       if (login.provider !== null && !provider) {
@@ -621,7 +642,7 @@ export function registerOAuthRoutes(server: YapServer): void {
   // ---- Connected apps page --------------------------------------------------
 
   const BAD_KEY = "That access key is invalid or revoked (the sysadmin key has no connections).";
-  const CONNECTIONS_LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+  const CONNECTIONS_LOGIN_REFUSED: KeyLoginRefusalWords = {
     missing: BAD_KEY,
     sysadmin: BAD_KEY,
     "oauth-token": BAD_KEY,
@@ -634,9 +655,12 @@ export function registerOAuthRoutes(server: YapServer): void {
   async function pageKeyAuth(
     form: Record<string, string>,
   ): Promise<{ ok: true; userId: string; keyId: string } | { ok: false; error: string }> {
-    const login = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
+    const login = await pageLogin(db, config, formValue(form, "access_key"));
     if (login.ok) return login;
-    return { ok: false, error: CONNECTIONS_LOGIN_REFUSED[login.reason] };
+    return {
+      ok: false,
+      error: loginRefusedMessage(config, login.reason, CONNECTIONS_LOGIN_REFUSED, "see your connections"),
+    };
   }
 
   /**
@@ -652,7 +676,9 @@ export function registerOAuthRoutes(server: YapServer): void {
     const payload = verifyToken(formValue(form, "session"), config.masterKey);
     if (!payload || payload.scope !== "connections" || typeof payload.userId !== "string") return null;
     if (payload.keyId === null) return payload.userId;
-    if (typeof payload.keyId !== "string" || !(await keyStillActive(db, payload.userId, payload.keyId))) return null;
+    if (typeof payload.keyId !== "string" || !(await keyStillUsable(db, config, payload.userId, payload.keyId))) {
+      return null;
+    }
     return payload.userId;
   }
 
@@ -663,7 +689,7 @@ export function registerOAuthRoutes(server: YapServer): void {
     session: string,
     extra: { notice?: string; login?: PageLogin } = {},
   ) {
-    return privatePage(c, connectionsPage({ grants: await oauth.listUserGrants(db, userId), session, ...extra }));
+    return privatePage(c, connectionsPage({ grants: await oauth.listUserGrants(db, userId), session, logins, ...extra }));
   }
 
   /** A user the operator has denied `manage_keys` gets the key prompt back
@@ -676,6 +702,7 @@ export function registerOAuthRoutes(server: YapServer): void {
       if (!(err instanceof YapError) || err.code !== "forbidden") throw err;
       return c.html(
         connectionsPage({
+          logins,
           error: "Connected apps for this account are managed by the instance operator (manage_keys is denied).",
         }),
         403,

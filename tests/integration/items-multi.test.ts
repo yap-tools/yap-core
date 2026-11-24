@@ -4,6 +4,7 @@
  * has_none + quantifier any/all/none), sort-by-multi, and schema conversion.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { KEY_LOGIN_ON } from "../helpers/app.js";
 
 import { createBundle } from "../../src/core/bundles.js";
 import {
@@ -31,7 +32,7 @@ describeEachAdapter("multi-valued items", (adapter) => {
 
   beforeAll(async () => {
     db = await adapter.makeDb();
-    const { user } = await createUser(db, { name: "Owner" });
+    const { user } = await createUser(db, KEY_LOGIN_ON, { name: "Owner" });
     userId = user.id;
     const space = await createSpace(db, userId, { name: "S" });
     const bundle = await createBundle(db, userId, space.id, {

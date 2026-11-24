@@ -38,6 +38,7 @@ const USER_ROW = {
   external_id: "ext-ada",
   denied_capabilities: '["manage_keys"]',
   email: "ada@example.com",
+  provider_login_only: 1,
   created_at: "2026-01-01T00:00:00Z",
 };
 

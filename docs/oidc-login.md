@@ -8,7 +8,8 @@ Core serves a few pages itself, and on each one a person decides something:
 - a service's secret form (`/w/secret-input`): enter a secret.
 
 Without configuration the person logs in on these pages by pasting a full
-user access key, as before. The operator can also configure one or more
+user access key, as before. With a provider configured, the operator can also
+switch key login off ([key-login.md](key-login.md)). The operator can also configure one or more
 **OpenID Connect providers** (Google, Microsoft Entra ID, Okta, Keycloak,
 Auth0, or an operator's own). Core is then a plain OIDC client of each one.
 It holds no passwords, sends no email and keeps no browser session. Each page
@@ -124,10 +125,16 @@ again. The provider's own session makes that a quick redirect.
   carry a company address without belonging to that company's Workspace. So
   for Google (`https://accounts.google.com`), a domain entry also needs the
   ID token's `hd` claim to name that domain. The new user gets a personal space
-  and **no access key**; they can make one later, e.g. for the CLI. The
-  allowlist only decides who may create an account. After that the user is
-  recognised by their identity.
+  and **no access key**. The allowlist only decides who may create an account.
+  After that the user is recognised by their identity.
 - Anyone else sees "There is no Yap account for this login."
+
+A user a provider login created or claimed is set to **provider login only**
+([key-login.md](key-login.md)): their access keys are refused and none can be
+made for them, and claiming an invite deletes the OAuth grants the invite's
+keys had authorized. To give such a user a key, for the CLI say, the sysadmin
+clears the flag (`PATCH /v1/users/:id {"providerLoginOnly": false}`) and then
+issues one.
 
 `users.email` is nullable and not unique. It is used only for invite and
 allowlist matching.
@@ -163,14 +170,15 @@ host's sandboxed frame, where a provider redirect cannot work. There, each
 "Continue with {label}" link opens the start URL in a tab of its own
 (`target="_blank"`). The login and the decision happen in that top-level tab.
 The widget learns the providers from the server (`logins` in the view
-response), never from its data. Key login keeps working in the frame.
+response), never from its data. Key login keeps working in the frame, unless
+the operator switched it off.
 
 ## Not here
 
-- **Switching key login off**, instance-wide or per user, is a separate change.
-  The pages already lead with the providers, and what a page offers comes from
-  one function, `loginOptions` in `src/core/oidc.ts` (`keyLogin`). A later
-  switch hides the key field there.
+- **Switching key login off**, instance-wide or per user, is in
+  [key-login.md](key-login.md). What a page offers comes from one function,
+  `loginOptions` in `src/core/oidc.ts`; its `keyLogin` is false where key login
+  is off for the instance.
 - **Re-checking the provider on refresh** (keeping its refresh token) is not
   done. The grant lifetime bounds how long a closed provider account keeps
   access.

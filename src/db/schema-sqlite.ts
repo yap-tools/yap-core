@@ -30,6 +30,10 @@ export const users = sqliteTable(
     // login to an invite and to check the sign-up allowlist; never to
     // recognise a returning user (see user_identities). Not unique.
     email: text("email"),
+    // 1: this user logs in only through a login provider. Their access keys
+    // are refused everywhere and none can be made for them (core/keyLogin.ts).
+    // Set by the sysadmin, and on for users a provider login created.
+    providerLoginOnly: integer("provider_login_only").notNull().default(0),
     createdAt: text("created_at").notNull(),
   },
   (t) => [uniqueIndex("users_external_id_idx").on(t.externalId), index("users_email_idx").on(t.email)],

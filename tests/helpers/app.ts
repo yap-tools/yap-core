@@ -80,3 +80,6 @@ export async function bootTestApp(
     },
   };
 }
+
+/** The key-login settings of an instance with key login on and no providers: what core functions taking a KeyLoginConfig need in a test. */
+export const KEY_LOGIN_ON = { keyLogin: true, oidc: { providers: [], signup: false, allow: [] } };

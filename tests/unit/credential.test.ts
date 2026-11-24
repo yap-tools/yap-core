@@ -10,11 +10,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bearerToken, resolveCredential, scopeOf } from "../../src/core/credential.js";
 import { issueKeyForUser } from "../../src/core/keys.js";
-import { createUser } from "../../src/core/users.js";
+import { createUser, updateUser } from "../../src/core/users.js";
 import { OAUTH_ACCESS_TOKEN_PREFIX } from "../../src/crypto.js";
 import { createDb, type Db } from "../../src/db/index.js";
 
-const config = { sysadminKey: "yap_sys_test_sysadmin_key" };
+const oidc = { providers: [], signup: false, allow: [] };
+const config = { sysadminKey: "yap_sys_test_sysadmin_key", keyLogin: true, oidc };
 
 let db: Db;
 let userId: string;
@@ -23,7 +24,7 @@ let accessKey: string;
 beforeAll(async () => {
   db = await createDb({ dialect: "sqlite", path: ":memory:" });
   await db.migrate();
-  const created = await createUser(db, { name: "ada" });
+  const created = await createUser(db, config, { name: "ada" });
   userId = created.user.id;
   accessKey = created.initialKey.key;
 });
@@ -66,7 +67,7 @@ describe("resolveCredential", () => {
   });
 
   it("a scoped key carries the key context to run under: its id and scope", async () => {
-    const scoped = await issueKeyForUser(db, userId, "agent", { role: "read-only" });
+    const scoped = await issueKeyForUser(db, config, userId, "agent", { role: "read-only" });
     const outcome = await resolveCredential(db, config, scoped.key);
     expect(outcome).toEqual({
       kind: "user",
@@ -77,7 +78,7 @@ describe("resolveCredential", () => {
   });
 
   it("fails closed on a stored scope it cannot read: the key does not authenticate", async () => {
-    const scoped = await issueKeyForUser(db, userId, "corrupt", { role: "member" });
+    const scoped = await issueKeyForUser(db, config, userId, "corrupt", { role: "member" });
     const { accessKeys } = db.tables;
     for (const stored of ['{"role":"root"}', "not json", "null", '{"role":"member","spaces":["s"]}']) {
       await db.client.update(accessKeys).set({ scope: stored }).where(eq(accessKeys.id, scoped.id));
@@ -95,5 +96,33 @@ describe("resolveCredential", () => {
     expect(await resolveCredential(db, config, `${OAUTH_ACCESS_TOKEN_PREFIX}unknown`)).toEqual({
       kind: "invalid-token",
     });
+  });
+
+  it("with key login off for the instance, refuses every key the same way, valid or made up", async () => {
+    const off = { ...config, keyLogin: false };
+    for (const presented of [accessKey, "yap_nope"]) {
+      expect(await resolveCredential(db, off, presented)).toEqual({
+        kind: "key-refused",
+        reason: "key-login-off",
+        message: "Access keys can't be used on this instance. Connect with a login provider.",
+      });
+    }
+    // The sysadmin key keeps its own lane.
+    expect(await resolveCredential(db, off, config.sysadminKey)).toEqual({ kind: "sysadmin" });
+  });
+
+  it("refuses the keys of a provider-login-only user, and only theirs", async () => {
+    const other = await createUser(db, config, { name: "grace" });
+    await updateUser(db, userId, { providerLoginOnly: true });
+    try {
+      expect(await resolveCredential(db, config, accessKey)).toMatchObject({
+        kind: "key-refused",
+        reason: "provider-login-only",
+      });
+      expect(await resolveCredential(db, config, other.initialKey.key)).toEqual({ kind: "user", userId: other.user.id });
+    } finally {
+      await updateUser(db, userId, { providerLoginOnly: false });
+    }
+    expect(await resolveCredential(db, config, accessKey)).toEqual({ kind: "user", userId });
   });
 });
