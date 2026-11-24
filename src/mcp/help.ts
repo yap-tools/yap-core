@@ -53,8 +53,9 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   to paste a secret into the chat either. Instead call secret_request for the
   paths you need: it returns a one-off form (a secret-input widget, and an
   origin_url to give the user) whose password fields go straight to the
-  server; the user saves it with their own full access key, so you cannot fill
-  it in yourself. You see the paths, their labels and whether each is set, never a
+  server; the user saves it with their own login (a login provider the
+  operator configured, or a full access key), so you cannot fill it in
+  yourself. You see the paths, their labels and whether each is set, never a
   value. The form takes one submission and expires. get_service shows an
   author the settings, pins and secretsSet; read it before update_service,
   whose settings replace the stored ones (a secret is kept while the object
@@ -73,8 +74,9 @@ A bundle holds docs, item-types (schemas with items), static files, and services
   key count as approved; with a scoped key they wait like yours do. Enter the secrets first, then call approval_request and give the
   user its page (a service-approve widget, or origin_url): it shows where
   data goes, the actions, params, pins, settings and which secrets are set,
-  and the person approves by logging in with one of their full access keys while
-  holding edit_services. The link alone is not enough, and an OAuth token or
+  and the person approves by logging in, through a login provider the operator
+  configured or with one of their full access keys, while holding
+  edit_services. The link alone is not enough, and an OAuth token or
   a scoped access key is never accepted, so an agent connected over OAuth or
   with a scoped key cannot approve its own service. One known limit: an
   agent that holds a full access key itself (a key pasted into its MCP

@@ -3,8 +3,12 @@
  * authority: dynamic client registration (public clients, PKCE mandatory),
  * authorization codes minted at the consent screen against an access key,
  * opaque hashed tokens, rotating refresh tokens with reuse detection, and
- * per-client grants ("connected apps") bound to the authorizing key so that
- * revoking the key kills every delegation made with it.
+ * per-client grants ("connected apps"). A grant authorized with an access key
+ * is bound to it, so revoking the key kills every delegation made with it. A
+ * grant authorized after a provider login (oidc.ts) belongs to the user
+ * directly: it ends when disconnected, when the sysadmin revokes it, when the
+ * user is deleted, or at its fixed `expiresAt`, counted from its creation and
+ * never extended by refresh.
  *
  * A token is never more powerful than its key: authorization is always
  * `live grants ∧ scope mask ∧ resource restriction` (see capabilities.ts),
@@ -24,6 +28,7 @@ import type { Db } from "../db/index.js";
 import { requireAccountCapability } from "./accountCapabilities.js";
 import { assertCanManageCredentials, isTokenRole, type TokenAuth, type TokenScope } from "./authScope.js";
 import { notFound } from "./errors.js";
+import { getUser } from "./users.js";
 import { newId, nowIso } from "./util.js";
 
 /** RFC 6749-shaped error; the OAuth endpoints format it per the RFC instead
@@ -181,10 +186,13 @@ export async function mintAuthCode(
   input: {
     clientId: string;
     userId: string;
-    keyId: string;
+    /** The access key logged in with; null after a provider login. */
+    keyId: string | null;
     scope: TokenScope;
     codeChallenge: string;
     redirectUri: string;
+    /** When the grant this code becomes must end (provider logins); null = until revoked. */
+    grantExpiresAt?: string | null;
   },
 ): Promise<string> {
   const { oauthCodes } = db.tables;
@@ -201,6 +209,7 @@ export async function mintAuthCode(
     codeChallenge: input.codeChallenge,
     redirectUri: input.redirectUri,
     expiresAt: isoIn(config.oauthCodeTtlSeconds),
+    grantExpiresAt: input.grantExpiresAt ?? null,
   });
   return code;
 }
@@ -215,18 +224,30 @@ export interface TokenResponse {
   scope: string;
 }
 
-async function issueTokenPair(db: Db, config: YapConfig, grantId: string, scope: TokenScope): Promise<TokenResponse> {
+/** The earlier of a token's own lifetime and its grant's end. */
+function clampTo(iso: string, grantExpiresAt: string | null): string {
+  return grantExpiresAt !== null && grantExpiresAt < iso ? grantExpiresAt : iso;
+}
+
+async function issueTokenPair(
+  db: Db,
+  config: YapConfig,
+  grantId: string,
+  scope: TokenScope,
+  grantExpiresAt: string | null,
+): Promise<TokenResponse> {
   const { oauthTokens } = db.tables;
   const accessToken = generateSecret(OAUTH_ACCESS_TOKEN_PREFIX);
   const refreshToken = generateSecret(OAUTH_REFRESH_TOKEN_PREFIX);
   const now = nowIso();
+  const accessExpiresAt = clampTo(isoIn(config.oauthAccessTokenTtlSeconds), grantExpiresAt);
   await db.client.insert(oauthTokens).values([
     {
       id: newId(),
       tokenHash: hashKey(accessToken),
       grantId,
       kind: "access",
-      expiresAt: isoIn(config.oauthAccessTokenTtlSeconds),
+      expiresAt: accessExpiresAt,
       revokedAt: null,
     },
     {
@@ -234,7 +255,7 @@ async function issueTokenPair(db: Db, config: YapConfig, grantId: string, scope:
       tokenHash: hashKey(refreshToken),
       grantId,
       kind: "refresh",
-      expiresAt: isoIn(config.oauthRefreshTokenTtlSeconds),
+      expiresAt: clampTo(isoIn(config.oauthRefreshTokenTtlSeconds), grantExpiresAt),
       revokedAt: null,
     },
   ]);
@@ -243,7 +264,7 @@ async function issueTokenPair(db: Db, config: YapConfig, grantId: string, scope:
   return {
     access_token: accessToken,
     token_type: "Bearer",
-    expires_in: config.oauthAccessTokenTtlSeconds,
+    expires_in: Math.max(0, Math.floor((Date.parse(accessExpiresAt) - Date.now()) / 1000)),
     refresh_token: refreshToken,
     scope: formatScope(scope),
   };
@@ -279,8 +300,9 @@ export async function exchangeAuthCode(
     scope: row.scope,
     createdAt: now,
     lastUsedAt: now,
+    expiresAt: row.grantExpiresAt,
   });
-  return issueTokenPair(db, config, grantId, scope);
+  return issueTokenPair(db, config, grantId, scope, row.grantExpiresAt);
 }
 
 /** Refresh rotation. A rotated (revoked) refresh token presented again is
@@ -300,6 +322,7 @@ export async function refreshTokens(
       grantId: oauthGrants.id,
       clientId: oauthGrants.clientId,
       scope: oauthGrants.scope,
+      grantExpiresAt: oauthGrants.expiresAt,
     })
     .from(oauthTokens)
     .innerJoin(oauthGrants, eq(oauthTokens.grantId, oauthGrants.id))
@@ -311,9 +334,12 @@ export async function refreshTokens(
     await db.client.delete(oauthGrants).where(eq(oauthGrants.id, row.grantId));
     throw new OAuthError("invalid_grant", "refresh token reuse detected; the authorization has been revoked");
   }
+  if (row.grantExpiresAt !== null && isExpired(row.grantExpiresAt)) {
+    throw new OAuthError("invalid_grant", "this authorization has reached its maximum lifetime: connect the app again");
+  }
   if (isExpired(row.expiresAt)) throw new OAuthError("invalid_grant", "refresh token expired");
   await db.client.update(oauthTokens).set({ revokedAt: nowIso() }).where(eq(oauthTokens.id, row.tokenId));
-  return issueTokenPair(db, config, row.grantId, JSON.parse(row.scope));
+  return issueTokenPair(db, config, row.grantId, JSON.parse(row.scope), row.grantExpiresAt);
 }
 
 /**
@@ -344,12 +370,16 @@ export async function authenticateToken(db: Db, presented: string): Promise<Toke
       grantId: oauthGrants.id,
       userId: oauthGrants.userId,
       scope: oauthGrants.scope,
+      grantExpiresAt: oauthGrants.expiresAt,
     })
     .from(oauthTokens)
     .innerJoin(oauthGrants, eq(oauthTokens.grantId, oauthGrants.id))
     .where(eq(oauthTokens.tokenHash, hashKey(presented)));
   const row = rows[0];
   if (!row || row.kind !== "access" || row.revokedAt || isExpired(row.expiresAt)) return null;
+  // Access tokens are clamped to the grant's end when issued; this covers a
+  // grant whose end was moved earlier since.
+  if (row.grantExpiresAt !== null && isExpired(row.grantExpiresAt)) return null;
   await db.client.update(oauthGrants).set({ lastUsedAt: nowIso() }).where(eq(oauthGrants.id, row.grantId));
   return { source: "token", userId: row.userId, grantId: row.grantId, scope: JSON.parse(row.scope) };
 }
@@ -362,11 +392,17 @@ export interface GrantInfo {
   scope: string;
   createdAt: string;
   lastUsedAt: string;
+  /** When the grant ends by itself (a provider login's maximum lifetime); null = until revoked. */
+  expiresAt: string | null;
 }
 
 export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[]> {
   assertCanManageCredentials();
   await requireAccountCapability(db, userId, "manage_keys");
+  return selectGrants(db, userId);
+}
+
+async function selectGrants(db: Db, userId: string): Promise<GrantInfo[]> {
   const { oauthGrants, oauthClients } = db.tables;
   const rows = await db.client
     .select({
@@ -376,6 +412,7 @@ export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[
       scope: oauthGrants.scope,
       createdAt: oauthGrants.createdAt,
       lastUsedAt: oauthGrants.lastUsedAt,
+      expiresAt: oauthGrants.expiresAt,
     })
     .from(oauthGrants)
     .innerJoin(oauthClients, eq(oauthGrants.clientId, oauthClients.id))
@@ -386,6 +423,7 @@ export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[
     scope: formatScope(JSON.parse(r.scope)),
     createdAt: r.createdAt,
     lastUsedAt: r.lastUsedAt,
+    expiresAt: r.expiresAt,
   }));
 }
 
@@ -394,6 +432,22 @@ export async function listUserGrants(db: Db, userId: string): Promise<GrantInfo[
 export async function revokeUserGrant(db: Db, userId: string, grantId: string): Promise<void> {
   assertCanManageCredentials();
   await requireAccountCapability(db, userId, "manage_keys");
+  await deleteGrant(db, userId, grantId);
+}
+
+/** The sysadmin lane: any user's connected apps, whatever the user's own account capabilities. */
+export async function listGrantsForUser(db: Db, userId: string): Promise<GrantInfo[]> {
+  await getUser(db, userId);
+  return selectGrants(db, userId);
+}
+
+/** The sysadmin lane: disconnects one of any user's apps. */
+export async function revokeGrantForUser(db: Db, userId: string, grantId: string): Promise<void> {
+  await getUser(db, userId);
+  await deleteGrant(db, userId, grantId);
+}
+
+async function deleteGrant(db: Db, userId: string, grantId: string): Promise<void> {
   const { oauthGrants } = db.tables;
   const rows = await db.client
     .select({ id: oauthGrants.id })
@@ -406,7 +460,8 @@ export async function revokeUserGrant(db: Db, userId: string, grantId: string): 
 /**
  * Key revocation cascade: every delegation authorized with the key dies —
  * including an authorization code not yet exchanged, which would otherwise
- * become a grant on a key that no longer exists to be revoked.
+ * become a grant on a key that no longer exists to be revoked. Grants made
+ * after a provider login carry no key and are untouched.
  */
 export async function revokeGrantsForKey(db: Db, keyId: string): Promise<void> {
   const { oauthCodes, oauthGrants } = db.tables;

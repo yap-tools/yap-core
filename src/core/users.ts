@@ -1,7 +1,8 @@
 /**
- * User provisioning (sysadmin-key REST operations). Every user receives a
- * personal space at provisioning — undeletable, unrenamable, unshareable —
- * and an initial access key whose secret is returned exactly once.
+ * User provisioning (sysadmin-key REST operations, and sign-up on a first
+ * provider login). Every user receives a personal space at provisioning —
+ * undeletable, unrenamable, unshareable — and, unless the caller asks
+ * otherwise, an initial access key whose secret is returned exactly once.
  */
 import { and, asc, eq, inArray } from "drizzle-orm";
 
@@ -32,6 +33,13 @@ export interface User {
    * unless the sysadmin set it; see accountCapabilities.ts.
    */
   deniedCapabilities: AccountCapability[];
+  /**
+   * An address the operator gave the user, or the one a provider vouched for
+   * at sign-up; lowercased. Only matches a first provider login to an invite
+   * (a user with an email and no linked identity yet); a returning user is
+   * recognised by their linked identity, never by this. Not unique.
+   */
+  email: string | null;
   createdAt: string;
 }
 
@@ -53,19 +61,39 @@ function toUser(row: UserRow): User {
     name: row.name,
     externalId: row.externalId,
     deniedCapabilities: parseDeniedCapabilities(row.deniedCapabilities),
+    email: row.email,
     createdAt: row.createdAt,
   };
 }
 
 /** A user as `createUser` reports one that already existed: no key. */
 export interface ExistingUser {
+  created: false;
   user: User;
   personalSpaceId: string;
 }
 
-export interface CreatedUser extends ExistingUser {
-  /** Secret access key — shown once, stored only as a hash. */
-  initialKey: { id: string; name: string; key: string };
+export interface CreatedUser {
+  created: true;
+  user: User;
+  personalSpaceId: string;
+  /** Secret access key — shown once, stored only as a hash. Present only
+   * when one was minted (`initialKey: true`, the default). */
+  initialKey?: { id: string; name: string; key: string };
+}
+
+const EMAIL_MAX_LENGTH = 254;
+
+/** A plausible address, lowercased; the provider, not Core, proves it. */
+export function checkEmail(raw: unknown): string {
+  if (typeof raw !== "string") throw invalid("email must be a string");
+  const email = raw.trim().toLowerCase();
+  const at = email.indexOf("@");
+  if (at <= 0 || at !== email.lastIndexOf("@") || at === email.length - 1 || /\s/.test(email)) {
+    throw invalid("email must be an address like name@example.com");
+  }
+  if (email.length > EMAIL_MAX_LENGTH) throw invalid(`email must be at most ${EMAIL_MAX_LENGTH} characters`);
+  return email;
 }
 
 const EXTERNAL_ID_MAX_LENGTH = 255;
@@ -79,28 +107,37 @@ function checkExternalId(externalId: string): string {
 }
 
 /**
- * Creates a user with their personal space and initial key, as one
- * transaction. With an `externalId` the call is idempotent: if a user already
- * carries it, nothing is written and that user comes back without a key — the
- * `name` and `deniedCapabilities` given on the repeated call are ignored.
+ * Creates a user with their personal space and, by default, an initial key,
+ * as one transaction. `initialKey: false` creates the user without one (sign-up
+ * on a first provider login: such a user logs in through their provider and
+ * may make a key later). With an `externalId` the call is idempotent: if a
+ * user already carries it, nothing is written and that user comes back with
+ * `created: false` and no key — the `name`, `email`, `deniedCapabilities` and
+ * options given on the repeated call are ignored.
  */
+type CreateUserInput = { name: string; externalId?: string | null; deniedCapabilities?: unknown; email?: string | null };
 export async function createUser(
   db: Db,
-  input: { name: string; externalId?: undefined; deniedCapabilities?: unknown },
-): Promise<CreatedUser>;
+  input: CreateUserInput & { externalId?: undefined },
+  opts?: { initialKey?: true },
+): Promise<CreatedUser & { initialKey: NonNullable<CreatedUser["initialKey"]> }>;
 export async function createUser(
   db: Db,
-  input: { name: string; externalId?: string | null; deniedCapabilities?: unknown },
+  input: CreateUserInput,
+  opts?: { initialKey?: boolean },
 ): Promise<CreatedUser | ExistingUser>;
 export async function createUser(
   db: Db,
-  input: { name: string; externalId?: string | null; deniedCapabilities?: unknown },
+  input: CreateUserInput,
+  opts: { initialKey?: boolean } = {},
 ): Promise<CreatedUser | ExistingUser> {
   const name = input.name?.trim();
   if (!name) throw invalid("user name is required");
   const externalId = input.externalId == null ? null : checkExternalId(input.externalId);
   const deniedCapabilities =
     input.deniedCapabilities === undefined ? [] : checkDeniedCapabilities(input.deniedCapabilities);
+  const email = input.email == null ? null : checkEmail(input.email);
+  const mintKey = opts.initialKey !== false;
   const { users, spaces, accessKeys } = db.tables;
 
   return db.transaction(function* (tx) {
@@ -109,7 +146,7 @@ export async function createUser(
     // loop covers the user it lost to being deleted before it could be read.
     for (let attempt = 0; attempt < 3; attempt++) {
       const now = nowIso();
-      const user: User = { id: newId(), name, externalId, deniedCapabilities, createdAt: now };
+      const user: User = { id: newId(), name, externalId, deniedCapabilities, email, createdAt: now };
       const inserted: UserRow[] = yield tx
         .insert(users)
         .values({ ...user, deniedCapabilities: serializeDeniedCapabilities(deniedCapabilities) })
@@ -126,7 +163,7 @@ export async function createUser(
         if (!found) continue;
         // Only a row written around this function (a raw insert) lacks one.
         if (!found.personalSpaceId) throw new Error(`user ${found.user.id} has no personal space`);
-        return { user: toUser(found.user), personalSpaceId: found.personalSpaceId };
+        return { created: false, user: toUser(found.user), personalSpaceId: found.personalSpaceId };
       }
 
       const personalSpaceId = newId();
@@ -142,6 +179,8 @@ export async function createUser(
         updatedAt: now,
       });
 
+      if (!mintKey) return { created: true, user, personalSpaceId };
+
       const key = generateAccessKey();
       const keyId = newId();
       yield tx.insert(accessKeys).values({
@@ -154,7 +193,7 @@ export async function createUser(
         revokedAt: null,
       });
 
-      return { user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
+      return { created: true, user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
     }
     throw new Error(`could not create or find the user with externalId ${externalId}`);
   });
@@ -187,19 +226,27 @@ export async function getUser(db: Db, userId: string): Promise<User> {
 
 /**
  * Sets what the sysadmin may change about a user: the deny list of
- * account-level capabilities, replaced whole (an empty list clears it). It
- * binds the user's very next operation. Validation runs before the write, so
- * a rejected list leaves the stored one untouched.
+ * account-level capabilities, replaced whole (an empty list clears it), and
+ * the email address (null clears it). Setting an email on a user with no
+ * linked identity invites them: the first provider login with that verified
+ * address claims the account. Binds the user's very next operation.
+ * Validation runs before the write, so a rejected patch leaves the row untouched.
  */
-export async function updateUser(db: Db, userId: string, patch: { deniedCapabilities?: unknown }): Promise<User> {
-  if (patch.deniedCapabilities === undefined) throw invalid("nothing to update: deniedCapabilities is required");
-  const deniedCapabilities = checkDeniedCapabilities(patch.deniedCapabilities);
+export async function updateUser(
+  db: Db,
+  userId: string,
+  patch: { deniedCapabilities?: unknown; email?: unknown },
+): Promise<User> {
+  if (patch.deniedCapabilities === undefined && patch.email === undefined) {
+    throw invalid("nothing to update: give deniedCapabilities or email");
+  }
+  const set: { deniedCapabilities?: string; email?: string | null } = {};
+  if (patch.deniedCapabilities !== undefined) {
+    set.deniedCapabilities = serializeDeniedCapabilities(checkDeniedCapabilities(patch.deniedCapabilities));
+  }
+  if (patch.email !== undefined) set.email = patch.email === null ? null : checkEmail(patch.email);
   const { users } = db.tables;
-  const updated = await db.client
-    .update(users)
-    .set({ deniedCapabilities: serializeDeniedCapabilities(deniedCapabilities) })
-    .where(eq(users.id, userId))
-    .returning();
+  const updated = await db.client.update(users).set(set).where(eq(users.id, userId)).returning();
   if (updated.length === 0) throw notFound("user", userId);
   return toUser(updated[0]!);
 }

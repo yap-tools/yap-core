@@ -44,7 +44,9 @@ import { signToken } from "../crypto.js";
 import { getBundleContext, hasBundleCapability, requireBundleCapability } from "./bundles.js";
 import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
-import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "./keys.js";
+import { SCOPED_KEY_LOGIN_REFUSED } from "./keys.js";
+import { loginOptions, type LoginOptions } from "./oidc.js";
+import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "./personLogin.js";
 import { isSplit, readParts, secretsSet, type ConfigObject } from "./serviceConfig.js";
 import {
   allowedActions,
@@ -238,6 +240,10 @@ export interface ApprovalWidgetData {
 export interface ApprovalPageData extends ApprovalWidgetData {
   view: ApprovalView;
   fingerprint: string;
+  /** How the page lets the person log in. */
+  logins: LoginOptions;
+  /** Present only on the page rendered after a provider login: who logged in, and the ticket the decision carries. */
+  login?: { user: { name: string }; provider: { label: string }; ticket: string };
 }
 
 function pageToken(config: YapConfig, requestId: string, ttlSeconds: number): string {
@@ -306,10 +312,10 @@ async function openRequest(env: ServiceEnv, requestId: string): Promise<RequestR
 export async function approvalView(
   env: ServiceEnv,
   requestId: string,
-): Promise<{ view: ApprovalView; fingerprint: string }> {
+): Promise<{ view: ApprovalView; fingerprint: string; logins: LoginOptions }> {
   const request = await openRequest(env, requestId);
   const { view, fingerprint } = await loadView(env, request.serviceId);
-  return { view, fingerprint };
+  return { view, fingerprint, logins: loginOptions(env.config) };
 }
 
 /** The data an origin-hosted approve page is served with (token checked by the caller). */
@@ -317,10 +323,18 @@ export async function approvalPageData(env: ServiceEnv, requestId: string): Prom
   const request = await openRequest(env, requestId);
   const { view, fingerprint } = await loadView(env, request.serviceId);
   const remaining = Math.max(1, Math.floor((Date.parse(request.expiresAt) - Date.now()) / 1000));
-  return { request_id: requestId, token: pageToken(env.config, requestId, remaining), view, fingerprint };
+  return {
+    request_id: requestId,
+    token: pageToken(env.config, requestId, remaining),
+    view,
+    fingerprint,
+    logins: loginOptions(env.config),
+  };
 }
 
-const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+const LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
+  "login-expired": LOGIN_EXPIRED,
+  "two-logins": TWO_LOGINS,
   missing: "Enter your access key to approve.",
   sysadmin: "The sysadmin key cannot approve a service: enter one of your user access keys.",
   "oauth-token": "An app's token cannot approve a service: enter one of your user access keys.",
@@ -330,15 +344,17 @@ const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
 
 /**
  * A decision on the page (token checked by the caller). Reject uses the page
- * up and changes nothing else. Approve logs the person in, checks they may,
- * checks the service is still what the page showed, and marks it approved.
- * A refused approval (a wrong key, a missing capability, a changed service)
- * leaves the page open.
+ * up and changes nothing else. Approve checks the service is still what the
+ * page showed, logs the person in (an access key, or the ticket of a provider
+ * login made for this page), checks they may, and marks it approved. A refused
+ * approval (a wrong key, a missing capability, a changed service) leaves the
+ * page open; a provider login is spent by the attempt, so it is checked last
+ * but one, after the service, and the person logs in again after a refusal.
  */
 export async function decideApproval(
   env: ServiceEnv,
   requestId: string,
-  input: { decision: unknown; accessKey?: unknown; fingerprint?: unknown },
+  input: { decision: unknown; accessKey?: unknown; loginTicket?: unknown; fingerprint?: unknown },
 ): Promise<{ decision: "approved" | "rejected"; service: { id: string; name: string } }> {
   const { db, config } = env;
   const request = await openRequest(env, requestId);
@@ -365,17 +381,21 @@ export async function decideApproval(
   }
   if (input.decision !== "approve") throw invalid('decision must be "approve" or "reject"');
 
-  const login = await pageLogin(db, config.sysadminKey, typeof input.accessKey === "string" ? input.accessKey : "");
+  const { def, row, fingerprint } = await loadView(env, request.serviceId);
+  if (input.fingerprint !== fingerprint) {
+    throw new YapError("conflict", "the service changed since this page was opened: reload it and check it again");
+  }
+  const login = await identifyPerson(
+    { db, config },
+    { accessKey: input.accessKey, loginTicket: input.loginTicket },
+    { purpose: "service-approve", context: { request_id: requestId } },
+  );
   if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, login.userId, "edit_services", ctx))) {
     throw forbidden("approving a service needs edit_services on its bundle, which this account does not hold");
   }
-  const { def, row, fingerprint } = await loadView(env, request.serviceId);
   await requireWriteCapabilities(db, login.userId, def, ctx);
-  if (input.fingerprint !== fingerprint) {
-    throw new YapError("conflict", "the service changed since this page was opened: reload it and check it again");
-  }
 
   await db.transaction(function* (tx) {
     const claimed: unknown[] = yield tx

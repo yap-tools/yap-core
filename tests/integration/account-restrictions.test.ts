@@ -201,10 +201,12 @@ describeEachAdapter("account restrictions", (adapter) => {
     const user = await newUser("NoPage");
     await connectApp(app.baseUrl, user.key, "role:member");
     const grantId = (await user.client.get("/v1/oauth/grants")).body.data[0].id as string;
-    await restrict(user.id, ["manage_keys"]);
-
     const post = (path: string, form: Record<string, string>) =>
       fetch(`${app.baseUrl}${path}`, { method: "POST", body: new URLSearchParams(form) });
+    // A list shown before the restriction: its session still cannot disconnect after it.
+    const before = await (await post("/oauth/connections", { access_key: user.key })).text();
+    const session = /name="session" value="([^"]+)"/.exec(before)![1]!;
+    await restrict(user.id, ["manage_keys"]);
 
     const list = await post("/oauth/connections", { access_key: user.key });
     expect(list.status).toBe(403);
@@ -212,7 +214,7 @@ describeEachAdapter("account restrictions", (adapter) => {
     expect(listHtml).toContain("manage_keys is denied");
     expect(listHtml).not.toContain(grantId);
 
-    const disconnect = await post("/oauth/connections/disconnect", { access_key: user.key, grant_id: grantId });
+    const disconnect = await post("/oauth/connections/disconnect", { session, grant_id: grantId });
     expect(disconnect.status).toBe(403);
     expect(await disconnect.text()).toContain("manage_keys is denied");
 

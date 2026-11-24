@@ -475,15 +475,54 @@ describeEachAdapter("oauth", (adapter) => {
       expect(listHtml).toContain("Test App");
       expect(listHtml).toContain("Disconnect");
 
+      // The disconnect forms carry a short-lived signed session, never the key.
+      expect(listHtml).not.toContain(aliceKey);
+      const session = /name="session" value="([^"]+)"/.exec(listHtml)![1]!;
+
       const grants = await alice.get("/v1/oauth/grants");
       const grant = grants.body.data.find((g: any) => g.client.id === clientId);
       const disconnected = await fetch(`${app.baseUrl}/oauth/connections/disconnect`, {
         method: "POST",
-        body: new URLSearchParams({ access_key: aliceKey, grant_id: grant.id }),
+        body: new URLSearchParams({ session, grant_id: grant.id }),
       });
       expect(disconnected.status).toBe(200);
-      expect(await disconnected.text()).toContain("tokens are revoked");
+      const disconnectedHtml = await disconnected.text();
+      expect(disconnectedHtml).toContain("tokens are revoked");
+      // The session is handed back as it was, never renewed.
+      expect(/name="session" value="([^"]+)"/.exec(disconnectedHtml)?.[1] ?? session).toBe(session);
       expect((await apiClient(app.baseUrl, access_token).get("/v1/spaces")).status).toBe(401);
+    });
+
+    it("a list's session dies with the key it logged in with", async () => {
+      const spare = await alice.post("/v1/keys", { name: "spare-for-list" });
+      await connectApp(app.baseUrl, aliceKey); // so the list has a form to carry the session
+      const listHtml = await (
+        await fetch(`${app.baseUrl}/oauth/connections`, { method: "POST", body: new URLSearchParams({ access_key: spare.body.key }) })
+      ).text();
+      const session = /name="session" value="([^"]+)"/.exec(listHtml)![1]!;
+      const live = await fetch(`${app.baseUrl}/oauth/connections/disconnect`, {
+        method: "POST",
+        body: new URLSearchParams({ session, grant_id: "no-such-grant" }),
+      });
+      expect(live.status).toBe(200);
+      await alice.delete(`/v1/keys/${spare.body.id}`);
+      const dead = await fetch(`${app.baseUrl}/oauth/connections/disconnect`, {
+        method: "POST",
+        body: new URLSearchParams({ session, grant_id: "no-such-grant" }),
+      });
+      expect(dead.status).toBe(401);
+    });
+
+    it("disconnect refuses a key, a forged session and no session", async () => {
+      const forms: Record<string, string>[] = [{ access_key: aliceKey }, { session: "forged.token" }, {}];
+      for (const form of forms) {
+        const res = await fetch(`${app.baseUrl}/oauth/connections/disconnect`, {
+          method: "POST",
+          body: new URLSearchParams({ ...form, grant_id: "x" }),
+        });
+        expect(res.status).toBe(401);
+        expect(await res.text()).toContain("This list has expired");
+      }
     });
 
     it("rejects invalid keys and the sysadmin key", async () => {
@@ -500,14 +539,12 @@ describeEachAdapter("oauth", (adapter) => {
   describe("scoped keys and connected apps", () => {
     it("the connections page refuses a scoped key with its own words", async () => {
       const scoped = await alice.post("/v1/keys", { name: "connections", scope: { role: "admin" } });
-      for (const path of ["/oauth/connections", "/oauth/connections/disconnect"]) {
-        const res = await fetch(`${app.baseUrl}${path}`, {
-          method: "POST",
-          body: new URLSearchParams({ access_key: scoped.body.key, grant_id: "x" }),
-        });
-        expect(res.status).toBe(401);
-        expect(await res.text()).toContain("This key is limited. Log in with a full key.");
-      }
+      const res = await fetch(`${app.baseUrl}/oauth/connections`, {
+        method: "POST",
+        body: new URLSearchParams({ access_key: scoped.body.key }),
+      });
+      expect(res.status).toBe(401);
+      expect(await res.text()).toContain("This key is limited. Log in with a full key.");
     });
 
     it("a scoped key can neither list nor disconnect apps; an admin token still can", async () => {

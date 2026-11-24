@@ -50,7 +50,9 @@ import { getBundleContext, hasBundleCapability, requireBundleCapability } from "
 import { describeDestinations, type DestinationView } from "./serviceApprovals.js";
 import type { DriverDefinition } from "./drivers/types.js";
 import { forbidden, invalid, unauthorized, YapError } from "./errors.js";
-import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "./keys.js";
+import { SCOPED_KEY_LOGIN_REFUSED } from "./keys.js";
+import { loginOptions, type LoginOptions } from "./oidc.js";
+import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "./personLogin.js";
 import {
   isSplit,
   mergeConfig,
@@ -111,6 +113,10 @@ export interface SecretFormData {
   submit_url: string;
   /** The form's own signed submit token, sent in the POST body. */
   token: string;
+  /** How the form lets the person log in; set when the server serves the form (secretPageData). */
+  logins?: LoginOptions;
+  /** Present only on the form rendered after a provider login: who logged in, and the ticket the submission carries. */
+  login?: { user: { name: string }; provider: { label: string }; ticket: string };
 }
 
 interface Loaded {
@@ -327,6 +333,7 @@ export async function secretPageData(env: ServiceEnv, requestId: string): Promis
     fields: fieldsFor(def, paths, secrets),
     destinations: destinationsFor(def, row, settings, paths),
     ...formUrls(env.config, requestId, remaining),
+    logins: loginOptions(env.config),
   };
 }
 
@@ -347,7 +354,9 @@ function checkValues(paths: string[], raw: unknown): Record<string, string> {
   return values;
 }
 
-const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+const LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
+  "login-expired": LOGIN_EXPIRED,
+  "two-logins": TWO_LOGINS,
   missing: "Enter your access key to save.",
   sysadmin: "The sysadmin key cannot enter a service's secrets: enter one of your user access keys.",
   "oauth-token": "An app's token cannot enter a service's secrets: enter one of your user access keys.",
@@ -357,21 +366,26 @@ const LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
 
 /**
  * A submission of the form (token checked by the caller): logs the person
- * in, sets the values given at the paths the form asked for, and uses the
- * form up. Returns the paths set and nothing else. A refused login leaves the
- * form open.
+ * in (an access key, or the ticket of a provider login made for this form),
+ * sets the values given at the paths the form asked for, and uses the form up.
+ * Returns the paths set and nothing else. A refused login leaves the form
+ * open; a provider login is spent by the attempt, so after any refusal the
+ * person logs in again.
  */
 export async function submitSecrets(
   env: ServiceEnv,
   requestId: string,
   rawValues: unknown,
-  accessKey?: unknown,
+  presented: { accessKey?: unknown; loginTicket?: unknown } = {},
 ): Promise<{ saved: true; paths: string[] }> {
   const { db, config } = env;
   const request = await openRequest(env, requestId);
   const values = checkValues(JSON.parse(request.paths) as string[], rawValues);
 
-  const login = await pageLogin(db, config.sysadminKey, typeof accessKey === "string" ? accessKey : "");
+  const login = await identifyPerson({ db, config }, presented, {
+    purpose: "secret-input",
+    context: { request_id: requestId },
+  });
   if (!login.ok) throw unauthorized(LOGIN_REFUSED[login.reason]);
   const ctx = await getBundleContext(db, request.bundleId);
   if (!(await hasBundleCapability(db, request.createdBy, "edit_services", ctx))) {

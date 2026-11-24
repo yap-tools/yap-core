@@ -237,6 +237,16 @@ export async function authenticateKey(db: Db, presentedKey: string): Promise<Aut
   return { userId: row.userId, keyId: row.keyId, scope };
 }
 
+/** Whether a user's key is still there and unrevoked (a page that logged in with it re-checks it). */
+export async function keyStillActive(db: Db, userId: string, keyId: string): Promise<boolean> {
+  const { accessKeys } = db.tables;
+  const rows = await db.client
+    .select({ id: accessKeys.id })
+    .from(accessKeys)
+    .where(and(eq(accessKeys.id, keyId), eq(accessKeys.userId, userId), isNull(accessKeys.revokedAt)));
+  return rows.length > 0;
+}
+
 /** Why a page login was refused, so each page can word it for its own reader. */
 export type PageLoginRefusal = "missing" | "sysadmin" | "oauth-token" | "scoped-key" | "invalid";
 
@@ -244,10 +254,11 @@ export type PageLoginRefusal = "missing" | "sysadmin" | "oauth-token" | "scoped-
 export const SCOPED_KEY_LOGIN_REFUSED = "This key is limited. Log in with a full key.";
 
 /**
- * The login a person gives on one of the pages Core serves itself: the OAuth
- * consent screen, the connected-apps page, the secret form and the service
- * approve page. Core has no passwords or sessions, so it is a user access key
- * pasted into the page. Refused: the sysadmin key (an operator credential, not
+ * The access-key login a person gives on one of the pages Core serves itself:
+ * the OAuth consent screen, the connected-apps page, the secret form and the
+ * service approve page. Core has no passwords or sessions, so it is a user
+ * access key pasted into the page — or, where the operator configured a login
+ * provider, a provider login instead (personLogin.ts puts the two together). Refused: the sysadmin key (an operator credential, not
  * a person), an OAuth token, which an app holds on a person's behalf, and a
  * scoped key, which a machine holds on a person's behalf — exactly what must
  * not be able to stand in for them here. (This is what stops an agent with a

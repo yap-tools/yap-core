@@ -1,8 +1,11 @@
 /**
  * The OAuth 2.1 front door: RFC 8414/9728 discovery, RFC 7591 dynamic client
- * registration, the authorize screen (the one interactive page Core ships —
- * it authenticates by access key; Core has no passwords), the token endpoint
- * (authorization code + PKCE, rotating refresh), and RFC 7009 revocation.
+ * registration, the authorize screen (it authenticates by access key, or by a
+ * login provider the operator configured; Core has no passwords), the token
+ * endpoint (authorization code + PKCE, rotating refresh), RFC 7009
+ * revocation, the connected-apps page, and the provider login round trip
+ * (`/oidc/<provider>/start` and `/callback`, see core/oidc.ts) for every page
+ * Core serves itself.
  *
  * Error shapes: the /oauth/* endpoints speak RFC 6749 ({ error,
  * error_description }); the /v1 grant-management routes speak Yap's envelope.
@@ -11,11 +14,28 @@ import type { Context } from "hono";
 
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
+import type { OAuthRole, OidcProviderConfig } from "../config.js";
+import { signToken, verifyToken } from "../crypto.js";
 import { requireAccountCapability } from "../core/accountCapabilities.js";
 import { YapError } from "../core/errors.js";
-import { pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "../core/keys.js";
+import { keyStillActive, pageLogin, SCOPED_KEY_LOGIN_REFUSED, type PageLoginRefusal } from "../core/keys.js";
 import * as oauth from "../core/oauth.js";
+import {
+  findProvider,
+  finishLogin,
+  LOGIN_TTL_SECONDS,
+  loginOptions,
+  OidcLoginError,
+  spendLoginTicket,
+  startLogin,
+  type FinishedLogin,
+  type LoginOptions,
+} from "../core/oidc.js";
+import { identifyPerson, LOGIN_EXPIRED, TWO_LOGINS, type PersonLoginRefusal } from "../core/personLogin.js";
+import { secretPageData } from "../core/secretRequests.js";
+import { approvalPageData } from "../core/serviceApprovals.js";
 import type { YapServer } from "../server.js";
+import { widgetHtml } from "../widgets/registry.js";
 
 function esc(v: unknown): string {
   return String(v ?? "")
@@ -71,6 +91,10 @@ const PAGE_STYLE = `
                   color: light-dark(#b3261e, #ff8a80); font-size: .8rem; padding: .35rem .7rem; flex: none; }
   .hint { font-size: .8rem; opacity: .65; margin-top: 1rem; }
   .hint a { color: inherit; }
+  .logins { display: flex; flex-direction: column; gap: .5rem; margin-top: 1.25rem; }
+  .logins button, .logins a { display: block; text-align: center; padding: .6rem; border-radius: 8px; font-size: .95rem;
+           text-decoration: none; background: light-dark(#1a1a1a, #ececec); color: light-dark(#fff, #161618); }
+  .or { font-size: .8rem; opacity: .65; margin: 1rem 0 0; text-align: center; }
 `;
 
 function page(title: string, body: string): string {
@@ -92,7 +116,7 @@ ${body}
 </html>`;
 }
 
-const ROLE_OPTIONS: Array<{ value: string; title: string; summary: string }> = [
+const ROLE_OPTIONS: Array<{ value: OAuthRole; title: string; summary: string }> = [
   { value: "read-only", title: "Read-only", summary: "Read items and files. No writes of any kind." },
   {
     value: "member",
@@ -105,6 +129,44 @@ const ROLE_OPTIONS: Array<{ value: string; title: string; summary: string }> = [
     summary: "Act fully as you, including managing access keys, roles, spaces, and connected apps.",
   },
 ];
+
+const ROLE_RANK: Record<OAuthRole, number> = { "read-only": 0, member: 1, admin: 2 };
+
+/** The roles the consent screen offers: all of them, or up to YAP_OAUTH_MAX_ROLE. */
+function offeredRoles(max: OAuthRole | undefined): typeof ROLE_OPTIONS {
+  return max === undefined ? ROLE_OPTIONS : ROLE_OPTIONS.filter((r) => ROLE_RANK[r.value] <= ROLE_RANK[max]);
+}
+
+/** A role no higher than the cap. */
+function capRole(role: OAuthRole, max: OAuthRole | undefined): OAuthRole {
+  return max !== undefined && ROLE_RANK[role] > ROLE_RANK[max] ? max : role;
+}
+
+/** The person a provider login identified, on the page rendered after it. */
+interface PageLogin {
+  userName: string;
+  providerLabel: string;
+  ticket: string;
+}
+
+/** "Continue with {label}" per provider. Consent submits its own form there;
+ * the connections page links. */
+function providerButtons(logins: LoginOptions, kind: "form" | { href: (id: string) => string }): string {
+  if (logins.providers.length === 0) return "";
+  const buttons = logins.providers.map((p) =>
+    kind === "form"
+      ? `<button type="submit" formaction="/oidc/${esc(p.id)}/start" formnovalidate>Continue with ${esc(p.label)}</button>`
+      : `<a href="${esc(kind.href(p.id))}">Continue with ${esc(p.label)}</a>`,
+  );
+  return `<div class="logins">
+      ${buttons.join("\n      ")}
+    </div>
+    <p class="or">Or use an access key</p>`;
+}
+
+function loggedInNote(login: PageLogin): string {
+  return `<p class="notice">Logged in as <strong>${esc(login.userName)}</strong> with ${esc(login.providerLabel)}.</p>`;
+}
 
 interface AuthorizeParams {
   clientId: string;
@@ -120,6 +182,10 @@ function consentPage(input: {
   params: AuthorizeParams;
   selectedRole: string;
   restrictionNote: string;
+  roles: typeof ROLE_OPTIONS;
+  logins: LoginOptions;
+  /** Set on the page rendered after a provider login: the decision then needs no key. */
+  login?: PageLogin;
   error?: string;
 }): string {
   const { params } = input;
@@ -130,10 +196,11 @@ function consentPage(input: {
     ["state", params.state],
     ["code_challenge", params.codeChallenge],
     ["code_challenge_method", params.codeChallengeMethod],
+    ...(input.login ? [["login_ticket", input.login.ticket]] : []),
   ]
     .map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`)
     .join("\n      ");
-  const roles = ROLE_OPTIONS.map(
+  const roles = input.roles.map(
     (role) => `<label class="role">
       <input type="radio" name="role" value="${esc(role.value)}"${role.value === input.selectedRole ? " checked" : ""}>
       <span><strong>${esc(role.title)}</strong> — ${esc(role.summary)}</span>
@@ -149,15 +216,16 @@ function consentPage(input: {
     ${roles}
     </fieldset>
     ${input.restrictionNote ? `<p class="restriction">${esc(input.restrictionNote)}</p>` : ""}
+    ${input.login ? loggedInNote(input.login) : `${providerButtons(input.logins, "form")}
     <label class="keylabel" for="key">Your access key</label>
-    <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>
+    <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>`}
     ${input.error ? `<p class="error">${esc(input.error)}</p>` : ""}
     <div class="actions">
       <button type="submit" name="decision" value="deny" class="quiet">Deny</button>
       <button type="submit" name="decision" value="approve" class="primary">Approve</button>
     </div>
   </form>
-  <p class="hint">Your key authenticates this approval and is never shared with the app — the app only receives
+  <p class="hint">Your ${input.login ? "login" : "key"} authenticates this approval and is never shared with the app — the app only receives
   tokens limited to the access selected above, revocable at any time on the
   <a href="/oauth/connections">connected apps page</a>.</p>`,
   );
@@ -172,13 +240,17 @@ function fmtWhen(iso: string): string {
 }
 
 /**
- * The connected-apps page: enter a key, see that user's grants, disconnect.
- * Stateless like the consent screen — the key rides the forms; nothing is
- * stored client-side. (Heads with real sessions use /v1/oauth/grants.)
+ * The connected-apps page: log in (a key, or a provider), see that user's
+ * grants, disconnect. Stateless like the consent screen — after the login the
+ * list carries a short-lived signed token naming the user, which the
+ * disconnect forms post back; nothing is stored client-side and the key is
+ * never echoed into the page. (Heads with real sessions use /v1/oauth/grants.)
  */
 function connectionsPage(input: {
   grants?: oauth.GrantInfo[];
-  accessKey?: string;
+  session?: string;
+  logins?: LoginOptions;
+  login?: PageLogin;
   error?: string;
   notice?: string;
 }): string {
@@ -187,6 +259,7 @@ function connectionsPage(input: {
     body = `  <h1>Connected apps</h1>
   <p class="hint" style="margin-top:0">Apps you have authorized to act on your Yap. Enter an access key to see
   the connections of the account it belongs to.</p>
+    ${input.logins ? providerButtons(input.logins, { href: (id) => `/oidc/${encodeURIComponent(id)}/start?for=connections` }) : ""}
   <form method="post" action="/oauth/connections">
     <label class="keylabel" for="key">Your access key</label>
     <input id="key" type="password" name="access_key" autocomplete="off" required autofocus>
@@ -205,10 +278,12 @@ function connectionsPage(input: {
       <div class="meta">
         <strong>${esc(grant.client.name || "Unnamed app")}</strong><br>
         <code>${esc(grant.scope)}</code>
-        <small>connected ${esc(fmtWhen(grant.createdAt))} · last used ${esc(fmtWhen(grant.lastUsedAt))}</small>
+        <small>connected ${esc(fmtWhen(grant.createdAt))} · last used ${esc(fmtWhen(grant.lastUsedAt))}${
+          grant.expiresAt ? ` · ends ${esc(fmtWhen(grant.expiresAt))}` : ""
+        }</small>
       </div>
       <form method="post" action="/oauth/connections/disconnect">
-        <input type="hidden" name="access_key" value="${esc(input.accessKey)}">
+        <input type="hidden" name="session" value="${esc(input.session)}">
         <input type="hidden" name="grant_id" value="${esc(grant.id)}">
         <button type="submit" class="danger">Disconnect</button>
       </form>
@@ -216,6 +291,7 @@ function connectionsPage(input: {
             )
             .join("\n    ");
     body = `  <h1>Connected apps</h1>
+  ${input.login ? loggedInNote(input.login) : ""}
   ${input.notice ? `<p class="notice">${esc(input.notice)}</p>` : ""}
     ${rows}
   <p class="hint">Disconnecting an app revokes its tokens immediately; your access keys are untouched.
@@ -227,7 +303,9 @@ function connectionsPage(input: {
 const ENTER_USER_KEY = "Enter one of your user access keys (the sysadmin key cannot authorize apps).";
 
 /** What the consent screen says for each refused login. */
-const CONSENT_LOGIN_REFUSED: Record<PageLoginRefusal, string> = {
+const CONSENT_LOGIN_REFUSED: Record<PersonLoginRefusal, string> = {
+  "login-expired": LOGIN_EXPIRED,
+  "two-logins": TWO_LOGINS,
   missing: ENTER_USER_KEY,
   sysadmin: ENTER_USER_KEY,
   "oauth-token": ENTER_USER_KEY,
@@ -244,10 +322,38 @@ function formValue(form: Record<string, unknown>, name: string): string {
   return typeof value === "string" ? value : "";
 }
 
+/** The authorize request a provider login on the consent screen is bound to. */
+function authorizeContext(params: AuthorizeParams): Record<string, string> {
+  return {
+    client_id: params.clientId,
+    redirect_uri: params.redirectUri,
+    scope: params.scope,
+    state: params.state,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: params.codeChallengeMethod,
+  };
+}
+
+/**
+ * A page rendered after a provider login carries a login ticket (or, on the
+ * connections page, a session token): never cached, never framed, and never
+ * sent on in a Referer.
+ */
+function privatePage(c: Context, html: string, status: ContentfulStatusCode = 200): Response {
+  c.header("cache-control", "no-store");
+  c.header("referrer-policy", "no-referrer");
+  c.header("x-frame-options", "DENY");
+  c.header("content-security-policy", "frame-ancestors 'none'");
+  return c.html(html, status);
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export function registerOAuthRoutes(server: YapServer): void {
   const app = server.mcp.getApp();
-  const { db, config, logger } = server;
+  const { db, config, logger, blob, registry } = server;
   const baseUrl = config.baseUrl;
+  const logins = loginOptions(config);
 
   const handle = (fn: (c: Context) => Promise<Response>) => async (c: Context): Promise<Response> => {
     try {
@@ -373,6 +479,7 @@ export function registerOAuthRoutes(server: YapServer): void {
     params: AuthorizeParams,
     selectedRole?: string,
     error?: string,
+    login?: PageLogin,
   ): Response {
     const scope = oauth.parseScopeParam(params.scope);
     const restrictionNote =
@@ -384,16 +491,17 @@ export function registerOAuthRoutes(server: YapServer): void {
             .filter(Boolean)
             .join(" and ")}; that limit applies whichever access you grant.`
         : "";
-    return c.html(
-      consentPage({
-        clientName: client.name || "An unnamed app",
-        params,
-        selectedRole: selectedRole ?? scope.role,
-        restrictionNote,
-        error,
-      }),
-      error ? 401 : 200,
-    );
+    const html = consentPage({
+      clientName: client.name || "An unnamed app",
+      params,
+      selectedRole: capRole((selectedRole ?? scope.role) as OAuthRole, config.oauthMaxRole),
+      restrictionNote,
+      roles: offeredRoles(config.oauthMaxRole),
+      logins,
+      login,
+      error,
+    });
+    return login ? privatePage(c, html, error ? 401 : 200) : c.html(html, error ? 401 : 200);
   }
 
   app.get(
@@ -429,22 +537,35 @@ export function registerOAuthRoutes(server: YapServer): void {
       if (chosenRole === "admin" || chosenRole === "member" || chosenRole === "read-only") {
         scope.role = chosenRole;
       }
+      // YAP_OAUTH_MAX_ROLE caps what the screen offers and what it grants, whichever way the person logged in.
+      scope.role = capRole(scope.role, config.oauthMaxRole);
 
-      const keyAuth = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
-      if (!keyAuth.ok) {
-        return renderConsent(c, client, params, scope.role, CONSENT_LOGIN_REFUSED[keyAuth.reason]);
+      const login = await identifyPerson(
+        { db, config },
+        { accessKey: formValue(form, "access_key"), loginTicket: formValue(form, "login_ticket") },
+        { purpose: "consent", context: authorizeContext(params) },
+      );
+      if (!login.ok) {
+        return renderConsent(c, client, params, scope.role, CONSENT_LOGIN_REFUSED[login.reason]);
+      }
+      const provider = login.provider === null ? null : findProvider(config, login.provider);
+      if (login.provider !== null && !provider) {
+        return renderConsent(c, client, params, scope.role, "That login provider is no longer configured here. Log in again.");
       }
 
       // The granted scope is what the user selected. The capability layer
       // clamps every token decision against the user's live grants, so the
-      // delegation can never exceed the authorizing key's authority.
+      // delegation can never exceed the person's authority. After a provider
+      // login the grant belongs to the user, with no key, and ends after the
+      // provider's maximum lifetime.
       const code = await oauth.mintAuthCode(db, config, {
         clientId: client.id,
-        userId: keyAuth.userId,
-        keyId: keyAuth.keyId,
+        userId: login.userId,
+        keyId: login.keyId,
         scope,
         codeChallenge: params.codeChallenge,
         redirectUri: params.redirectUri,
+        grantExpiresAt: provider ? new Date(Date.now() + provider.grantMaxDays * DAY_MS).toISOString() : null,
       });
       redirect.searchParams.set("code", code);
       redirect.searchParams.set("iss", baseUrl);
@@ -508,7 +629,7 @@ export function registerOAuthRoutes(server: YapServer): void {
     "scoped-key": SCOPED_KEY_LOGIN_REFUSED,
   };
 
-  /** Key auth for the self-served pages: the same refusals as consent. A
+  /** Key auth for the connections page: the same refusals as consent. A
    * refusal carries the words the page shows. */
   async function pageKeyAuth(
     form: Record<string, string>,
@@ -516,6 +637,33 @@ export function registerOAuthRoutes(server: YapServer): void {
     const login = await pageLogin(db, config.sysadminKey, formValue(form, "access_key"));
     if (login.ok) return login;
     return { ok: false, error: CONNECTIONS_LOGIN_REFUSED[login.reason] };
+  }
+
+  /**
+   * What the list's disconnect forms carry instead of the key: the user and the
+   * key they logged in with (null after a provider login), signed, for a few
+   * minutes from the login. It is handed back as it is, never renewed, and a
+   * key-login session dies with its key.
+   */
+  const connectionsSession = (userId: string, keyId: string | null): string =>
+    signToken({ scope: "connections", userId, keyId }, config.masterKey, LOGIN_TTL_SECONDS);
+
+  async function sessionUser(form: Record<string, string>): Promise<string | null> {
+    const payload = verifyToken(formValue(form, "session"), config.masterKey);
+    if (!payload || payload.scope !== "connections" || typeof payload.userId !== "string") return null;
+    if (payload.keyId === null) return payload.userId;
+    if (typeof payload.keyId !== "string" || !(await keyStillActive(db, payload.userId, payload.keyId))) return null;
+    return payload.userId;
+  }
+
+  /** The list of a logged-in user's apps; its forms carry `session`. */
+  async function connectionsList(
+    c: Context,
+    userId: string,
+    session: string,
+    extra: { notice?: string; login?: PageLogin } = {},
+  ) {
+    return privatePage(c, connectionsPage({ grants: await oauth.listUserGrants(db, userId), session, ...extra }));
   }
 
   /** A user the operator has denied `manage_keys` gets the key prompt back
@@ -537,7 +685,7 @@ export function registerOAuthRoutes(server: YapServer): void {
 
   app.get(
     "/oauth/connections",
-    handle(async (c) => c.html(connectionsPage({}))),
+    handle(async (c) => c.html(connectionsPage({ logins }))),
   );
 
   app.post(
@@ -545,15 +693,10 @@ export function registerOAuthRoutes(server: YapServer): void {
     handle(async (c) => {
       const form = (await c.req.parseBody()) as Record<string, string>;
       const auth = await pageKeyAuth(form);
-      if (!auth.ok) return c.html(connectionsPage({ error: auth.error }), 401);
+      if (!auth.ok) return c.html(connectionsPage({ logins, error: auth.error }), 401);
       const refused = await refusedPage(c, auth.userId);
       if (refused) return refused;
-      return c.html(
-        connectionsPage({
-          grants: await oauth.listUserGrants(db, auth.userId),
-          accessKey: formValue(form, "access_key").trim(),
-        }),
-      );
+      return connectionsList(c, auth.userId, connectionsSession(auth.userId, auth.keyId));
     }),
   );
 
@@ -561,23 +704,121 @@ export function registerOAuthRoutes(server: YapServer): void {
     "/oauth/connections/disconnect",
     handle(async (c) => {
       const form = (await c.req.parseBody()) as Record<string, string>;
-      const auth = await pageKeyAuth(form);
-      if (!auth.ok) return c.html(connectionsPage({ error: auth.error }), 401);
-      const refused = await refusedPage(c, auth.userId);
+      const userId = await sessionUser(form);
+      if (!userId) {
+        return c.html(connectionsPage({ logins, error: "This list has expired. Log in again to see your connections." }), 401);
+      }
+      const refused = await refusedPage(c, userId);
       if (refused) return refused;
       let notice = "App disconnected — its tokens are revoked.";
       try {
-        await oauth.revokeUserGrant(db, auth.userId, formValue(form, "grant_id"));
-      } catch {
-        notice = "That connection was already gone."; // only notFound escapes revokeUserGrant
+        await oauth.revokeUserGrant(db, userId, formValue(form, "grant_id"));
+      } catch (err) {
+        if (!(err instanceof YapError) || err.code !== "not_found") throw err;
+        notice = "That connection was already gone.";
       }
-      return c.html(
-        connectionsPage({
-          grants: await oauth.listUserGrants(db, auth.userId),
-          accessKey: formValue(form, "access_key").trim(),
-          notice,
-        }),
+      return connectionsList(c, userId, formValue(form, "session"), { notice });
+    }),
+  );
+
+  // ---- Provider login (core/oidc.ts) ---------------------------------------------
+  //
+  // `start` sends the person to their provider for one of the pages above or
+  // for a service's approve page or secret form; `callback` comes back,
+  // identifies them and renders that page again with their name on it and a
+  // one-off login ticket in it. The decision is always made there, by the
+  // person, never by the callback.
+
+  const loginFailed = (c: Context, message: string, status: ContentfulStatusCode = 400): Response =>
+    privatePage(c, errorPage("Login failed", message), status);
+
+  const providerFor = (c: Context): OidcProviderConfig | null => findProvider(config, c.req.param("provider") ?? "");
+
+  /** Runs a login step, turning its failures into a page for the person. */
+  const loginStep = (fn: (c: Context, provider: OidcProviderConfig) => Promise<Response>) =>
+    handle(async (c) => {
+      const provider = providerFor(c);
+      if (!provider) return loginFailed(c, "This Yap has no such login provider.", 404);
+      try {
+        return await fn(c, provider);
+      } catch (err) {
+        if (err instanceof OidcLoginError) return loginFailed(c, err.message);
+        if (err instanceof YapError) return loginFailed(c, err.message, err.httpStatus as ContentfulStatusCode);
+        throw err;
+      }
+    });
+
+  // The consent screen posts its own authorize form here (the provider buttons
+  // are submit buttons of that form), so the request is checked as an authorize
+  // request before the person leaves.
+  app.post(
+    "/oidc/:provider/start",
+    loginStep(async (c, provider) => {
+      const form = (await c.req.parseBody()) as Record<string, string>;
+      const result = await validateAuthorize(form);
+      if (!result.ok) return "page" in result ? c.html(result.page, 400) : c.redirect(result.redirect, 302);
+      return c.redirect(await startLogin({ db, config }, provider, "consent", authorizeContext(result.params)), 302);
+    }),
+  );
+
+  // The other pages link here: the connections page, and the approve page and
+  // secret form with their own signed token (in a host's frame the link opens a
+  // tab of its own, where the login and the decision happen).
+  app.get(
+    "/oidc/:provider/start",
+    loginStep(async (c, provider) => {
+      const purpose = c.req.query("for") ?? "";
+      if (purpose === "connections") {
+        return c.redirect(await startLogin({ db, config }, provider, "connections", {}), 302);
+      }
+      const requestId = c.req.query("request") ?? "";
+      const payload = verifyToken(c.req.query("token") ?? "", config.masterKey);
+      const tokenScope = { "service-approve": "service-approve", "secret-input": "secret-submit" }[purpose];
+      if (!tokenScope) return loginFailed(c, "This login link does not say what it is for.");
+      if (!payload || payload.scope !== tokenScope || payload.requestId !== requestId) {
+        return loginFailed(c, "This page has expired or its link is not valid: ask for a new one.", 401);
+      }
+      return c.redirect(
+        await startLogin({ db, config }, provider, purpose as "service-approve" | "secret-input", { request_id: requestId }),
+        302,
       );
     }),
   );
+
+  app.get(
+    "/oidc/:provider/callback",
+    loginStep(async (c, provider) => {
+      const done = await finishLogin({ db, config }, provider, c.req.query());
+      return renderAfterLogin(c, done);
+    }),
+  );
+
+  /** The page the login was for, as the logged-in person sees it. */
+  async function renderAfterLogin(c: Context, done: FinishedLogin): Promise<Response> {
+    const shown = { user: { name: done.user.name }, provider: { label: done.provider.label }, ticket: done.ticket };
+    const pageLogin: PageLogin = { userName: done.user.name, providerLabel: done.provider.label, ticket: done.ticket };
+    if (done.purpose === "consent") {
+      const result = await validateAuthorize(done.context);
+      if (!result.ok) return "page" in result ? c.html(result.page, 400) : c.redirect(result.redirect, 302);
+      return renderConsent(c, result.client, result.params, undefined, undefined, pageLogin);
+    }
+    if (done.purpose === "connections") {
+      // Showing the list decides nothing, so it is shown at once and the ticket
+      // is spent here; the disconnect forms carry the list's session token.
+      await spendLoginTicket(db, done.ticket, "connections", {});
+      const refused = await refusedPage(c, done.user.id);
+      if (refused) return refused;
+      return connectionsList(c, done.user.id, connectionsSession(done.user.id, null), {
+        login: { ...pageLogin, ticket: "" },
+      });
+    }
+    const env = { db, blob, config, registry };
+    const requestId = done.context.request_id ?? "";
+    if (done.purpose === "service-approve") {
+      const data = { ...(await approvalPageData(env, requestId)), login: shown };
+      return privatePage(c, widgetHtml("service-approve", "origin", data, baseUrl));
+    }
+    const data = { ...(await secretPageData(env, requestId)), login: shown };
+    return privatePage(c, widgetHtml("secret-input", "origin", data, baseUrl));
+  }
 }
