@@ -85,7 +85,59 @@ export interface OidcProviderConfig {
   label: string;
   /** How long a grant made after this provider's login lives, counted from its creation. */
   grantMaxDays: number;
+  /** The preset its claim mapping started from (`YAP_OIDC_<NAME>_PRESET`). */
+  preset: OidcPreset;
+  /** How this provider's ID token is read: the preset's defaults with the env overrides applied. */
+  claims: OidcClaimMapping;
 }
+
+/**
+ * How an ID token's claims become a Yap login (see `mapClaims` in
+ * core/oidc.ts). Plain data: providers differ only in which claims they send
+ * and how far their email can be trusted, not in how the login works.
+ */
+export interface OidcClaimMapping {
+  /** Where the email is: the first of these claims that holds an address. */
+  emailClaims: string[];
+  /**
+   * Accept that email without `email_verified: true` (the provider vouches for
+   * it by construction). Required for any claim but `email`, since
+   * `email_verified` covers only that one.
+   */
+  trustEmail: boolean;
+  /** The claim that identifies a returning person; stored as the identity's subject. */
+  subjectClaim: string;
+  /**
+   * A claim naming the organisation's domain (Google's `hd`): when set, an
+   * `@domain` allowlist entry admits an address only if this claim names that
+   * domain. Null: a domain entry admits any address in the domain.
+   */
+  domainClaim: string | null;
+}
+
+export type OidcPreset = "generic" | "google" | "entra";
+
+/**
+ * The claim-reading defaults per preset. `generic` is plain OIDC. `google`
+ * adds the hosted-domain check, since a Google account can carry a company
+ * address without belonging to the company's Workspace. `entra` (Microsoft
+ * Entra ID, v2.0 tokens) sends no `email_verified` and often no `email`, so
+ * it falls back to `preferred_username` and trusts the address; and its `sub`
+ * is pairwise per app registration, so a returning person is recognised by
+ * `oid`, which is stable across app registrations in the tenant.
+ */
+export const OIDC_PRESETS: Readonly<Record<OidcPreset, Readonly<OidcClaimMapping>>> = {
+  generic: { emailClaims: ["email"], trustEmail: false, subjectClaim: "sub", domainClaim: null },
+  google: { emailClaims: ["email"], trustEmail: false, subjectClaim: "sub", domainClaim: "hd" },
+  entra: { emailClaims: ["email", "preferred_username"], trustEmail: true, subjectClaim: "oid", domainClaim: null },
+};
+
+/**
+ * Google's issuer: a provider with it and no `_PRESET` gets the `google`
+ * preset, so a Google provider configured before presets existed keeps its
+ * hosted-domain check.
+ */
+export const GOOGLE_ISSUER = "https://accounts.google.com";
 
 export interface OidcConfig {
   /** Empty: key login only, exactly as before providers existed. */
@@ -216,6 +268,43 @@ function listEnv(env: Env, name: string): string[] {
 }
 
 const OIDC_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+/** Any claim name a JWT can carry, URL-style custom claims included; a comma separates a list. */
+const CLAIM_NAME = /^[^\s,]{1,128}$/;
+
+/** A provider's claim mapping: its preset (default by issuer) with `_EMAIL_CLAIM`, `_TRUST_EMAIL` and `_SUBJECT_CLAIM` on top. */
+function loadClaims(env: Env, prefix: string, issuer: string): { preset: OidcPreset; claims: OidcClaimMapping } {
+  const presetRaw = env[`${prefix}PRESET`] || (issuer === GOOGLE_ISSUER ? "google" : "generic");
+  if (!Object.hasOwn(OIDC_PRESETS, presetRaw)) {
+    throw new ConfigError(`${prefix}PRESET must be one of ${Object.keys(OIDC_PRESETS).join(", ")}, got ${JSON.stringify(presetRaw)}`);
+  }
+  const preset = presetRaw as OidcPreset;
+  const base = OIDC_PRESETS[preset];
+  const claimName = (variable: string, value: string): string => {
+    if (!CLAIM_NAME.test(value)) throw new ConfigError(`${variable}: ${JSON.stringify(value)} is not a claim name`);
+    return value;
+  };
+  const emailVar = `${prefix}EMAIL_CLAIM`;
+  const emailClaims = env[emailVar] ? listEnv(env, emailVar).map((c) => claimName(emailVar, c)) : [...base.emailClaims];
+  if (emailClaims.length === 0) throw new ConfigError(`${emailVar} names no claim`);
+  const trustVar = `${prefix}TRUST_EMAIL`;
+  const trustRaw = env[trustVar] || String(base.trustEmail);
+  if (trustRaw !== "true" && trustRaw !== "false") {
+    throw new ConfigError(`${trustVar} must be "true" or "false", got ${JSON.stringify(trustRaw)}`);
+  }
+  // `email_verified` speaks for the `email` claim only: an address from any
+  // other claim is unverified, so reading one needs the provider trusted.
+  const trustEmail = trustRaw === "true";
+  const unverifiable = emailClaims.filter((c) => c !== "email");
+  if (!trustEmail && unverifiable.length > 0) {
+    throw new ConfigError(
+      `${emailVar} names ${unverifiable.join(", ")}, which email_verified does not cover: set ${trustVar}=true to accept it`,
+    );
+  }
+  const subjectVar = `${prefix}SUBJECT_CLAIM`;
+  const subjectRaw = env[subjectVar]?.trim();
+  const subjectClaim = subjectRaw ? claimName(subjectVar, subjectRaw) : base.subjectClaim;
+  return { preset, claims: { emailClaims, trustEmail, subjectClaim, domainClaim: base.domainClaim } };
+}
 /** A grant lifetime longer than ten years is a typo, not a policy. */
 const MAX_GRANT_DAYS = 3650;
 
@@ -233,7 +322,8 @@ function isSecureOrLoopback(raw: string): boolean {
 
 /**
  * YAP_OIDC_PROVIDERS=google,okta, then per name YAP_OIDC_<NAME>_ISSUER,
- * _CLIENT_ID, _CLIENT_SECRET, optional _LABEL and _GRANT_MAX_DAYS. Every
+ * _CLIENT_ID, _CLIENT_SECRET, optional _LABEL and _GRANT_MAX_DAYS, and the
+ * claim mapping: _PRESET, _EMAIL_CLAIM, _TRUST_EMAIL, _SUBJECT_CLAIM. Every
  * mistake fails startup: a login method that half works is worse than none.
  */
 function loadOidc(env: Env, baseUrlSet: boolean): OidcConfig {
@@ -269,6 +359,7 @@ function loadOidc(env: Env, baseUrlSet: boolean): OidcConfig {
       clientSecret,
       label: env[`${prefix}LABEL`] || name.charAt(0).toUpperCase() + name.slice(1),
       grantMaxDays: intEnv(env, `${prefix}GRANT_MAX_DAYS`, grantMaxDays, MAX_GRANT_DAYS),
+      ...loadClaims(env, prefix, issuer),
     });
   }
   const signupRaw = env.YAP_OIDC_SIGNUP || "false";

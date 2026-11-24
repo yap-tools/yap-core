@@ -13,6 +13,9 @@
  *   invite (a user with an email and no identity) is claimed once; sign-up is
  *   off by default and, when on, admits only verified allowlisted addresses,
  *   creating a user with a personal space and no key;
+ * - a provider's preset (generic, google, entra) and its env overrides decide
+ *   which claims give the subject and the email and whether the email needs
+ *   email_verified; the google preset's hd check applies on any issuer;
  * - consent after a provider login yields a keyless grant that works on /mcp,
  *   shows in connected apps, ends after YAP_OIDC_GRANT_MAX_DAYS (or the
  *   provider's override) counted from creation, survives key revocation and
@@ -23,7 +26,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ConfigError, loadConfig } from "../../src/config.js";
-import { signupAllows } from "../../src/core/oidc.js";
+import { mapClaims, signupAllows } from "../../src/core/oidc.js";
 import { createUser } from "../../src/core/users.js";
 import { widgetHtml } from "../../src/widgets/registry.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
@@ -51,7 +54,16 @@ describe("oidc config", () => {
     );
     expect(config.oidc).toEqual({
       providers: [
-        { name: "corp", issuer: "https://id.example.com", clientId: "client", clientSecret: "secret", label: "Corp", grantMaxDays: 7 },
+        {
+          name: "corp",
+          issuer: "https://id.example.com",
+          clientId: "client",
+          clientSecret: "secret",
+          label: "Corp",
+          grantMaxDays: 7,
+          preset: "generic",
+          claims: { emailClaims: ["email"], trustEmail: false, subjectClaim: "sub", domainClaim: null },
+        },
       ],
       signup: false,
       allow: [],
@@ -73,17 +85,93 @@ describe("oidc config", () => {
   });
 });
 
+describe("provider presets", () => {
+  const base = {
+    YAP_BASE_URL: "https://y.example",
+    YAP_OIDC_PROVIDERS: "corp",
+    YAP_OIDC_CORP_ISSUER: "https://id.example.com",
+    YAP_OIDC_CORP_CLIENT_ID: "client",
+    YAP_OIDC_CORP_CLIENT_SECRET: "secret",
+  };
+  const load = (extra: Record<string, string> = {}) => loadConfig(testEnv({ ...base, ...extra })).oidc.providers[0]!;
+
+  it("defaults to generic, or to google for Google's issuer, and reads each preset's table", () => {
+    expect(load()).toMatchObject({ preset: "generic", claims: { emailClaims: ["email"], trustEmail: false, subjectClaim: "sub", domainClaim: null } });
+    expect(load({ YAP_OIDC_CORP_ISSUER: "https://accounts.google.com" })).toMatchObject({ preset: "google", claims: { domainClaim: "hd" } });
+    expect(load({ YAP_OIDC_CORP_ISSUER: "https://accounts.google.com", YAP_OIDC_CORP_PRESET: "generic" }).claims.domainClaim).toBeNull();
+    expect(load({ YAP_OIDC_CORP_PRESET: "google" }).claims.domainClaim).toBe("hd");
+    expect(load({ YAP_OIDC_CORP_PRESET: "entra" })).toMatchObject({
+      preset: "entra",
+      claims: { emailClaims: ["email", "preferred_username"], trustEmail: true, subjectClaim: "oid", domainClaim: null },
+    });
+  });
+
+  it("applies the env overrides on top of the preset", () => {
+    expect(
+      load({ YAP_OIDC_CORP_EMAIL_CLAIM: "mail, upn", YAP_OIDC_CORP_TRUST_EMAIL: "true", YAP_OIDC_CORP_SUBJECT_CLAIM: "uid" }).claims,
+    ).toEqual({ emailClaims: ["mail", "upn"], trustEmail: true, subjectClaim: "uid", domainClaim: null });
+    expect(load({ YAP_OIDC_CORP_EMAIL_CLAIM: "https://example.com/claims/email", YAP_OIDC_CORP_TRUST_EMAIL: "true" }).claims.emailClaims).toEqual([
+      "https://example.com/claims/email",
+    ]);
+    expect(
+      load({ YAP_OIDC_CORP_PRESET: "entra", YAP_OIDC_CORP_TRUST_EMAIL: "false", YAP_OIDC_CORP_EMAIL_CLAIM: "email" }).claims,
+    ).toMatchObject({ emailClaims: ["email"], trustEmail: false, subjectClaim: "oid" });
+  });
+
+  it("refuses a claim other than email on an untrusted provider: email_verified does not cover it", () => {
+    expect(() => load({ YAP_OIDC_CORP_EMAIL_CLAIM: "preferred_username" })).toThrow(/email_verified does not cover.*TRUST_EMAIL=true/);
+    expect(() => load({ YAP_OIDC_CORP_PRESET: "entra", YAP_OIDC_CORP_TRUST_EMAIL: "false" })).toThrow(/preferred_username/);
+  });
+
+  it("refuses an unknown preset, a bad trust value and a bad claim name at startup", () => {
+    expect(() => load({ YAP_OIDC_CORP_PRESET: "okta" })).toThrow(/PRESET must be one of generic, google, entra/);
+    expect(() => load({ YAP_OIDC_CORP_PRESET: "toString" })).toThrow(/PRESET/);
+    expect(() => load({ YAP_OIDC_CORP_TRUST_EMAIL: "yes" })).toThrow(/TRUST_EMAIL/);
+    expect(() => load({ YAP_OIDC_CORP_EMAIL_CLAIM: "e mail", YAP_OIDC_CORP_TRUST_EMAIL: "true" })).toThrow(/EMAIL_CLAIM/);
+    expect(() => load({ YAP_OIDC_CORP_EMAIL_CLAIM: " , " })).toThrow(/EMAIL_CLAIM names no claim/);
+    expect(() => load({ YAP_OIDC_CORP_SUBJECT_CLAIM: "a b" })).toThrow(/SUBJECT_CLAIM/);
+  });
+
+  it("maps an Entra token: email from preferred_username, trusted, subject oid", () => {
+    const entra = load({ YAP_OIDC_CORP_PRESET: "entra" });
+    const token = { sub: "pairwise", oid: "object-id", preferred_username: "Ann@Corp.example", name: "Ann" };
+    expect(mapClaims(entra, token)).toEqual({ subject: "object-id", email: "ann@corp.example", name: "Ann", domainVouched: true });
+    // `email` wins when present; a non-address in the first claim falls through to the next.
+    expect(mapClaims(entra, { ...token, email: "ann.mail@corp.example" }).email).toBe("ann.mail@corp.example");
+    expect(mapClaims(entra, { ...token, email: "not-an-address" }).email).toBe("ann@corp.example");
+    expect(() => mapClaims(entra, { sub: "pairwise", preferred_username: "ann@corp.example" })).toThrow(/no oid claim/);
+    // The same token under generic: no verified email, so no invite and no sign-up.
+    expect(mapClaims(load(), token)).toEqual({ subject: "pairwise", email: null, name: "Ann", domainVouched: true });
+  });
+
+  it("under generic, only email_verified: true counts", () => {
+    const generic = load();
+    expect(mapClaims(generic, { sub: "s", email: " Bo@X.example ", email_verified: true }).email).toBe("bo@x.example");
+    expect(mapClaims(generic, { sub: "s", email: "bo@x.example", email_verified: "true" }).email).toBeNull();
+    expect(mapClaims(generic, { sub: "s", email: "bo@x.example" }).email).toBeNull();
+    // No name: the email stands in.
+    expect(mapClaims(generic, { sub: "s", email: "bo@x.example", email_verified: true }).name).toBe("bo@x.example");
+  });
+
+  it("vouches for a domain under google only with hd naming it, whatever the issuer", () => {
+    const google = load({ YAP_OIDC_CORP_PRESET: "google" });
+    const claims = { sub: "s", email: "ann@corp.example", email_verified: true };
+    expect(mapClaims(google, claims).domainVouched).toBe(false);
+    expect(mapClaims(google, { ...claims, hd: "Corp.example" }).domainVouched).toBe(true);
+    expect(mapClaims(google, { ...claims, hd: "other.example" }).domainVouched).toBe(false);
+    expect(mapClaims(load(), claims).domainVouched).toBe(true);
+  });
+});
+
 describe("sign-up allowlist", () => {
-  it("takes exact addresses and @domain entries; via Google a domain needs hd", () => {
+  it("takes exact addresses, and @domain entries when the login vouches for the domain", () => {
     const allow = ["bo@solo.example", "@corp.example"];
-    expect(signupAllows(allow, "bo@solo.example", {}, "https://id.example")).toBe(true);
-    expect(signupAllows(allow, "eve@solo.example", {}, "https://id.example")).toBe(false);
-    expect(signupAllows(allow, "ann@corp.example", {}, "https://id.example")).toBe(true);
-    expect(signupAllows(allow, "ann@corp.example", {}, "https://accounts.google.com")).toBe(false);
-    expect(signupAllows(allow, "ann@corp.example", { hd: "corp.example" }, "https://accounts.google.com")).toBe(true);
-    expect(signupAllows(allow, "ann@corp.example", { hd: "other.example" }, "https://accounts.google.com")).toBe(false);
-    // An exact entry needs no hd, even via Google.
-    expect(signupAllows(allow, "bo@solo.example", {}, "https://accounts.google.com")).toBe(true);
+    expect(signupAllows(allow, "bo@solo.example", true)).toBe(true);
+    expect(signupAllows(allow, "eve@solo.example", true)).toBe(false);
+    expect(signupAllows(allow, "ann@corp.example", true)).toBe(true);
+    expect(signupAllows(allow, "ann@corp.example", false)).toBe(false);
+    // An exact entry needs no domain vouching.
+    expect(signupAllows(allow, "bo@solo.example", false)).toBe(true);
   });
 });
 
@@ -526,6 +614,89 @@ describeEachAdapter("oidc login", (adapter) => {
       const after = await signupApp.db.client.select().from(signupApp.db.tables.oauthGrants).where(eq(signupApp.db.tables.oauthGrants.userId, carol.id));
       expect(after).toEqual([]);
     });
+  });
+});
+
+describeEachAdapter("provider presets end to end", (adapter) => {
+  let idp: FakeProvider;
+  const apps: TestApp[] = [];
+  // Entra v2.0 shape: no email_verified, the address only in preferred_username, a pairwise sub.
+  const entraToken = (oid: string, upn: string) => ({ sub: `pairwise-${oid}`, oid, preferred_username: upn, name: upn.split("@")[0] });
+
+  beforeAll(async () => {
+    idp = await startFakeProvider();
+  });
+  afterAll(async () => {
+    for (const a of apps) await a.stop();
+    await idp.close();
+  });
+
+  async function boot(extra: Record<string, string>) {
+    const app = await bootTestApp(
+      idp.env("test", { YAP_OIDC_SIGNUP: "true", YAP_OIDC_ALLOW: "@corp.example", ...extra }),
+      await adapter.makeDb(),
+    );
+    apps.push(app);
+    await apiClient(app.baseUrl, TEST_SYSADMIN_KEY).post("/v1/users", { name: "Invited", email: "invited@corp.example" });
+    return app;
+  }
+  const login = async (app: TestApp) =>
+    followLogin(await fetch(`${app.baseUrl}/oidc/test/start?for=connections`, { redirect: "manual" }));
+  const identities = async (app: TestApp) =>
+    (await app.db.client.select().from(app.db.tables.userIdentities)).map((i) => i.subject).sort();
+
+  it("with the entra preset, an Entra-shaped token claims an invite and signs up under the allowlist, keyed by oid", async () => {
+    const app = await boot({ YAP_OIDC_TEST_PRESET: "entra" });
+    idp.next = entraToken("oid-invited", "Invited@corp.example");
+    const invited = await login(app);
+    expect(invited.res.status).toBe(200);
+    expect(invited.html).toContain("Logged in as <strong>Invited</strong>");
+
+    idp.next = entraToken("oid-new", "new@corp.example");
+    const signedUp = await login(app);
+    expect(signedUp.res.status).toBe(200);
+    const users = (await apiClient(app.baseUrl, TEST_SYSADMIN_KEY).get("/v1/users")).body.data;
+    expect(users.find((u: any) => u.email === "new@corp.example")).toMatchObject({ name: "new", providerLoginOnly: true });
+    expect(await identities(app)).toEqual(["oid-invited", "oid-new"]);
+
+    // A returning person is found by oid, whatever sub the app registration now gives.
+    idp.next = { ...entraToken("oid-new", "new@corp.example"), sub: "another-pairwise-sub" };
+    expect((await login(app)).html).toContain("Logged in as <strong>new</strong>");
+    // Off the allowlist: refused.
+    idp.next = entraToken("oid-out", "out@elsewhere.example");
+    expect((await login(app)).html).toContain("There is no Yap account for this login");
+  });
+
+  it("with generic (no preset set), the same token is refused for invite and sign-up", async () => {
+    const app = await boot({});
+    for (const next of [entraToken("oid-invited", "invited@corp.example"), entraToken("oid-new", "new@corp.example")]) {
+      idp.next = next;
+      const { res, html } = await login(app);
+      expect(res.status).toBe(400);
+      expect(html).toContain("There is no Yap account for this login");
+    }
+    expect(await identities(app)).toEqual([]);
+  });
+
+  it("_EMAIL_CLAIM and _TRUST_EMAIL on generic admit the same token, keyed by sub", async () => {
+    const app = await boot({ YAP_OIDC_TEST_EMAIL_CLAIM: "preferred_username", YAP_OIDC_TEST_TRUST_EMAIL: "true" });
+    idp.next = entraToken("oid-invited", "invited@corp.example");
+    expect((await login(app)).res.status).toBe(200);
+    expect(await identities(app)).toEqual(["pairwise-oid-invited"]);
+    // _TRUST_EMAIL alone, email still from `email`: a token without it gets no address.
+    const trusted = await boot({ YAP_OIDC_TEST_TRUST_EMAIL: "true" });
+    idp.next = entraToken("oid-new", "new@corp.example");
+    expect((await login(trusted)).res.status).toBe(400);
+    idp.next = { sub: "s-new", email: "new@corp.example" };
+    expect((await login(trusted)).res.status).toBe(200);
+  });
+
+  it("the google preset applies the hd check on any issuer", async () => {
+    const app = await boot({ YAP_OIDC_TEST_PRESET: "google" });
+    idp.next = { sub: "g-1", email: "ann@corp.example", email_verified: true };
+    expect((await login(app)).res.status).toBe(400);
+    idp.next = { sub: "g-1", email: "ann@corp.example", email_verified: true, hd: "corp.example" };
+    expect((await login(app)).res.status).toBe(200);
   });
 });
 
