@@ -818,7 +818,13 @@ be the instance's externally reachable origin (https except on loopback).
   the upload dropzone's "Paste image" button read the clipboard. Ctrl/Cmd-V
   needs no permission: the dropzone takes focus when it safely can (its
   document already has focus, or the pointer first enters it), and says so
-  when the clipboard is blocked rather than declined. The media card takes
+  when the clipboard is blocked rather than declined. When the clipboard has
+  items but none is an `image/*` type (a photo copied from iOS Photos, say),
+  both paste routes say it can't be pasted as an image and point to Choose
+  file, with a muted "Clipboard had: …" line listing up to five of the MIME
+  types the device offered; an empty clipboard keeps the plain "No image"
+  message. An upload the server refuses for its type is named
+  ("This image type isn't accepted here (image/heic)…"). The media card takes
   `show_file`'s result as its data, flat (`show_widget(widget="media-card",
   params=<result>)`); a `{widget, data}` or `{data}` wrapper around it is
   unwrapped, so passing the whole `_meta` envelope still renders. Images,

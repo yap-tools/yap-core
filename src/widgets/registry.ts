@@ -83,6 +83,84 @@ export const FORMAT_BYTES_JS = `
   }
 `;
 
+/** What the upload-dropzone does with a clipboard, exported as source so the
+ * widget and its unit test exercise one definition. Both paste routes (the
+ * Paste image button, which reads `navigator.clipboard.read()`, and the paste
+ * event) resolve to `{ file, types }`: the first `image/*` item as a File, or
+ * null, plus every MIME type the clipboard offered. `pasteOutcome` turns that
+ * into one of three results: upload, "nothing on the clipboard", or "items,
+ * but none an image" — the last carries a diagnostic line listing the types,
+ * because what a device puts on the clipboard (a photo copied on iOS, say) can
+ * only be read off the device. */
+export const CLIPBOARD_IMAGE_JS = `
+  function imageExtension(type) {
+    var t = String(type || "").toLowerCase();
+    if (t === "image/png") return "png";
+    if (t === "image/jpeg") return "jpg";
+    if (t === "image/gif") return "gif";
+    if (t === "image/webp") return "webp";
+    if (t === "image/svg+xml") return "svg";
+    if (t === "image/heic") return "heic";
+    if (t === "image/heif") return "heif";
+    return "png";
+  }
+  function addType(types, type) {
+    var t = String(type || "");
+    if (t && types.indexOf(t) === -1) types.push(t);
+  }
+  function firstAsyncClipboardImage(items) {
+    var types = [];
+    var found = null;
+    for (var i = 0; i < (items || []).length; i++) {
+      var itemTypes = items[i].types || [];
+      for (var j = 0; j < itemTypes.length; j++) {
+        var type = String(itemTypes[j]);
+        addType(types, type);
+        if (!found && type.indexOf("image/") === 0) found = { item: items[i], type: type };
+      }
+    }
+    if (!found) return Promise.resolve({ file: null, types: types });
+    return found.item.getType(found.type).then(function (blob) {
+      var mime = blob.type || found.type;
+      return { file: new File([blob], "pasted-image." + imageExtension(mime), { type: mime }), types: types };
+    });
+  }
+  function firstClipboardImage(e) {
+    var data = e.clipboardData;
+    var types = [];
+    if (!data) return { file: null, types: types };
+    var found = null;
+    var items = data.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!item) continue;
+      addType(types, item.type);
+      if (!found && item.kind === "file" && String(item.type || "").indexOf("image/") === 0) {
+        found = item.getAsFile();
+      }
+    }
+    var files = data.files || [];
+    for (var j = 0; j < files.length; j++) {
+      var file = files[j];
+      if (!file) continue;
+      addType(types, file.type);
+      if (!found && String(file.type || "").indexOf("image/") === 0) found = file;
+    }
+    return { file: found, types: types };
+  }
+  function pasteOutcome(result, again) {
+    if (result.file) return { file: result.file, message: "", types: "" };
+    if (!result.types.length) {
+      return { file: null, message: "No image in the clipboard \\u2014 copy an image and " + again + " again.", types: "" };
+    }
+    return {
+      file: null,
+      message: "This can't be pasted as an image here. Photos from the Photos app often can't; use Choose file instead.",
+      types: "Clipboard had: " + result.types.slice(0, 5).join(", "),
+    };
+  }
+`;
+
 /** The upload-dropzone's failure classifier, exported as source so the widget
  * and its unit test exercise one definition. It keys purely on the HTTP status
  * and our structured error `code` ({ error: { code, details } }) — never on the
@@ -132,6 +210,9 @@ export const UPLOAD_ERROR_JS = `
     // MIME type outside the configured allowlist (HTTP 415).
     if (statusCode === 415 || code === "unsupported_media_type") {
       var typeNext = atFinalize ? " Request a fresh upload link to choose another file." : "";
+      if (file && String(file.type || "").indexOf("image/") === 0) {
+        return { message: "This image type isn't accepted here (" + file.type + "). Use Choose file with a JPEG or PNG." + typeNext, retry: !atFinalize };
+      }
       return { message: "The selected file type is not accepted (" + fileTypeLabel(file) + ")." + allowedLabel(parsed.details) + typeNext, retry: !atFinalize };
     }
     if (atFinalize) {
@@ -455,6 +536,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           '<p><button id="pick">Choose file</button> <button id="paste">Paste image</button></p>' +
           '<input id="file" type="file" style="display:none">' +
           '<p class="muted" id="status">Waiting for a file\\u2026</p>' +
+          '<p class="muted" id="cliptypes" style="font-size:12px"></p>' +
           '<div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
           '<div class="track"><div class="bar" id="bar"></div></div><span class="phase" id="phase"></span></div></div>';
         var zone = document.getElementById("zone");
@@ -481,6 +563,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var busy = false;
         var locked = false;
         function setStatus(text, cls) { status.textContent = text; status.className = "muted " + (cls || ""); requestAnimationFrame(announceHeight); }
+        function setClipboardTypes(text) { document.getElementById("cliptypes").textContent = text || ""; }
         function setControls(enabled) { pick.disabled = !enabled; if (pasteBtn) pasteBtn.disabled = !enabled; }
         function setProgress(percent, text, indeterminate) {
           var pct = Math.max(0, Math.min(100, Number(percent) || 0));
@@ -499,15 +582,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         ${FORMAT_BYTES_JS}
         ${UPLOAD_ERROR_JS}
         ${UPLOAD_FINALIZE_JS}
-        function imageExtension(type) {
-          var t = String(type || "").toLowerCase();
-          if (t === "image/png") return "png";
-          if (t === "image/jpeg") return "jpg";
-          if (t === "image/gif") return "gif";
-          if (t === "image/webp") return "webp";
-          if (t === "image/svg+xml") return "svg";
-          return "png";
-        }
+        ${CLIPBOARD_IMAGE_JS}
         function safeUploadName(file) {
           var name = String((file && file.name) || "").trim();
           if (name && name.length <= 255 && !/[\\/\\\\\\x00-\\x1f\\x7f]/.test(name)) return name;
@@ -517,38 +592,6 @@ export const WIDGETS: Record<string, WidgetDef> = {
           var safeName = safeUploadName(file);
           if (safeName === file.name) return file;
           return new File([file], safeName, { type: file.type || "image/png", lastModified: file.lastModified || Date.now() });
-        }
-        function firstAsyncClipboardImage(items) {
-          for (var i = 0; i < (items || []).length; i++) {
-            var types = items[i].types || [];
-            for (var j = 0; j < types.length; j++) {
-              var type = String(types[j]);
-              if (type.indexOf("image/") === 0) {
-                return items[i].getType(type).then(function (blob) {
-                  return new File([blob], "pasted-image." + imageExtension(blob.type || type), { type: blob.type || type });
-                });
-              }
-            }
-          }
-          return Promise.resolve(null);
-        }
-        function firstClipboardImage(e) {
-          var data = e.clipboardData;
-          if (!data) return null;
-          var items = data.items || [];
-          for (var i = 0; i < items.length; i++) {
-            var item = items[i];
-            if (item && item.kind === "file" && String(item.type || "").indexOf("image/") === 0) {
-              var itemFile = item.getAsFile();
-              if (itemFile) return itemFile;
-            }
-          }
-          var files = data.files || [];
-          for (var j = 0; j < files.length; j++) {
-            var file = files[j];
-            if (file && String(file.type || "").indexOf("image/") === 0) return file;
-          }
-          return null;
         }
         function readJsonOrText(response) {
           var contentType = response.headers.get("content-type") || "";
@@ -586,6 +629,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         function upload(file) {
           if (busy || locked) return;
           busy = true;
+          setClipboardTypes("");
           var stage = "upload";
           setControls(false);
           setStatus("Uploading " + file.name + "\\u2026");
@@ -650,10 +694,11 @@ export const WIDGETS: Record<string, WidgetDef> = {
           if (busy || locked) return;
           navigator.clipboard.read()
             .then(firstAsyncClipboardImage)
-            .then(function (file) {
+            .then(function (result) {
               if (busy || locked) return;
-              if (!file) { setStatus("No image in the clipboard \\u2014 copy an image and try again."); return; }
-              upload(file);
+              var out = pasteOutcome(result, "try");
+              if (!out.file) { setStatus(out.message); setClipboardTypes(out.types); return; }
+              upload(out.file);
             })
             .catch(function (err) {
               setStatus(clipboardRefusal(err), "err");
@@ -678,13 +723,13 @@ export const WIDGETS: Record<string, WidgetDef> = {
         if (window.__yapPasteHandler) document.removeEventListener("paste", window.__yapPasteHandler);
         window.__yapPasteHandler = function (e) {
           if (busy || locked) return;
-          var file = firstClipboardImage(e);
-          if (!file) {
-            if (e.clipboardData) setStatus("No image in the clipboard \\u2014 copy an image and paste again.");
+          var out = pasteOutcome(firstClipboardImage(e), "paste");
+          if (!out.file) {
+            if (e.clipboardData) { setStatus(out.message); setClipboardTypes(out.types); }
             return;
           }
           e.preventDefault();
-          upload(withSafeName(file));
+          upload(withSafeName(out.file));
         };
         document.addEventListener("paste", window.__yapPasteHandler);
         // A paste only reaches this document once it has focus, and inside a host

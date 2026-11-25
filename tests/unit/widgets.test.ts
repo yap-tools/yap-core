@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { FORMAT_BYTES_JS, TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { CLIPBOARD_IMAGE_JS, FORMAT_BYTES_JS, TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -114,8 +114,8 @@ describe("widgetHtml", () => {
     expect(render).toContain('item.kind === "file"');
     expect(render).toContain('String(item.type || "").indexOf("image/") === 0');
     expect(render).toContain('String(file.type || "").indexOf("image/") === 0');
-    expect(render).toContain("No image in the clipboard");
-    expect(render).toContain("upload(withSafeName(file));");
+    expect(render).toContain("firstClipboardImage(e)");
+    expect(render).toContain("upload(withSafeName(out.file));");
   });
 
   it("the upload-dropzone offers a clipboard-API paste button for hosts without a paste gesture", () => {
@@ -124,8 +124,7 @@ describe("widgetHtml", () => {
     expect(render).toContain("!(navigator.clipboard && navigator.clipboard.read)");
     expect(render).toContain("navigator.clipboard.read()");
     expect(render).toContain(".then(firstAsyncClipboardImage)");
-    expect(render).toContain('type.indexOf("image/") === 0');
-    expect(render).toContain('new File([blob], "pasted-image." + imageExtension(blob.type || type)');
+    expect(render).toContain('new File([blob], "pasted-image." + imageExtension(mime)');
     expect(render).toContain("This app can't read the clipboard here.");
   });
 
@@ -249,6 +248,74 @@ describe("formatBytes: human file sizes shared by the media card and the dropzon
   });
 });
 
+describe("upload-dropzone: clipboard outcomes", () => {
+  // Evaluate the exact source the widget embeds; File is a stand-in for the browser's.
+  class FakeFile {
+    constructor(
+      public parts: unknown[],
+      public name: string,
+      public opts: { type?: string },
+    ) {}
+  }
+  const api = new Function(
+    "File",
+    CLIPBOARD_IMAGE_JS + " return { imageExtension, firstAsyncClipboardImage, firstClipboardImage, pasteOutcome };",
+  )(FakeFile) as {
+    imageExtension: (t: string) => string;
+    firstAsyncClipboardImage: (items: unknown[]) => Promise<{ file: FakeFile | null; types: string[] }>;
+    firstClipboardImage: (e: unknown) => { file: unknown; types: string[] };
+    pasteOutcome: (r: { file: unknown; types: string[] }, again: string) => { file: unknown; message: string; types: string };
+  };
+  const item = (types: string[]) => ({ types, getType: async (t: string) => ({ type: t }) });
+
+  it("a clipboard with only text is 'can't be pasted' and lists the type", async () => {
+    const r = await api.firstAsyncClipboardImage([item(["text/plain"])]);
+    expect(r.file).toBeNull();
+    const out = api.pasteOutcome(r, "try");
+    expect(out.message).toBe("This can't be pasted as an image here. Photos from the Photos app often can't; use Choose file instead.");
+    expect(out.types).toBe("Clipboard had: text/plain");
+  });
+
+  it("an empty clipboard keeps the existing message and shows no types line", async () => {
+    const out = api.pasteOutcome(await api.firstAsyncClipboardImage([]), "try");
+    expect(out.message).toBe("No image in the clipboard \u2014 copy an image and try again.");
+    expect(out.types).toBe("");
+  });
+
+  it("an image/heic item is picked and named pasted-image.heic", async () => {
+    const r = await api.firstAsyncClipboardImage([item(["text/html", "image/heic"])]);
+    expect(r.file!.name).toBe("pasted-image.heic");
+    expect(r.file!.opts.type).toBe("image/heic");
+    expect(api.pasteOutcome(r, "try").file).toBe(r.file);
+    expect(api.imageExtension("image/heif")).toBe("heif");
+  });
+
+  it("the types line is deduplicated and shows at most five types", async () => {
+    const r = await api.firstAsyncClipboardImage([item(["a/1", "a/2", "a/3"]), item(["a/3", "a/4", "a/5", "a/6", "a/7"])]);
+    expect(api.pasteOutcome(r, "try").types).toBe("Clipboard had: a/1, a/2, a/3, a/4, a/5");
+  });
+
+  const pasteEvent = (items: { kind: string; type: string }[]) => ({
+    clipboardData: { items: items.map((i) => ({ ...i, getAsFile: () => ({ type: i.type }) })), files: [] },
+  });
+
+  it("the paste event gives the same three outcomes", () => {
+    const text = api.pasteOutcome(api.firstClipboardImage(pasteEvent([{ kind: "string", type: "text/plain" }])), "paste");
+    expect(text.message).toContain("can't be pasted as an image");
+    expect(text.types).toBe("Clipboard had: text/plain");
+    const none = api.pasteOutcome(api.firstClipboardImage(pasteEvent([])), "paste");
+    expect(none.message).toBe("No image in the clipboard \u2014 copy an image and paste again.");
+    const heic = api.firstClipboardImage(pasteEvent([{ kind: "file", type: "image/heic" }]));
+    expect(heic.file).toEqual({ type: "image/heic" });
+  });
+
+  it("is inlined into the dropzone with a line for the types", () => {
+    const render = WIDGETS["upload-dropzone"]!.render;
+    expect(render).toContain("function pasteOutcome");
+    expect(render).toContain('id="cliptypes"');
+  });
+});
+
 describe("upload-dropzone: failure classification", () => {
   // Evaluate the exact source the widget embeds, so the test tracks shipped code.
   const explain = new Function(FORMAT_BYTES_JS + UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
@@ -273,6 +340,15 @@ describe("upload-dropzone: failure classification", () => {
       { name: "x.bin", size: 9 },
     );
     expect(r.message).toBe("Upload failed. Request a fresh upload link and try again.");
+    expect(r.retry).toBe(true);
+  });
+
+  it("415 on an image names its type and points to Choose file", () => {
+    const r = explain("upload", 415, "application/json", json("unsupported_media_type", { allowed: ["image/png"] }), {
+      name: "pasted-image.heic",
+      type: "image/heic",
+    });
+    expect(r.message).toBe("This image type isn't accepted here (image/heic). Use Choose file with a JPEG or PNG.");
     expect(r.retry).toBe(true);
   });
 
