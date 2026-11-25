@@ -43,6 +43,10 @@ These are load-bearing, not preferences:
 - **The two Drizzle schemas are twins.** Any change to
   `src/db/schema-sqlite.ts` must land identically in `src/db/schema-pg.ts`,
   followed by `npm run db:generate` to regenerate migrations for both.
+  `--name` reaches only the Postgres run, so rename the SQLite file and its
+  journal tag to match. A migration that existing data could make fail (a
+  new unique index, say) gets a guard in `src/db/migrationGuards.ts` that
+  names the offending rows and refuses before anything is applied.
 
 ## Commits and pull requests
 

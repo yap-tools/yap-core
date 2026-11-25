@@ -339,5 +339,32 @@ describeEachAdapter("bundles over REST", (adapter) => {
       expect(denied.body.error.details.decidedBy.effect).toBe("deny");
       expect(denied.body.error.details.decidedBy.grantId).toBeTruthy();
     });
+
+    it("grants on a bundle by email, and its rows name each grantee", async () => {
+      const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
+      const erin = (await sysadmin.post("/v1/users", { name: "Erin", email: "erin@example.com" })).body.user;
+      const res = await alice.post(`/v1/bundles/${openBundle}/grants`, {
+        email: "ERIN@example.com",
+        capabilities: ["read_items", "edit_items"],
+        effect: "allow",
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(res.body.data.map((g: any) => g.userId)).toEqual([erin.id, erin.id]);
+
+      const rows = (await alice.get(`/v1/bundles/${openBundle}/grants`)).body.data;
+      expect(rows.filter((g: any) => g.userId === erin.id)).toEqual([
+        expect.objectContaining({ userName: "Erin", userEmail: "erin@example.com", resourceType: "bundle" }),
+        expect.objectContaining({ userName: "Erin", userEmail: "erin@example.com", resourceType: "bundle" }),
+      ]);
+      const sensitive = (await alice.get(`/v1/bundles/${sensitiveBundle}/grants`)).body.data;
+      expect(sensitive.find((g: any) => g.userId === bobId)).toMatchObject({ userName: "Bob", userEmail: null, effect: "deny" });
+
+      const unknown = await alice.post(`/v1/bundles/${openBundle}/grants`, {
+        email: "nobody@example.com",
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      expect(unknown.status).toBe(404);
+    });
   });
 });

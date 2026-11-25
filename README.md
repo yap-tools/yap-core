@@ -224,7 +224,12 @@ They are taken automatically at the moments data is at risk:
 - **Before schema migrations** — at startup, when the server detects pending
   migrations on an existing database, it writes a backup first. If that
   backup fails, the server refuses to start rather than migrate data it
-  could not save (`YAP_BACKUP_BEFORE_MIGRATE=false` opts out).
+  could not save (`YAP_BACKUP_BEFORE_MIGRATE=false` opts out). A migration
+  that cannot take the data as it stands is checked first and applies
+  nothing: the server refuses to start and logs what to change. So far one
+  does: `0019_unique_user_email` stops when users share an email address and
+  names them; give all but one of each a different email or none on the
+  previous version (`PATCH /v1/users/:id {"email": null}`), then upgrade again.
 - **Before upgrades** — `yap upgrade` backs up via the currently-installed
   server before swapping code (`--skip-backup` opts out).
 - **On a schedule** — set `YAP_BACKUP_SCHEDULE="0 3 * * *"` and optionally
@@ -276,7 +281,9 @@ metadata and descending only into the relevant branch:
   `create_service`, `update_service`, `delete_service`, `secret_request` and
   `approval_request`.
   Management (gated by the matching capability): `update_space` /
-  `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
+  `delete_space`, `list_grants` / `grant_role` / `revoke_grant` (rows name
+  the grantee with `userName` and `userEmail`; `grant_role` takes `user_id`
+  or `email`),
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
 - **`list_drivers`** → the installed service drivers, their actions, and each

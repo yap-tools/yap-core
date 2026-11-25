@@ -158,7 +158,8 @@ A bundle holds docs, item-types (schemas with items), static files, and services
    schedules (create_schedule,
    update_schedule, delete_schedule, list_schedules), and management — gated by the matching capability:
    spaces (update_space/delete_space, manage_space), roles
-   (list_grants/grant_role/revoke_grant, manage_roles), bundles & schemas
+   (list_grants/grant_role/revoke_grant, manage_roles: rows name the grantee
+   with userName and userEmail; grant_role takes user_id or email), bundles & schemas
    (update_bundle/delete_bundle, create/update/delete_item_type,
    add/update/delete_property, edit_bundles).
 

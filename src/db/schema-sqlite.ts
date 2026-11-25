@@ -28,7 +28,10 @@ export const users = sqliteTable(
     // An email address the operator gave the user (an invite) or a provider
     // vouched for at sign-up, lowercased. Used only to match a first provider
     // login to an invite and to check the sign-up allowlist; never to
-    // recognise a returning user (see user_identities). Not unique.
+    // recognise a returning user (see user_identities), and to name the
+    // grantee of a grant. Unique when set; any number of users may leave it
+    // null. Every write goes through checkEmail (core/users.ts) or the
+    // provider claim mapping, so the stored form is already normalised.
     email: text("email"),
     // 1: this user logs in only through a login provider. Their access keys
     // are refused everywhere and none can be made for them (core/keyLogin.ts).
@@ -36,7 +39,7 @@ export const users = sqliteTable(
     providerLoginOnly: integer("provider_login_only").notNull().default(0),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId), index("users_email_idx").on(t.email)],
+  (t) => [uniqueIndex("users_external_id_idx").on(t.externalId), uniqueIndex("users_email_idx").on(t.email)],
 );
 
 /** Login-provider identities linked to a user (core/oidc.ts): the provider's

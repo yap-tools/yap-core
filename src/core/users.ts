@@ -10,7 +10,7 @@ import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 
 import type { BlobStore } from "../blob/index.js";
 import { generateAccessKey, hashKey } from "../crypto.js";
-import type { Db, DbClient } from "../db/index.js";
+import { isUniqueViolation, type Db, type DbClient } from "../db/index.js";
 import {
   checkDeniedCapabilities,
   parseDeniedCapabilities,
@@ -18,7 +18,7 @@ import {
   type AccountCapability,
 } from "./accountCapabilities.js";
 import { currentKeyScope, type KeyScope } from "./authScope.js";
-import { invalid, notFound } from "./errors.js";
+import { invalid, notFound, YapError } from "./errors.js";
 import { keyCreationRefused, keyRefusal, type KeyLoginConfig } from "./keyLogin.js";
 import { clampLimit, decodeCursor, toPage, type Page } from "./pagination.js";
 import { newId, nowIso } from "./util.js";
@@ -38,9 +38,10 @@ export interface User {
   deniedCapabilities: AccountCapability[];
   /**
    * An address the operator gave the user, or the one a provider vouched for
-   * at sign-up; lowercased. Only matches a first provider login to an invite
-   * (a user with an email and no linked identity yet); a returning user is
-   * recognised by their linked identity, never by this. Not unique.
+   * at sign-up; lowercased. Unique per instance when set. It matches a first
+   * provider login to an invite (a user with an email and no linked identity
+   * yet) and lets a grant name its grantee by address (getUserByEmail); a
+   * returning user is recognised by their linked identity, never by this.
    */
   email: string | null;
   /**
@@ -107,6 +108,46 @@ export function checkEmail(raw: unknown): string {
   return email;
 }
 
+/** The unique index on users.email, as isUniqueViolation names it. */
+export const USERS_EMAIL_INDEX = { index: "users_email_idx", column: "users.email" };
+
+/**
+ * Runs a write that may set `email` and turns the unique index refusing it
+ * into a 409 naming the user who has the address. The index decides, so a
+ * concurrent write that takes the address first is caught the same way.
+ */
+async function withEmailConflict<T>(db: Db, email: string | null | undefined, write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (!email || !isUniqueViolation(err, USERS_EMAIL_INDEX)) throw err;
+    const holder = await findUserByEmail(db, email);
+    throw new YapError(
+      "conflict",
+      `email ${email} is already used by ${holder ? `user ${holder.id}` : "another user"}`,
+      holder ? { email, userId: holder.id } : { email },
+    );
+  }
+}
+
+/** The user carrying this stored (already normalised) address, if any. */
+export async function findUserByEmail(db: Db, email: string): Promise<User | null> {
+  const { users } = db.tables;
+  const rows = await db.client.select().from(users).where(eq(users.email, email));
+  return rows[0] ? toUser(rows[0]) : null;
+}
+
+/**
+ * The user carrying this address, normalised like every stored email
+ * (checkEmail), so case and surrounding space do not matter. 404 when no user
+ * has it. A user with an email and no login yet (an invite) counts.
+ */
+export async function getUserByEmail(db: Db, raw: unknown): Promise<User> {
+  const user = await findUserByEmail(db, checkEmail(raw));
+  if (!user) throw new YapError("not_found", "no user with that email");
+  return user;
+}
+
 const EXTERNAL_ID_MAX_LENGTH = 255;
 
 function checkExternalId(externalId: string): string {
@@ -128,7 +169,8 @@ function checkFlag(raw: unknown): boolean {
  * on a first provider login: such a user logs in through their provider). An
  * initial key is refused where no key may be made: key login switched off for
  * the instance, or `providerLoginOnly` given (`initialKeyAllowed` says which
- * a caller may ask for). With an `externalId` the call is idempotent: if a
+ * a caller may ask for). An `email` another user already has is a 409. With
+ * an `externalId` the call is idempotent: if a
  * user already carries it, nothing is written and that user comes back with
  * `created: false` and no key — the `name`, `email`, `deniedCapabilities`,
  * `providerLoginOnly` and options given on the repeated call are ignored.
@@ -171,8 +213,10 @@ export async function createUser(
   const refused = mintKey ? keyRefusal(config, providerLoginOnly) : null;
   if (refused) throw keyCreationRefused(config, refused);
   const { users, spaces, accessKeys } = db.tables;
-
-  return db.transaction(function* (tx) {
+  // A repeated create (its externalId already names a user) stops at that
+  // index's DO NOTHING on both dialects, so its email is never checked: the
+  // read ignores it. Only a new user's address can be refused.
+  return withEmailConflict(db, email, () => db.transaction(function* (tx) {
     // The unique index decides races: a concurrent create with the same
     // externalId either waits for this transaction or inserts nothing. The
     // loop covers the user it lost to being deleted before it could be read.
@@ -232,7 +276,7 @@ export async function createUser(
       return { created: true, user, personalSpaceId, initialKey: { id: keyId, name: "default", key } };
     }
     throw new Error(`could not create or find the user with externalId ${externalId}`);
-  });
+  }));
 }
 
 /** Lists users, oldest first; `externalId` narrows it to the one match (or none). */
@@ -266,7 +310,7 @@ export async function getUser(db: Db, userId: string): Promise<User> {
  * email address (null clears it), and whether they log in through a provider
  * only. Setting an email on a user with no linked identity invites them: the
  * first provider login with that address (verified by the provider, or trusted
- * for it) claims the account.
+ * for it) claims the account. An address another user already has is a 409.
  * Setting `providerLoginOnly` refuses their keys from the next request on and
  * deletes the OAuth grants (and unexchanged codes) their keys authorized, in
  * the same transaction, so a client connected through a key reconnects
@@ -289,12 +333,13 @@ export async function updateUser(
   if (patch.email !== undefined) set.email = patch.email === null ? null : checkEmail(patch.email);
   if (patch.providerLoginOnly !== undefined) set.providerLoginOnly = checkFlag(patch.providerLoginOnly) ? 1 : 0;
   const { users } = db.tables;
-  return db.transaction(function* (tx) {
+  // An unknown user updates no row, so it is a 404 before any conflict.
+  return withEmailConflict(db, set.email, () => db.transaction(function* (tx) {
     const updated: UserRow[] = yield tx.update(users).set(set).where(eq(users.id, userId)).returning();
     if (updated.length === 0) throw notFound("user", userId);
     if (set.providerLoginOnly === 1) yield* revokeKeyBackedGrants(tx, db.tables, userId);
     return toUser(updated[0]!);
-  });
+  }));
 }
 
 /**

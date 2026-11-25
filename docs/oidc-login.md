@@ -227,15 +227,18 @@ again. The provider's own session makes that a quick redirect.
   it withdraws the invite.
   Two logins claiming the same invite at once are serialised: the second finds
   it claimed. Any configured provider can claim an invite, so set an email
-  only on a user you mean to invite. If several unclaimed users carry the same
-  email, the login is refused until the operator sorts it out.
+  only on a user you mean to invite. Email is unique, so one address names at
+  most one invite.
 - **Sign-up**, only with `YAP_OIDC_SIGNUP=true`: a first login with no account
   and no invite creates one when that email is on `YAP_OIDC_ALLOW`, either as
   an exact address or under an `@domain` entry. Under the `google` preset a
   domain entry also needs the ID token's `hd` claim to name that domain (see
   [google](#google)). The new user gets a personal space
   and **no access key**. The allowlist only decides who may create an account.
-  After that the user is recognised by their identity.
+  After that the user is recognised by their identity. An address that
+  already belongs to another user (one who logs in some other way) is refused
+  with "This email address already belongs to a Yap account that logs in
+  another way": sign-up never makes a second account with it.
 - Anyone else sees "There is no Yap account for this login."
 
 A user a provider login created or claimed is set to **provider login only**
@@ -245,8 +248,13 @@ keys had authorized. To give such a user a key, for the CLI say, the sysadmin
 clears the flag (`PATCH /v1/users/:id {"providerLoginOnly": false}`) and then
 issues one.
 
-`users.email` is nullable and not unique. It is used only for invite and
-allowlist matching.
+`users.email` is nullable and unique when set: creating or updating a user
+with an address another user has is a `409`. It is used for invite and
+allowlist matching and to name a grantee (`POST …/grants {"email"}`), never to
+recognise a returning login. An instance upgraded from a version that allowed
+shared addresses stops at migration `0019_unique_user_email` and names them;
+give all but one of each a different email or none (`PATCH /v1/users/:id
+{"email": null}` on the previous version), then start again.
 
 ## Grants made after a provider login
 

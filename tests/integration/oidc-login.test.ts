@@ -569,6 +569,18 @@ describeEachAdapter("oidc login", (adapter) => {
       expect(spaces).toMatchObject([{ personal: 1 }]);
     });
 
+    it("refuses a sign-up with an address another account already has: email is unique", async () => {
+      // Carol (signed up above) owns carol@corp.example; a second subject with it is not let in.
+      idp.next = { sub: "carol-other-sub", email: "carol@corp.example", email_verified: true, name: "Carol Again" };
+      const { res, html } = await consentLogin(signupApp.baseUrl);
+      expect(res.status).toBe(400);
+      expect(html).toContain("This email address already belongs to a Yap account that logs in another way");
+      const sys = apiClient(signupApp.baseUrl, TEST_SYSADMIN_KEY);
+      const users = (await sys.get("/v1/users")).body.data;
+      expect(users.filter((u: any) => u.email === "carol@corp.example")).toHaveLength(1);
+      expect(users.some((u: any) => u.name === "Carol Again")).toBe(false);
+    });
+
     it("refuses an unverified or unlisted address", async () => {
       for (const next of [
         { sub: "dan-sub", email: "dan@corp.example", email_verified: "true" },

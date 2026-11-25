@@ -675,7 +675,7 @@ export const secondTier: Record<string, SecondTierTool> = {
   // manage_roles (space- or bundle-scoped — targets the bundle if bundle_id is given)
   list_grants: {
     description:
-      "List the grant rows on the target resource (the bundle if bundle_id is given, else the space). Returns role assignments as (user, capability, effect) rows.",
+      "List the grant rows on the target resource (the bundle if bundle_id is given, else the space). Returns role assignments as (user, capability, effect) rows; each row names its grantee with userId, userName and userEmail (null when the user has no email).",
     capability: "manage_roles",
     params: noParams,
     targets: ["bundle", "space"],
@@ -685,14 +685,15 @@ export const secondTier: Record<string, SecondTierTool> = {
   },
   grant_role: {
     description:
-      "Grant a role (capabilities) to a user on the target resource (bundle if bundle_id is given, else space). Params: user_id, capabilities (a capability name or an array of them), effect (\"allow\" | \"deny\").",
+      "Grant a role (capabilities) to a user on the target resource (bundle if bundle_id is given, else space). Params: the grantee as exactly one of user_id or email (matched case-insensitively; a user invited by email who has not logged in yet counts, and no user is created: an unknown address is not_found), capabilities (a capability name or an array of them), effect (\"allow\" | \"deny\"). Returns the new rows, shaped like list_grants rows.",
     capability: "manage_roles",
-    params: { user_id: { required: true }, capabilities: { required: true }, effect: { required: true } },
+    params: { user_id: {}, email: {}, capabilities: { required: true }, effect: { required: true } },
     targets: ["bundle", "space"],
     handler: async (env, params) => ({
       result: {
         data: await grantsCore.createGrants(env.db, env.userId, await grantTargetFor(env), {
-          userId: String(params.user_id),
+          userId: params.user_id,
+          email: params.email,
           capabilities: toCapabilityList(params.capabilities),
           effect: params.effect as "allow" | "deny",
         }),
