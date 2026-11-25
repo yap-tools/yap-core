@@ -65,6 +65,24 @@ export const UPLOAD_FINALIZE_JS = `
   }
 `;
 
+/** Human-readable byte sizes ("512 B", "2.0 KB", "10.9 MB", "312 MB"), shared
+ * by every widget that prints a file size. Units are 1024-based; one decimal
+ * below 100 of a unit, none from 100 up. Returns "" when the size is missing.
+ * Display only: the server always sends and stores sizes as plain numbers. */
+export const FORMAT_BYTES_JS = `
+  function formatBytes(size) {
+    if (size === null || size === undefined || size === "" || isNaN(Number(size))) return "";
+    var units = ["B", "KB", "MB", "GB"];
+    var n = Number(size), i = 0;
+    while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++; }
+    if (i === 0) return String(n) + " " + units[0];
+    var text = n < 100 ? n.toFixed(1) : String(Math.round(n));
+    // Rounding can reach the next unit's threshold (1023.96 KB -> "1024.0").
+    if (parseFloat(text) >= 1024 && i < units.length - 1) { text = "1.0"; i++; }
+    return text + " " + units[i];
+  }
+`;
+
 /** The upload-dropzone's failure classifier, exported as source so the widget
  * and its unit test exercise one definition. It keys purely on the HTTP status
  * and our structured error `code` ({ error: { code, details } }) — never on the
@@ -72,13 +90,6 @@ export const UPLOAD_FINALIZE_JS = `
  * friendly copy. The shared contract is the status code: the REST layer is
  * tested to return 413 for oversized files and 415 for disallowed types. */
 export const UPLOAD_ERROR_JS = `
-  function formatBytes(size) {
-    if (!size && size !== 0) return "";
-    var units = ["bytes", "KB", "MB", "GB"];
-    var n = Number(size), i = 0;
-    while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++; }
-    return (i === 0 ? String(n) : n.toFixed(n < 10 ? 1 : 0)) + " " + units[i];
-  }
   function fileTypeLabel(file) {
     if (file && file.type) return file.type;
     var m = /\\.([^.]+)$/.exec((file && file.name) || "");
@@ -485,6 +496,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
           bar.style.width = "0%";
           phase.textContent = "";
         }
+        ${FORMAT_BYTES_JS}
         ${UPLOAD_ERROR_JS}
         ${UPLOAD_FINALIZE_JS}
         function imageExtension(type) {
@@ -597,7 +609,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
             })
             .then(function (f) {
               locked = true;
-              setStatus("Uploaded " + f.name + " (" + f.size + " bytes)", "done");
+              setStatus("Uploaded " + f.name + " (" + formatBytes(f.size) + ")", "done");
               setProgress(100, "Complete", false);
               emit("upload-complete", { file_id: d.file_id, name: f.name, size: f.size });
             })
@@ -714,6 +726,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
       a.dl { color: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 2px; }
     `,
     render: `
+      ${FORMAT_BYTES_JS}
       onData(function (d) {
         var root = document.getElementById("root");
         // The card's own fields. A payload without any of them may be a wrapper
@@ -748,7 +761,7 @@ export const WIDGETS: Record<string, WidgetDef> = {
         var name = esc(displayName);
         var url = safeUrl(d.url);
         var size = Number(d.size) || 0;
-        var sizeNote = size ? '<span class="muted"> \\u00b7 ' + size + " bytes</span>" : "";
+        var sizeNote = size ? '<span class="muted"> \\u00b7 ' + formatBytes(size) + "</span>" : "";
         var inner;
         document.title = displayName;
         if ((kind === "audio" || kind === "video") && window.navigator && navigator.mediaSession && window.MediaMetadata) {

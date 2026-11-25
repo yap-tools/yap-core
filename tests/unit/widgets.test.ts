@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
+import { FORMAT_BYTES_JS, TOOL_RESULT_UNWRAP_JS, UPLOAD_ERROR_JS, WIDGET_PERMISSIONS, WIDGETS, widgetHtml } from "../../src/widgets/registry.js";
 
 describe("widgetHtml", () => {
   it("escapes < in the embedded JSON so a crafted name cannot break out of the script tag", () => {
@@ -213,9 +213,45 @@ describe("widgetHtml", () => {
   });
 });
 
+describe("formatBytes: human file sizes shared by the media card and the dropzone", () => {
+  // Evaluate the exact snippet the widgets inline.
+  const formatBytes = new Function(FORMAT_BYTES_JS + " return formatBytes;")() as (n: unknown) => string;
+
+  it("uses 1024-based units, one decimal below 100 and none from 100 up", () => {
+    expect(formatBytes(11377893)).toBe("10.9 MB");
+    expect(formatBytes(2048)).toBe("2.0 KB");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(150 * 1024 * 1024)).toBe("150 MB");
+    expect(formatBytes(3 * 1024 ** 3)).toBe("3.0 GB");
+  });
+
+  it("does not print a value past the unit boundary", () => {
+    expect(formatBytes(1024 * 1024 - 1)).toBe("1.0 MB");
+  });
+
+  it("returns an empty string for a missing size", () => {
+    expect(formatBytes(undefined)).toBe("");
+    expect(formatBytes(null)).toBe("");
+  });
+
+  it("is inlined into the media card and the dropzone, which no longer print raw bytes", () => {
+    for (const name of ["media-card", "upload-dropzone"]) {
+      const render = WIDGETS[name]!.render;
+      expect(render).toContain("function formatBytes");
+      expect(render).not.toContain('" bytes');
+    }
+    expect(WIDGETS["media-card"]!.render).toContain("formatBytes(size)");
+    expect(WIDGETS["upload-dropzone"]!.render).toContain("formatBytes(f.size)");
+  });
+
+  it("the media card shows a size note only for a non-zero size", () => {
+    expect(WIDGETS["media-card"]!.render).toContain("var sizeNote = size ? ");
+  });
+});
+
 describe("upload-dropzone: failure classification", () => {
   // Evaluate the exact source the widget embeds, so the test tracks shipped code.
-  const explain = new Function(UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
+  const explain = new Function(FORMAT_BYTES_JS + UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
     stage: string,
     status: number,
     contentType: string,
