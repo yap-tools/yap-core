@@ -77,7 +77,7 @@ All commands resolve the instance from the current directory — run them inside
 |---|---|
 | Foreground / detached / supervised | `yap serve` / `yap start`+`stop` / `yap daemon install` |
 | Survive reboots | `yap daemon install` — writes a systemd unit (Linux) or launchd LaunchAgent (macOS, starts at login) and prints the activation commands to run. Do not hand-roll one. Run `yap stop` first so the port is free. |
-| Health, logs, version bump | `yap status`, `yap logs -f`, `yap upgrade [version]` |
+| Health, logs, version bump | `yap status`, `yap logs -f`, `yap upgrade [version]` — checks the target against the data first and stops, changing nothing, if it could not start; `yap upgrade --check` only checks |
 | Any API call from the instance dir | `yap api GET /v1/spaces` — authenticated passthrough; prefer it over curl |
 
 ## Gotchas

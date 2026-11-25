@@ -80,6 +80,14 @@ function journalEntries(dialect: "sqlite" | "pg"): JournalEntry[] {
   return (JSON.parse(readFileSync(path, "utf8")) as { entries: JournalEntry[] }).entries;
 }
 
+/** Where the migrator records applied migrations, per dialect (one row each). */
+export const MIGRATIONS_TABLE = { sqlite: "__drizzle_migrations", pg: "drizzle.__drizzle_migrations" } as const;
+
+/** Number of migrations this build ships for a dialect (its journal's length). */
+export function shippedMigrationCount(dialect: "sqlite" | "pg"): number {
+  return journalEntries(dialect).length;
+}
+
 /** The migration tag at a journal index (for backup manifests). */
 export function journalTag(dialect: "sqlite" | "pg", index: number): string {
   const entry = journalEntries(dialect).find((e) => e.idx === index);
@@ -226,7 +234,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       journalLength: () => journalEntries("sqlite").length,
       appliedMigrations: async () => {
         try {
-          const row = sqlite.prepare("SELECT COUNT(*) AS n FROM __drizzle_migrations").get() as { n: number };
+          const row = sqlite.prepare(`SELECT COUNT(*) AS n FROM ${MIGRATIONS_TABLE.sqlite}`).get() as { n: number };
           return row.n;
         } catch {
           return 0; // bookkeeping table absent — fresh database
@@ -304,7 +312,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     journalLength: () => journalEntries("pg").length,
     appliedMigrations: async () => {
       try {
-        const res = await pool.query("SELECT COUNT(*)::int AS n FROM drizzle.__drizzle_migrations");
+        const res = await pool.query(`SELECT COUNT(*)::int AS n FROM ${MIGRATIONS_TABLE.pg}`);
         return (res.rows[0] as { n: number }).n;
       } catch {
         return 0; // bookkeeping table absent — fresh database

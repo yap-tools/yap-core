@@ -164,7 +164,7 @@ Capability-based: roles (e.g. `read_items`, `edit_items`, `edit_docs`, `read_fil
 ## CLI
 
 ```
-Instance:  init [--version v|branch] [--port n] [--no-install] | create <dir> [--user n] | upgrade [version|branch] [--no-restart] [--skip-backup]
+Instance:  init [--version v|branch] [--port n] [--no-install] | create <dir> [--user n] | upgrade [version|branch] [--check] [--no-restart] [--skip-backup] | preflight
 Data:      backup [--out <path>] | backup list | restore <name|path> | --latest [--force]
 Run:       serve (foreground) | start/stop/status | logs [-n N] [-f] | daemon install|uninstall [--name]
 Manage:    user create <name> [--save] | api <METHOD> </path> [body|-] [--sysadmin]

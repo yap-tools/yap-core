@@ -9,6 +9,15 @@
  * run only while that migration is still pending. Each names the first
  * journal index its query needs (the tables or columns it reads): on a
  * database not yet that far, the data it looks for cannot exist.
+ *
+ * This list is the one place such checks live, and two callers run it: the
+ * server at startup, right before it migrates (the backstop), and
+ * `yap preflight` (db/preflight.ts), which `yap upgrade` runs from the new
+ * version against the live database before anything is installed. The
+ * convention: a migration that can fail, or would have to guess, on data an
+ * instance may already hold ships a guard here in the same change. A check
+ * must be read-only (preflight runs it inside a read-only transaction) and
+ * its message must say what to change on the version being upgraded from.
  */
 
 /** Runs one read-only SQL statement and returns its rows. */
@@ -54,7 +63,7 @@ const GUARDS: MigrationGuard[] = [
       return (
         `a user's email is now unique, and these addresses are shared by more than one user: ${list}. ` +
         "Give all but one of each a different email or none, with the sysadmin user update " +
-        '(PATCH /v1/users/<id> {"email": null}) on the version you are upgrading from, then start this version again. ' +
+        '(PATCH /v1/users/<id> {"email": null}) on the version you are upgrading from, then upgrade to or start this version again. ' +
         "Nothing was changed."
       );
     },
@@ -64,13 +73,22 @@ const GUARDS: MigrationGuard[] = [
 /**
  * Runs the guards of every migration that will be applied: those after the
  * `applied` count already recorded, up to and including journal index
- * `through`. Throws MigrationRefused on the first that refuses.
+ * `through`. Returns one MigrationRefused per guard that refuses, in journal
+ * order; empty when every pending migration may go ahead.
  */
-export async function checkPendingMigrations(applied: number, through: number, query: RawQuery): Promise<void> {
+export async function pendingMigrationRefusals(applied: number, through: number, query: RawQuery): Promise<MigrationRefused[]> {
+  const refusals: MigrationRefused[] = [];
   for (const guard of GUARDS) {
     if (guard.index < applied || guard.index > through) continue; // already applied, or not part of this run
     if (applied <= guard.needs) continue; // the data it checks cannot exist yet
     const refusal = await guard.check(query);
-    if (refusal) throw new MigrationRefused(guard.tag, refusal);
+    if (refusal) refusals.push(new MigrationRefused(guard.tag, refusal));
   }
+  return refusals;
+}
+
+/** pendingMigrationRefusals for the migrator: throws the first refusal. */
+export async function checkPendingMigrations(applied: number, through: number, query: RawQuery): Promise<void> {
+  const [first] = await pendingMigrationRefusals(applied, through, query);
+  if (first) throw first;
 }

@@ -150,7 +150,46 @@ Three ways to run an instance, by how much you need it to survive:
 (macOS) pointing at the instance directory and prints the activation
 commands — the OS owns supervision; the CLI deliberately is not a process
 manager. `yap upgrade [version]` reinstalls the vendored server and restarts
-a running instance.
+a running instance (see *Upgrading* below).
+
+### Upgrading
+
+`yap upgrade [version]` checks the new version against the instance's data
+before it installs anything, so an upgrade cannot leave an instance that
+refuses to start:
+
+1. It installs the target into a staging directory (`.yap/staging`), leaving
+   the installed server, and the process running it, as they are.
+2. It runs the staged version's `yap preflight` against the live database.
+   Preflight opens the database read-only and runs the checks of every
+   migration that version would apply (see *Backups* for what they guard
+   against). A running server keeps serving meanwhile.
+3. If a check fails, the upgrade stops: it prints what to change and on which
+   rows, installs nothing, takes no backup and does not restart. The old
+   version is still installed and running. Make the change, then run
+   `yap upgrade` again.
+4. Otherwise it backs up with the installed server, installs the exact build
+   it checked, and restarts an instance started with `yap start`.
+
+`yap upgrade [version] --check` does steps 1 and 2 only: it reports, exits 1
+when the target would refuse to start, and changes nothing. The staging copy
+is removed after every run. A target from before preflight has nothing to
+run in step 2; the upgrade says so and goes on.
+
+`yap preflight` on its own checks the server installed in the instance
+against its data, and exits 0 or 1. Run from a different build of yap-core
+(`node <path>/dist/index.js preflight` in the instance directory), it checks
+that build.
+
+The check is a snapshot: data written after it can still trip a check. The
+server runs the same checks again right before it migrates at startup and
+refuses to start, changing nothing, if one fails.
+
+Under `yap daemon install` (systemd or launchd), and on any host where the
+code is installed some other way, `yap upgrade` does not restart the server,
+and a server that refuses to start is restarted over and over by the
+supervisor. Run `yap upgrade --check` (or, after installing the new version
+by hand, `yap preflight`) before you restart it.
 
 **Tracking `main` (dev builds).** The `--version` argument (on `init`,
 `create`, and `upgrade`) also accepts a branch name or commit instead of a
@@ -230,8 +269,12 @@ They are taken automatically at the moments data is at risk:
   does: `0019_unique_user_email` stops when users share an email address and
   names them; give all but one of each a different email or none on the
   previous version (`PATCH /v1/users/:id {"email": null}`), then upgrade again.
+  `yap upgrade` runs the same checks before it installs a new version (see
+  *Upgrading*), so they normally stop an upgrade instead of a start.
 - **Before upgrades** — `yap upgrade` backs up via the currently-installed
-  server before swapping code (`--skip-backup` opts out).
+  server before swapping code (`--skip-backup` opts out), once the new
+  version has passed its preflight against the data (see *Upgrading*); an
+  upgrade that stops at preflight takes no backup.
 - **On a schedule** — set `YAP_BACKUP_SCHEDULE="0 3 * * *"` and optionally
   `YAP_BACKUP_KEEP=7`; the server runs the schedule in-process, no cron job
   needed.

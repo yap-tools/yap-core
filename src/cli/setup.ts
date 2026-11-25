@@ -3,20 +3,27 @@
  * than talk to it. The one network act is vendoring the server from GitHub;
  * everything else is local file generation.
  */
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { CliError } from "../instance/errors.js";
+import { envPath, stagingDir } from "../instance/layout.js";
 import { runningPid, stopInstance } from "../instance/proc.js";
 import {
   classifyVersion,
+  entrySupportsPreflight,
+  execEntry,
   execInServer,
   installedGitCommit,
   installServer,
+  pinnedSpec,
   readSource,
+  serverEntryIn,
   serverSupportsBackup,
+  serverVersionIn,
   sourceLabel,
+  type Source,
   vendoredServerVersion,
 } from "../instance/server.js";
 import { initInstance } from "./init.js";
@@ -65,10 +72,30 @@ export async function cmdInit(dir: string, argv: string[]): Promise<void> {
   console.log(`Then connect any MCP client to http://localhost:${values.port ?? 8787}/mcp with that user's key.`);
 }
 
+/**
+ * Moves an instance to another server version in stages, so a version that
+ * could not start on this instance's data is never installed:
+ *
+ * 1. install the target into a staging directory (.yap/staging), leaving the
+ *    instance's own server, and the process running it, untouched;
+ * 2. run the staged build's `yap preflight` against the live database, which
+ *    runs its pending migrations' guards read-only;
+ * 3. on a refusal, print it, remove the staging copy and stop: no backup,
+ *    no install, no restart;
+ * 4. otherwise back up with the old server, install the target in place and
+ *    restart a `yap start` instance.
+ *
+ * `--check` stops after step 2. A target from before preflight existed has
+ * nothing to run in step 2; that is said and the upgrade goes on.
+ */
 export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { "no-restart": { type: "boolean" }, "skip-backup": { type: "boolean" } },
+    options: {
+      "no-restart": { type: "boolean" },
+      "skip-backup": { type: "boolean" },
+      check: { type: "boolean" },
+    },
     allowPositionals: true,
   });
   const before = vendoredServerVersion(dir);
@@ -78,6 +105,12 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
   // whatever the instance already tracks — the tip of its branch, or the
   // latest release.
   const source = positionals[0] ? classifyVersion(positionals[0]) : readSource(dir);
+
+  const spec = await checkStaged(dir, source, before);
+  if (values.check) {
+    console.log(`check only: nothing was installed or backed up (${before} unchanged)`);
+    return;
+  }
 
   // Portable safety copy of data/ before the code swap, taken by the
   // currently-installed server (which matches the data's schema). Versions
@@ -98,7 +131,7 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
     }
   }
 
-  await installServer(dir, source);
+  await installServer(dir, source, { spec });
   const after = vendoredServerVersion(dir);
 
   // A git ref keeps the same package version across commits, so the version
@@ -116,6 +149,51 @@ export async function cmdUpgrade(dir: string, argv: string[]): Promise<void> {
     console.log("restarting…");
     await stopInstance(dir);
     await cmdStart(dir);
+  }
+}
+
+/**
+ * Stages 1–3 of cmdUpgrade: install the target beside the instance, run its
+ * preflight against the live database, and throw when it refuses. The
+ * staging copy is removed whatever happens, and one an interrupted upgrade
+ * left behind is cleared at the start (so two upgrades of one instance must
+ * not run at once, as they never could: both would install in place). Returns the pinned spec of what was
+ * checked, for the real install.
+ */
+async function checkStaged(dir: string, source: Source, before: string): Promise<string | undefined> {
+  const staging = stagingDir(dir);
+  rmSync(staging, { recursive: true, force: true }); // a copy left by an interrupted run
+  try {
+    console.log(`checking ${sourceLabel(source)} against this instance before installing it…`);
+    try {
+      await installServer(dir, source, { prefix: staging });
+    } catch (err) {
+      if (!(err instanceof CliError)) throw err;
+      throw new CliError(`${err.message} (while staging it to check; nothing was changed)`);
+    }
+    const entry = serverEntryIn(staging);
+    // Fail closed: a staged copy without a server is not an older release.
+    if (!existsSync(entry)) throw new CliError(`staging ${sourceLabel(source)} produced no server — nothing was changed`);
+    const target = serverVersionIn(staging) ?? "the target";
+    const spec = pinnedSpec(staging, source);
+    if (!entrySupportsPreflight(entry)) {
+      console.error(`note: ${target} predates upgrade preflight — nothing to check before installing it`);
+      return spec;
+    }
+    // The staged build finds the instance's .env from the instance directory;
+    // an explicit YAP_ENV_FILE already in the environment still wins.
+    const env: Record<string, string> = {};
+    if (!process.env.YAP_ENV_FILE && existsSync(envPath(dir))) env.YAP_ENV_FILE = envPath(dir);
+    const code = await execEntry(entry, dir, ["preflight"], env);
+    if (code !== 0) {
+      throw new CliError(
+        `${target} cannot start on this instance as it stands (see above) — nothing was installed, ` +
+          `and ${before} is still installed${runningPid(dir) ? " and running" : ""}`,
+      );
+    }
+    return spec;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 

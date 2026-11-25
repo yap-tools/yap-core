@@ -45,8 +45,15 @@ These are load-bearing, not preferences:
   followed by `npm run db:generate` to regenerate migrations for both.
   `--name` reaches only the Postgres run, so rename the SQLite file and its
   journal tag to match. A migration that existing data could make fail (a
-  new unique index, say) gets a guard in `src/db/migrationGuards.ts` that
-  names the offending rows and refuses before anything is applied.
+  new unique index, say) ships, in the same change, a guard in
+  `src/db/migrationGuards.ts` that names the offending rows and refuses
+  before anything is applied. That registry is the one place such checks
+  live: the server runs it before migrating at startup, and `yap preflight`
+  runs it read-only before `yap upgrade` installs a version. So a guard's
+  query must only read, and its message must say what to change on the
+  version being upgraded from. Test it on both dialects, through
+  `migrate()` and through `preflight()` (see
+  `tests/integration/migration-0019.test.ts`).
 
 ## Commits and pull requests
 

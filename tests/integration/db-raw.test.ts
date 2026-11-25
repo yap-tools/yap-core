@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 
+import { shippedMigrationCount } from "../../src/db/index.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 
 describeEachAdapter("db raw access", (adapter) => {
@@ -8,6 +9,8 @@ describeEachAdapter("db raw access", (adapter) => {
     const journal = db.journalLength();
     expect(journal).toBeGreaterThanOrEqual(4);
     expect(await db.appliedMigrations()).toBe(journal);
+    // The count preflight compares against, read without opening a database.
+    expect(shippedMigrationCount(adapter.dialect)).toBe(journal);
     await db.close();
   });
 
