@@ -1,10 +1,8 @@
 /**
- * The built-in `http` driver: outbound, parameterized HTTP calls. This is the
- * firing half of the legacy hooks.ts (see that file's header for the security
- * model this preserves) ported onto the driver contract — the allowlisting of
- * *which* parameters may be supplied, and the authoring-time SSRF pre-check,
- * now live one layer up (service authoring / the runs layer); this module
- * owns only template substitution and the guarded transport call.
+ * The built-in `http` driver: outbound, parameterized HTTP calls. The
+ * allowlisting of *which* parameters may be supplied, and the authoring-time
+ * SSRF pre-check, live one layer up (service authoring / the runs layer); this
+ * module owns only template substitution and the guarded transport call.
  *
  * `ctx.params` arrives already validated and pinned to the service's declared
  * spec — this driver does not re-check parameter names, only substitutes
@@ -30,7 +28,7 @@ import { DRIVER_API, type DriverDefinition, type Egress, type RunContext } from 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const PLACEHOLDER = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
 
-// Mirrors hooks.ts's hookTransportSchema: the zod schema validates the config
+// The zod schema validates the config
 // shape at authoring time; the TypeScript type is inferred from it so the two
 // cannot drift.
 export const httpConfigSchema = z.object({
@@ -148,7 +146,7 @@ export const httpConfigSchemaInfo: DriverConfigSchema = {
 };
 
 /** Renders the origin the SSRF guard should vouch for, with placeholders
- * neutralized (mirrors the trick in hooks.ts's validateTransport). */
+ * neutralized. */
 function materializedOrigin(url: string): string {
   return new URL(url.replace(PLACEHOLDER, "param")).origin;
 }
@@ -178,7 +176,7 @@ export function createHttpDriver(config: YapConfig): DriverDefinition {
       fire: {
         description: "Fire the configured HTTP request, substituting declared parameters.",
         params: null, // param specs come from the service record
-        timeoutMs: config.hookTimeoutMs,
+        timeoutMs: config.httpTimeoutMs,
       },
     },
 

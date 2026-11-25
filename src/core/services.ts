@@ -1,8 +1,7 @@
 /**
  * Services: the bundle-owned, named capabilities agents can run. A service is
  * a driver plus the configuration that driver needs, and the two halves have
- * very different visibility — which is the whole security model, inherited
- * from hooks.ts:
+ * very different visibility — which is the whole security model:
  *
  * - Visible to any reader of the bundle: id, name, description, driver, and
  *   the *callable* parameters of each action. That is what an agent needs to
@@ -128,7 +127,7 @@ export const DEFAULT_DRIVER = "http";
 // Defined once: the zod schema validates the REST authoring boundary and the
 // TypeScript type is inferred from it, so the public surface and the runner
 // that consumes it cannot drift. The name rule is enforced semantically by
-// validateParamSpecs (mirrors hooks.ts).
+// validateParamSpecs.
 export const serviceParamSpecSchema = z.object({
   name: z.string(),
   description: z.string().optional(),

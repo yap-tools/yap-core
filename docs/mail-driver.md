@@ -2,7 +2,7 @@
 
 Yap ships a `mail` driver alongside `http`. It lets an agent read, search, flag, send, draft, and delete drafts through one operator-configured IMAP/SMTP account, download an attachment into the service's bundle, and attach files from that bundle to a draft or a sent message — and the *service* decides which of those a given agent may do. A read-only mailbox, a triage assistant that can only propose replies, and a notifier that can send but not choose recipients are three services on the same driver.
 
-The host, port, and credentials live encrypted in the service record and never reach the agent. Every connection goes through the same guarded egress door the `http` driver uses, so it is subject to the server's SSRF policy (`YAP_HOOK_ALLOW_HOSTS` to allowlist a private mail server); TLS is verified; credentials are never sent in the clear unless an operator explicitly says so for a lab server.
+The host, port, and credentials live encrypted in the service record and never reach the agent. Every connection goes through the same guarded egress door the `http` driver uses, so it is subject to the server's SSRF policy (`YAP_EGRESS_ALLOW_HOSTS` to allowlist a private mail server); TLS is verified; credentials are never sent in the clear unless an operator explicitly says so for a lab server.
 
 Nothing to install: a service with `"driver": "mail"` works on every instance. (The [`examples/drivers/smtp`](../examples/drivers/smtp) folder is something else — the minimal, send-only reference for what a driver written *outside* Yap looks like, kept for driver authors.)
 
@@ -48,7 +48,7 @@ The driver publishes a config schema with `pass`, `oauth2.client_secret` and `oa
 | Gmail (personal) | app password (`pass`) | `imap.gmail.com` 993 | `smtp.gmail.com` 465 | App passwords require 2-Step Verification on the Google account. IMAP must be enabled in Gmail settings. |
 | Google Workspace | `oauth2` | `imap.gmail.com` 993 | `smtp.gmail.com` 465 | `token_url`: `https://oauth2.googleapis.com/token`. An OAuth client with the `https://mail.google.com/` scope; the admin may need to allow it. Basic auth is disabled on Workspace. |
 | Microsoft 365 | `oauth2` | `outlook.office365.com` 993 | `smtp.office365.com` 587 (starttls) | `token_url`: `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`. The app registration needs `IMAP.AccessAsUser.All` and `SMTP.Send`, and SMTP AUTH must be enabled on the mailbox. |
-| Dovecot / self-hosted | `pass` | whatever the server offers | whatever the server offers | 993/465 implicit TLS or 143/587 STARTTLS; the certificate must verify. A private address needs `YAP_HOOK_ALLOW_HOSTS`. |
+| Dovecot / self-hosted | `pass` | whatever the server offers | whatever the server offers | 993/465 implicit TLS or 143/587 STARTTLS; the certificate must verify. A private address needs `YAP_EGRESS_ALLOW_HOSTS`. |
 | GreenMail (lab) | `pass` | `greenmail` 3143, `security: "none"` | `greenmail` 3025, `security: "none"` | Set `allow_plaintext_auth: true`. The egress policy must allowlist the lab host. |
 
 ## Actions

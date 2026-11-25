@@ -102,7 +102,7 @@ describeEachAdapter("key login switched off", (adapter) => {
   beforeAll(async () => {
     idp = await startFakeProvider();
     db = await adapter.makeDb();
-    on = await bootTestApp(idp.env("test", { YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }), db);
+    on = await bootTestApp(idp.env("test", { YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }), db);
     sysOn = apiClient(on.baseUrl, TEST_SYSADMIN_KEY);
     const created = await sysOn.post("/v1/users", { name: "Ada", email: "ada@example.com" });
     ada = { id: created.body.user.id, key: created.body.initialKey.key };
@@ -112,7 +112,7 @@ describeEachAdapter("key login switched off", (adapter) => {
     await sysOn.patch(`/v1/users/${ada.id}`, { providerLoginOnly: false });
     keyToken = await connectApp(on.baseUrl, ada.key, "role:admin");
 
-    off = await bootTestApp(idp.env("test", { YAP_KEY_LOGIN: "false", YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }), db);
+    off = await bootTestApp(idp.env("test", { YAP_KEY_LOGIN: "false", YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }), db);
     sysOff = apiClient(off.baseUrl, TEST_SYSADMIN_KEY);
   });
 

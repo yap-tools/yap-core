@@ -51,7 +51,7 @@ Core fetches the provider's discovery document
 it for an hour. The issuer in it must equal the configured one, and its
 endpoints must be https. Outbound requests to the provider are plain `fetch`
 calls, not driver egress, so a provider on a private network (a self-hosted
-Keycloak) needs no `YAP_HOOK_ALLOW_HOSTS` entry.
+Keycloak) needs no `YAP_EGRESS_ALLOW_HOSTS` entry.
 
 ## Provider presets
 

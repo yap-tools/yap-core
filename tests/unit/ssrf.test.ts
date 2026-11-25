@@ -190,3 +190,51 @@ describe("createPinningLookup (connect-time validation that closes DNS rebinding
     expect(err).toBeInstanceOf(Error);
   });
 });
+
+describe("allowlist matching", () => {
+  const never = async () => {
+    throw new Error("an allowlisted host must not be resolved");
+  };
+  const allowed = (url: string, allow: string[]) => assertPublicDestination(url, allow, never);
+  const refused = (url: string, allow: string[]) =>
+    assertPublicDestination(url, allow, async () => ["10.0.0.5"]);
+
+  it("matches case-insensitively", async () => {
+    await expect(allowed("http://Internal.Example/x", ["internal.EXAMPLE"])).resolves.toBeUndefined();
+  });
+
+  it("ignores one trailing dot on the entry and on the host", async () => {
+    await expect(allowed("http://internal.example./", ["internal.example"])).resolves.toBeUndefined();
+    await expect(allowed("http://internal.example/", ["internal.example."])).resolves.toBeUndefined();
+  });
+
+  it("does not treat a second dot, a suffix or a prefix as a match", async () => {
+    await expect(refused("http://internal.example../", ["internal.example"])).rejects.toBeInstanceOf(YapError);
+    await expect(refused("http://x.internal.example/", ["internal.example"])).rejects.toBeInstanceOf(YapError);
+    await expect(refused("http://internal.example/", ["x.internal.example"])).rejects.toBeInstanceOf(YapError);
+  });
+
+  it.each(["::1", "0:0:0:0:0:0:0:1", "[::1]", "0000:0000::0001", "::0.0.0.1"])(
+    "matches IPv6 loopback written as %s against any other spelling",
+    async (entry) => {
+      for (const host of ["[::1]", "[0:0:0:0:0:0:0:1]", "[0:0::1]"]) {
+        await expect(allowed(`http://${host}:8080/`, [entry])).resolves.toBeUndefined();
+      }
+    },
+  );
+
+  it("canonicalises the resolved address side too", () => {
+    const dns: AllAddressLookup = (_h, _o, callback) => callback(null, [{ address: "::1", family: 6 }]);
+    const lookup = createPinningLookup(["0:0:0:0:0:0:0:1"], dns);
+    let err: unknown = "unset";
+    lookup("internal.corp", { all: true } as never, (e: unknown) => {
+      err = e;
+    });
+    expect(err).toBeNull();
+  });
+
+  it("does not match a different IPv6 address or one with a zone id", async () => {
+    await expect(refused("http://[::2]/", ["::1"])).rejects.toBeInstanceOf(YapError);
+    await expect(refused("http://[fe80::1%25eth0]/", ["fe80::1"])).rejects.toBeInstanceOf(YapError);
+  });
+});

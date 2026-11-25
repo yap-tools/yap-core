@@ -196,8 +196,8 @@ local dev.
 | `YAP_KEY_LOGIN` | `true` | `false` switches access-key login off for the whole instance: pages offer only the providers, no user key can be made, and user keys are refused on `/v1` and `/mcp`. Needs a provider, or startup fails ([docs/key-login.md](docs/key-login.md)) |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
-| `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
-| `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal service targets; keeps its pre-services name — it IS the knob |
+| `YAP_HTTP_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries) |
+| `YAP_EGRESS_ALLOW_HOSTS` | *(empty)* | Comma list of exact host names and IP addresses that may reach private addresses through any driver's egress (the SSRF guard's exceptions). No wildcards or CIDR ranges: an entry with `*` or `/` stops startup. An allowed name stands for every address it resolves to, private and metadata addresses included, so list only names you control. The older names `YAP_HOOK_TIMEOUT_MS` and `YAP_HOOK_ALLOW_HOSTS` are still read when the new one is unset, with a warning at startup |
 | `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
 | `YAP_RUN_TIMEOUT_CAP_MS` | *(unset = uncapped)* | Operator ceiling on any driver action's own `timeoutMs` |
 | `YAP_RUN_RETENTION_DAYS` | 7 | Terminal runs (`succeeded`/`failed`) older than this are pruned |
@@ -556,7 +556,7 @@ be the instance's externally reachable origin (https except on loopback).
   it finalized in one synchronous call. It is a plain GET of an http(s) URL —
   the caller cannot supply credentials or headers — sent through the same
   guarded egress as service drivers, so private and link-local destinations
-  are refused (`YAP_HOOK_ALLOW_HOSTS` to allowlist) and each of at most five
+  are refused (`YAP_EGRESS_ALLOW_HOSTS` to allowlist) and each of at most five
   redirects is checked again. The size cap and MIME allowlist apply, one time
   budget covers the whole download (`YAP_SIDELOAD_TIMEOUT_MS`), a failed
   sideload leaves nothing behind, and the source URL is not stored. The name
@@ -632,7 +632,7 @@ be the instance's externally reachable origin (https except on loopback).
   The built-in **`http` driver** — what every hook was, and still the default
   when a service names no driver — fires an outbound HTTP request with the
   declared parameters substituted in. Private/link-local destinations are
-  denied by default (`YAP_HOOK_ALLOW_HOSTS` to allowlist), checked at
+  denied by default (`YAP_EGRESS_ALLOW_HOSTS` to allowlist), checked at
   authoring time, again at run time, and pinned at connect time so the
   request connects only to the validated address (closing DNS-rebinding).
   JSON bodies use a structured `body_json` whose substituted values are
@@ -726,7 +726,7 @@ be the instance's externally reachable origin (https except on loopback).
   land on a run record), result or error, and its bundle I/O trail — file/item reads and item/file writes recorded as metadata only — pruned
   after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
   carries its own time budget, and only the built-in `http` driver's is
-  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); the `mail` driver and any
+  operator-tunable (`YAP_HTTP_TIMEOUT_MS`); the `mail` driver and any
   external driver declare their own budgets, which an operator can bound
   downward — never upward — with `YAP_RUN_TIMEOUT_CAP_MS`. Every run also
   records who started it and how: `userId`, `source` (`mcp`, `rest`, `hook`

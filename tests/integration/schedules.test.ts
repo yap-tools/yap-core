@@ -163,7 +163,7 @@ describeEachAdapter("schedules", (adapter) => {
     });
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
     // The registry is shared by reference with every surface and the scheduler.
     app.server.registry.register(schedDriver);
     env = { db: app.db, config: app.config, registry: app.server.registry, blob: app.blob };

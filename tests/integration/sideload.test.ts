@@ -619,7 +619,7 @@ describe("sideload (transports)", () => {
     // Loopback is allowlisted so the test upstream is reachable; every other
     // private range is still guarded.
     const app = await bootTestApp({
-      YAP_HOOK_ALLOW_HOSTS: "127.0.0.1",
+      YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1",
       YAP_MAX_FILE_SIZE_BYTES: String(MAX_BYTES),
       ...env,
     });

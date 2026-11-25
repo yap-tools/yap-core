@@ -142,7 +142,7 @@ describeEachAdapter("service authoring over MCP", (adapter) => {
     });
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
     app.server.registry.register(vaultDriver);
     app.server.registry.register(sealedDriver);
     app.server.registry.register(scribeDriver);

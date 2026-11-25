@@ -40,6 +40,7 @@ export async function serve(): Promise<void> {
     }
     throw err;
   }
+  for (const warning of config.warnings) logger.warn(warning);
   const db = await createDb(config.db);
   const blob = await createBlobStore(config);
 

@@ -253,7 +253,7 @@ describeEachAdapter("runs", (adapter) => {
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
     app = await bootTestApp(
-      { YAP_HOOK_ALLOW_HOSTS: "127.0.0.1", YAP_HOOK_TIMEOUT_MS: "5000" },
+      { YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1", YAP_HTTP_TIMEOUT_MS: "5000" },
       await adapter.makeDb(),
     );
     const registry = new DriverRegistry();

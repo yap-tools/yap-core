@@ -121,7 +121,7 @@ describeEachAdapter("service config split", (adapter) => {
   let env: ServiceEnv & RunEnv;
 
   beforeAll(async () => {
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "" }, await adapter.makeDb());
     const registry = new DriverRegistry();
     registry.register(createHttpDriver(app.config));
     registry.register(createMailDriver());

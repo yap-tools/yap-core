@@ -18,7 +18,7 @@ const baseEnv = {
 function testConfig(allowHosts?: string[]): YapConfig {
   return loadConfig({
     ...baseEnv,
-    ...(allowHosts ? { YAP_HOOK_ALLOW_HOSTS: allowHosts.join(",") } : {}),
+    ...(allowHosts ? { YAP_EGRESS_ALLOW_HOSTS: allowHosts.join(",") } : {}),
   });
 }
 
@@ -71,7 +71,7 @@ describe("createHttpDriver: shape", () => {
     expect(driver.writes).toBeUndefined();
     expect(Object.keys(driver.actions)).toEqual(["fire"]);
     expect(driver.actions.fire!.params).toBeNull();
-    expect(driver.actions.fire!.timeoutMs).toBe(testConfig().hookTimeoutMs);
+    expect(driver.actions.fire!.timeoutMs).toBe(testConfig().httpTimeoutMs);
   });
 });
 

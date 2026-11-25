@@ -30,10 +30,9 @@
  * driver cannot strand a half-open connection. The undici Agent is created
  * lazily, at most once per handle, and released by `dispose()` — which the
  * caller that built the handle MUST call in a `finally`, or the connection
- * pool outlives the invocation (the same leak `hooks.ts` avoids by destroying
- * its per-fire agent). `dispose()` releases only the fetch pool: a socket
- * already handed back by `connect()` belongs to the driver, which must close
- * it itself. Because a call can be parked on an `await` when `dispose()` lands,
+ * pool outlives the invocation. `dispose()` releases only the fetch pool: a
+ * socket already handed back by `connect()` belongs to the driver, which must
+ * close it itself. Because a call can be parked on an `await` when `dispose()` lands,
  * the disposed flag is re-checked after every internal await that precedes
  * acquiring a resource — otherwise a disposed handle could still open a pool.
  *

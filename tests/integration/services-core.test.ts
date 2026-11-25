@@ -519,7 +519,7 @@ describeEachAdapter("services core", (adapter) => {
   }
 
   beforeAll(async () => {
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "", YAP_MAX_FILE_SIZE_BYTES: "64", YAP_MIME_ALLOWLIST: "text/plain" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "", YAP_MAX_FILE_SIZE_BYTES: "64", YAP_MIME_ALLOWLIST: "text/plain" }, await adapter.makeDb());
     const registry = new DriverRegistry();
     registry.register(createHttpDriver(app.config));
     registry.register(plainDriver);

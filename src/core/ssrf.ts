@@ -6,8 +6,7 @@
  * destination URLs resolving to private, link-local, or localhost ranges are
  * denied by default — checked at service authoring AND re-checked at run
  * time, since DNS can change — with an operator-overridable allowlist
- * (`YAP_HOOK_ALLOW_HOSTS`, which keeps its pre-services name) for legitimate
- * internal targets.
+ * (`YAP_EGRESS_ALLOW_HOSTS`) for legitimate internal targets.
  */
 import type { LookupOptions } from "node:dns";
 import dns from "node:dns/promises";
@@ -107,9 +106,29 @@ export const defaultResolver: Resolver = async (hostname) => {
   return records.map((r) => r.address);
 };
 
+/**
+ * The form two host strings are compared in: lowercase, no IPv6 brackets, one
+ * trailing dot dropped, and an IPv6 literal written out as its eight hextets
+ * so `::1`, `0:0:0:0:0:0:0:1` and `[::1]` are the same key. Anything else is
+ * left alone, and an address with a zone id is never rewritten, so
+ * canonicalising only merges spellings of one name or address.
+ */
+function canonicalHost(host: string): string {
+  let h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h.endsWith(".")) h = h.slice(0, -1);
+  if (h.includes(":") && !h.includes("%")) {
+    const hextets = ipv6Hextets(h);
+    if (hextets) return hextets.map((x) => x.toString(16)).join(":");
+  }
+  return h;
+}
+
+/** Exact match after canonicalisation. Never a prefix, suffix or range: an
+ * allowlisted name stands for every address it resolves to, so entries are
+ * only ever what the operator spelled out. */
 function hostAllowed(hostname: string, allowHosts: string[]): boolean {
-  const needle = hostname.toLowerCase();
-  return allowHosts.some((h) => h.toLowerCase() === needle);
+  const needle = canonicalHost(hostname);
+  return allowHosts.some((h) => canonicalHost(h) === needle);
 }
 
 /**
@@ -149,7 +168,7 @@ export async function assertPublicDestination(
   if (blocked.length > 0) {
     throw invalid(
       `service destination ${hostname} resolves to a private, link-local, or localhost address (${blocked.join(", ")}); ` +
-        `denied by default — add the host to YAP_HOOK_ALLOW_HOSTS to permit internal targets`,
+        `denied by default — add the host to YAP_EGRESS_ALLOW_HOSTS to permit internal targets`,
     );
   }
 }

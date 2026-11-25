@@ -74,7 +74,7 @@ describeEachAdapter("legacy hook routes", (adapter) => {
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
     app = await bootTestApp(
-      { YAP_HOOK_ALLOW_HOSTS: "127.0.0.1", YAP_HOOK_TIMEOUT_MS: "700" },
+      { YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1", YAP_HTTP_TIMEOUT_MS: "700" },
       await adapter.makeDb(),
     );
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);

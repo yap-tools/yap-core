@@ -67,7 +67,7 @@ describe("smtp example driver", () => {
       startMockSmtp({ rejectRcpt: true }),
       startMockSmtp({ requireAuth: true }),
     ]);
-    app = await bootTestApp({ YAP_DRIVERS_DIR: driversDirWithSmtp(), YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" });
+    app = await bootTestApp({ YAP_DRIVERS_DIR: driversDirWithSmtp(), YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" });
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
     alice = apiClient(app.baseUrl, a.body.initialKey.key);
@@ -265,7 +265,7 @@ describe("smtp example driver under the run budget", () => {
     silent = await startMockSmtp({ silent: true });
     app = await bootTestApp({
       YAP_DRIVERS_DIR: driversDirWithSmtp(),
-      YAP_HOOK_ALLOW_HOSTS: "127.0.0.1",
+      YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1",
       YAP_RUN_TIMEOUT_CAP_MS: "500",
     });
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
@@ -304,7 +304,7 @@ describe("smtp example driver under the run budget", () => {
 /**
  * The zero-connection half of the SSRF guard: an operator who never
  * allowlists anything must get zero connections to a private destination,
- * not merely a `failed` run. This app boots with no `YAP_HOOK_ALLOW_HOSTS` at
+ * not merely a `failed` run. This app boots with no `YAP_EGRESS_ALLOW_HOSTS` at
  * all — unlike every describe block above, which allowlists 127.0.0.1 so the
  * mock server is reachable — and the service is pointed at the mock's own
  * host and port. If the guard let anything through, this is the one place a

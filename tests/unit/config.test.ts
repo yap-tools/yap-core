@@ -29,7 +29,7 @@ describe("loadConfig", () => {
     expect(config.baseUrl).toBe("http://localhost:8787");
     expect(config.mimeAllowlist).toBe("*");
     expect(config.downloadTtlSeconds).toBe(14400);
-    expect(config.hookTimeoutMs).toBe(30_000);
+    expect(config.httpTimeoutMs).toBe(30_000);
     // Instance-relative, like the sqlite and blob paths.
     expect(config.driversDir).toBe("./drivers");
   });
@@ -61,7 +61,7 @@ describe("loadConfig", () => {
       ...base,
       YAP_MAX_FILE_SIZE_BYTES: "1024",
       YAP_MIME_ALLOWLIST: "image/png, image/jpeg",
-      YAP_HOOK_ALLOW_HOSTS: "internal.example, 10.0.0.5",
+      YAP_EGRESS_ALLOW_HOSTS: "internal.example, 10.0.0.5",
       YAP_DOWNLOAD_TTL_SECONDS: "60",
     });
     expect(config.maxFileSizeBytes).toBe(1024);
@@ -95,8 +95,8 @@ describe("loadConfig", () => {
   it("truncates fractional millisecond settings to whole integers", () => {
     // The driver registry requires integer action budgets, so the config layer
     // is where a fractional override is squared away.
-    expect(loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: "1500.7" }).hookTimeoutMs).toBe(1500);
-    expect(() => loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: "0.5" })).toThrow(ConfigError);
+    expect(loadConfig({ ...base, YAP_HTTP_TIMEOUT_MS: "1500.7" }).httpTimeoutMs).toBe(1500);
+    expect(() => loadConfig({ ...base, YAP_HTTP_TIMEOUT_MS: "0.5" })).toThrow(ConfigError);
   });
 });
 
@@ -138,12 +138,12 @@ describe("run config", () => {
     }
   });
 
-  it("bounds YAP_HOOK_TIMEOUT_MS 500ms tighter than MAX_TIMER_MS", () => {
-    // The legacy fire paths wait hookTimeoutMs + 500; at exactly MAX_TIMER_MS
+  it("bounds YAP_HTTP_TIMEOUT_MS 500ms tighter than MAX_TIMER_MS", () => {
+    // The legacy fire paths wait httpTimeoutMs + 500; at exactly MAX_TIMER_MS
     // that addition would itself overflow the 32-bit timer and clamp to 1ms,
     // so the ceiling here sits 500ms below MAX_TIMER_MS.
-    expect(loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: String(MAX_TIMER_MS - 500) })).toBeTruthy();
-    expect(() => loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: String(MAX_TIMER_MS - 499) })).toThrow(
+    expect(loadConfig({ ...base, YAP_HTTP_TIMEOUT_MS: String(MAX_TIMER_MS - 500) })).toBeTruthy();
+    expect(() => loadConfig({ ...base, YAP_HTTP_TIMEOUT_MS: String(MAX_TIMER_MS - 499) })).toThrow(
       /must be at most 2147483147/,
     );
   });
@@ -191,5 +191,55 @@ describe("backup config", () => {
 
   it("rejects an unknown sink driver", () => {
     expect(() => loadConfig({ ...base, YAP_BACKUP_SINK: "ftp" })).toThrow(ConfigError);
+  });
+
+  describe("renamed egress variables", () => {
+    it("reads the new names without a warning", () => {
+      const config = loadConfig({ ...base, YAP_EGRESS_ALLOW_HOSTS: "a.example", YAP_HTTP_TIMEOUT_MS: "900" });
+      expect(config.egressAllowHosts).toEqual(["a.example"]);
+      expect(config.httpTimeoutMs).toBe(900);
+      expect(config.warnings).toEqual([]);
+    });
+
+    it("still reads the old names when the new ones are unset, and warns once each", () => {
+      const config = loadConfig({ ...base, YAP_HOOK_ALLOW_HOSTS: "old.example", YAP_HOOK_TIMEOUT_MS: "1200" });
+      expect(config.egressAllowHosts).toEqual(["old.example"]);
+      expect(config.httpTimeoutMs).toBe(1200);
+      expect(config.warnings).toHaveLength(2);
+      expect(config.warnings[0]).toContain("YAP_HOOK_TIMEOUT_MS");
+      expect(config.warnings[0]).toContain("YAP_HTTP_TIMEOUT_MS");
+      expect(config.warnings[1]).toContain("YAP_HOOK_ALLOW_HOSTS");
+      expect(config.warnings[1]).toContain("YAP_EGRESS_ALLOW_HOSTS");
+    });
+
+    it("lets the new name win when both are set, and says so", () => {
+      const config = loadConfig({
+        ...base,
+        YAP_HOOK_ALLOW_HOSTS: "old.example",
+        YAP_EGRESS_ALLOW_HOSTS: "new.example",
+        YAP_HOOK_TIMEOUT_MS: "1200",
+        YAP_HTTP_TIMEOUT_MS: "900",
+      });
+      expect(config.egressAllowHosts).toEqual(["new.example"]);
+      expect(config.httpTimeoutMs).toBe(900);
+      expect(config.warnings).toHaveLength(2);
+      for (const w of config.warnings) expect(w).toContain("ignored");
+    });
+
+    it("names the variable that was actually set when its value is invalid", () => {
+      expect(() => loadConfig({ ...base, YAP_HOOK_TIMEOUT_MS: "nope" })).toThrow(/YAP_HOOK_TIMEOUT_MS/);
+    });
+
+    it.each(["*", "*.example.com", "10.0.0.0/8", "ok.example, bad*.example"])(
+      "refuses the wildcard or CIDR entry %j at load",
+      (entry) => {
+        expect(() => loadConfig({ ...base, YAP_EGRESS_ALLOW_HOSTS: entry })).toThrow(ConfigError);
+        expect(() => loadConfig({ ...base, YAP_EGRESS_ALLOW_HOSTS: entry })).toThrow(/wildcards and CIDR/);
+      },
+    );
+
+    it("refuses a wildcard given under the old name too", () => {
+      expect(() => loadConfig({ ...base, YAP_HOOK_ALLOW_HOSTS: "*" })).toThrow(/YAP_HOOK_ALLOW_HOSTS/);
+    });
   });
 });

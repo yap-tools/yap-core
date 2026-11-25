@@ -236,7 +236,7 @@ describeEachAdapter("oidc login", (adapter) => {
   beforeAll(async () => {
     idp = await startFakeProvider();
     app = await bootTestApp(
-      idp.env("test", { YAP_OIDC_TEST_GRANT_MAX_DAYS: "3", YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }),
+      idp.env("test", { YAP_OIDC_TEST_GRANT_MAX_DAYS: "3", YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }),
       await adapter.makeDb(),
     );
     sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
