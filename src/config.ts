@@ -192,11 +192,17 @@ export interface YapConfig {
   /** One wall-clock budget for a whole sideload: DNS, every redirect hop and
    *  the body. */
   sideloadTimeoutMs: number;
-  hookTimeoutMs: number;
-  /** Hostnames allowed to resolve to private ranges (SSRF override). Applies
-   *  to all driver egress, not just the http driver's — the env var keeps its
-   *  pre-services name (`YAP_HOOK_ALLOW_HOSTS`) for operator compatibility. */
+  /** The http driver's per-call timeout (`YAP_HTTP_TIMEOUT_MS`). Also the
+   *  base of the legacy hook-fire wait. */
+  httpTimeoutMs: number;
+  /** Exact hostnames and IP addresses exempt from the private-address block
+   *  (`YAP_EGRESS_ALLOW_HOSTS`). Applies to all driver egress, not just the
+   *  http driver's. Wildcards and CIDR ranges are refused at load. */
   egressAllowHosts: string[];
+  /** Notes about the environment that do not stop the server — deprecated
+   *  variable names still in use. `loadConfig` has no logger, so the caller
+   *  logs these at boot. */
+  warnings: string[];
   /** Ceiling the adapters clamp a caller's `wait_ms` to when starting a run.
    *  Defaults to {@link DEFAULT_RUN_WAIT_CAP_MS}, the figure the `run_service`
    *  tool description quotes to agents. */
@@ -256,6 +262,24 @@ function optionalIntEnv(env: Env, name: string, max?: number): number | undefine
   const raw = env[name];
   if (raw === undefined || raw === "") return undefined;
   return intEnv(env, name, 0, max);
+}
+
+/**
+ * Resolves a renamed variable to the name to read: the new name when it is
+ * set, else the old one. Records a deprecation warning when the old name is
+ * set at all, saying which of the two won. Returning the name (not the value)
+ * lets the reader's own error messages name the variable the operator
+ * actually set.
+ */
+function renamedEnv(env: Env, name: string, oldName: string, warnings: string[]): string {
+  const isSet = (n: string) => env[n] !== undefined && env[n] !== "";
+  if (!isSet(oldName)) return name;
+  if (isSet(name)) {
+    warnings.push(`${oldName} is deprecated and ignored because ${name} is also set; remove ${oldName}`);
+    return name;
+  }
+  warnings.push(`${oldName} is deprecated; rename it to ${name} (the old name is still read for now)`);
+  return oldName;
 }
 
 function listEnv(env: Env, name: string): string[] {
@@ -376,7 +400,28 @@ function loadOidc(env: Env, baseUrlSet: boolean): OidcConfig {
   return { providers, signup: signupRaw === "true", allow };
 }
 
+/**
+ * The egress allowlist: exact hostnames and exact IPs, nothing else. An entry
+ * with `*` or `/` was meant as a wildcard or a CIDR range; both would open the
+ * private-address block for more than the operator named, so they are refused
+ * rather than kept as literal text nobody could ever match.
+ */
+function egressAllowHosts(env: Env, warnings: string[]): string[] {
+  const name = renamedEnv(env, "YAP_EGRESS_ALLOW_HOSTS", "YAP_HOOK_ALLOW_HOSTS", warnings);
+  const entries = listEnv(env, name);
+  for (const entry of entries) {
+    if (entry.includes("*") || entry.includes("/")) {
+      throw new ConfigError(
+        `${name} entry ${JSON.stringify(entry)} is not allowed: wildcards and CIDR ranges are not supported; ` +
+          `list each host name or IP address exactly`,
+      );
+    }
+  }
+  return entries;
+}
+
 export function loadConfig(env: Env = process.env): YapConfig {
+  const warnings: string[] = [];
   const sysadminKey = env.YAP_SYSADMIN_KEY;
   if (!sysadminKey || sysadminKey.length < 16) {
     throw new ConfigError("YAP_SYSADMIN_KEY is required and must be at least 16 characters");
@@ -519,12 +564,18 @@ export function loadConfig(env: Env = process.env): YapConfig {
     sideloadEnabled: env.YAP_SIDELOAD_ENABLED !== "false",
     sideloadTimeoutMs: intEnv(env, "YAP_SIDELOAD_TIMEOUT_MS", 60_000, MAX_TIMER_MS),
     // The settings that become timer delays are bounded by MAX_TIMER_MS: above
-    // it a value wraps and fires immediately instead of waiting. hookTimeoutMs
+    // it a value wraps and fires immediately instead of waiting. httpTimeoutMs
     // is bounded 500ms tighter because the legacy fire paths wait
-    // hookTimeoutMs + 500; at exactly MAX_TIMER_MS that addition itself
+    // httpTimeoutMs + 500; at exactly MAX_TIMER_MS that addition itself
     // overflows Node's 32-bit timer and clamps to 1ms.
-    hookTimeoutMs: intEnv(env, "YAP_HOOK_TIMEOUT_MS", 30_000, MAX_TIMER_MS - 500),
-    egressAllowHosts: listEnv(env, "YAP_HOOK_ALLOW_HOSTS"),
+    httpTimeoutMs: intEnv(
+      env,
+      renamedEnv(env, "YAP_HTTP_TIMEOUT_MS", "YAP_HOOK_TIMEOUT_MS", warnings),
+      30_000,
+      MAX_TIMER_MS - 500,
+    ),
+    egressAllowHosts: egressAllowHosts(env, warnings),
+    warnings,
     runWaitCapMs: intEnv(env, "YAP_RUN_WAIT_CAP_MS", DEFAULT_RUN_WAIT_CAP_MS, MAX_TIMER_MS),
     runTimeoutCapMs: optionalIntEnv(env, "YAP_RUN_TIMEOUT_CAP_MS", MAX_TIMER_MS),
     runRetentionDays: intEnv(env, "YAP_RUN_RETENTION_DAYS", 7),

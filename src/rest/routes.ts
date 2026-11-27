@@ -437,9 +437,11 @@ export function registerRestRoutes(server: YapServer): void {
   // ---- Grants (space-level; bundle-level registered with bundles) -----------
 
   // One canonical field: a capability name or an array of them; a scalar is
-  // normalized to a single-element array (core rejects an empty list).
+  // normalized to a single-element array (core rejects an empty list). The
+  // grantee is `userId` or `email`, exactly one (core refuses both or neither).
   const grantSchema = z.object({
-    userId: z.string(),
+    userId: z.string().optional(),
+    email: z.string().optional(),
     capabilities: z.union([z.string(), z.array(z.string())]).transform((v) => (Array.isArray(v) ? v : [v])),
     effect: z.enum(["allow", "deny"]),
   });
@@ -452,6 +454,7 @@ export function registerRestRoutes(server: YapServer): void {
       const target = await grantsCore.spaceGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
         userId: body.userId,
+        email: body.email,
         capabilities: body.capabilities,
         effect: body.effect,
       });
@@ -486,6 +489,7 @@ export function registerRestRoutes(server: YapServer): void {
       const target = await bundlesCore.bundleGrantTarget(db, param(c, "id"));
       const rows = await grantsCore.createGrants(db, actorId, target, {
         userId: body.userId,
+        email: body.email,
         capabilities: body.capabilities,
         effect: body.effect,
       });

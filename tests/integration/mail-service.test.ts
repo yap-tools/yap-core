@@ -62,7 +62,7 @@ describe("mail service (built-in driver)", () => {
     });
     refusing = await startImapMock({ authFail: true });
     smtp = await startMockSmtp();
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" });
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" });
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
     alice = apiClient(app.baseUrl, a.body.initialKey.key);

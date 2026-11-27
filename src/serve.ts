@@ -11,6 +11,7 @@ import { sweepOrphans } from "./core/files.js";
 import { pruneRuns, recoverInterruptedRuns } from "./core/runs.js";
 import { backfillServiceConfigs } from "./core/serviceConfig.js";
 import { createDb } from "./db/index.js";
+import { MigrationRefused } from "./db/migrationGuards.js";
 import { createLogger } from "./logger.js";
 import { buildServer, createDriverRegistry } from "./server.js";
 
@@ -39,6 +40,7 @@ export async function serve(): Promise<void> {
     }
     throw err;
   }
+  for (const warning of config.warnings) logger.warn(warning);
   const db = await createDb(config.db);
   const blob = await createBlobStore(config);
 
@@ -66,7 +68,16 @@ export async function serve(): Promise<void> {
     await db.close();
     process.exit(1);
   }
-  await db.migrate();
+  try {
+    await db.migrate();
+  } catch (err) {
+    // A guard (db/migrationGuards.ts) found data a pending migration cannot
+    // take; nothing was applied and the message says what to do.
+    if (!(err instanceof MigrationRefused)) throw err;
+    logger.error(`${err.message} — refusing to start`);
+    await db.close();
+    process.exit(1);
+  }
 
   // Link properties store their target item type by id. Rows written before
   // that held names; rewrite the unambiguous ones (backing up first, under

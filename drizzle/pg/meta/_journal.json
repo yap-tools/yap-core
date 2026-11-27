@@ -134,6 +134,13 @@
       "when": 1795509662648,
       "tag": "0018_provider_login_only",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795615283052,
+      "tag": "0019_unique_user_email",
+      "breakpoints": true
     }
   ]
 }

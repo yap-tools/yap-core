@@ -30,7 +30,7 @@ describeEachAdapter("acceptance", (adapter) => {
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
     app = await bootTestApp(
-      { YAP_DOWNLOAD_TTL_SECONDS: "2", YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" },
+      { YAP_DOWNLOAD_TTL_SECONDS: "2", YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" },
       await adapter.makeDb(),
     );
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);

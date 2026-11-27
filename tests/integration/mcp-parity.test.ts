@@ -260,6 +260,38 @@ describeEachAdapter("MCP management parity", (adapter) => {
       expect(bobTries.ok).toBe(false);
       expect(bobTries.error.details.capability).toBe("manage_roles");
 
+      // Rows name the grantee, as over REST.
+      expect(spaceGrants.result.data.find((g: any) => g.userId === bobId)).toMatchObject({ userName: "Bob", userEmail: null });
+
+      // grant_role by email: the same rows REST returns, mixed case accepted.
+      const carol = (await sysadmin.post("/v1/users", { name: "Carol", email: "carol@example.com" })).body.user;
+      const byEmail = await one(alice, spaceId, {
+        bundle_id: bundleId,
+        tool: "grant_role",
+        params: { email: "Carol@Example.com", capabilities: ["read_items"], effect: "allow" },
+      });
+      expect(byEmail.ok, JSON.stringify(byEmail)).toBe(true);
+      expect(byEmail.result.data[0]).toMatchObject({ userId: carol.id, userName: "Carol", userEmail: "carol@example.com" });
+      const listed = await one(alice, spaceId, { bundle_id: bundleId, tool: "list_grants" });
+      const viaRest = (await aliceRest.get(`/v1/bundles/${bundleId}/grants`)).body.data;
+      expect(listed.result.data).toEqual(viaRest);
+
+      const unknown = await one(alice, spaceId, {
+        tool: "grant_role",
+        params: { email: "nobody@example.com", capabilities: ["read_items"], effect: "allow" },
+      });
+      expect(unknown.ok).toBe(false);
+      expect(unknown.error.code).toBe("not_found");
+      const both = await one(alice, spaceId, {
+        tool: "grant_role",
+        params: { user_id: bobId, email: "carol@example.com", capabilities: ["read_items"], effect: "allow" },
+      });
+      expect(both.ok).toBe(false);
+      expect(both.error.code).toBe("invalid_request");
+      const neither = await one(alice, spaceId, { tool: "grant_role", params: { capabilities: ["read_items"], effect: "allow" } });
+      expect(neither.ok).toBe(false);
+      expect(neither.error.code).toBe("invalid_request");
+
       // Revoke the bundle grant by id.
       const revoke = await one(alice, spaceId, {
         bundle_id: bundleId,

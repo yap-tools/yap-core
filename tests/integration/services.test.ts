@@ -86,7 +86,7 @@ describeEachAdapter("services", (adapter) => {
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
     app = await bootTestApp(
-      { YAP_HOOK_ALLOW_HOSTS: "127.0.0.1", YAP_HOOK_TIMEOUT_MS: "700" },
+      { YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1", YAP_HTTP_TIMEOUT_MS: "700" },
       await adapter.makeDb(),
     );
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
@@ -625,8 +625,8 @@ describeEachAdapter("services", (adapter) => {
 
     it("clamps wait_ms to the configured cap and leaves the run to finish on its own", async () => {
       const capped = await bootTestApp({
-        YAP_HOOK_ALLOW_HOSTS: "127.0.0.1",
-        YAP_HOOK_TIMEOUT_MS: "700",
+        YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1",
+        YAP_HTTP_TIMEOUT_MS: "700",
         YAP_RUN_WAIT_CAP_MS: "50",
       });
       try {
@@ -801,8 +801,8 @@ describeEachAdapter("services", (adapter) => {
 
     it("clamps wait_ms to the server's cap rather than honouring what the agent asked", async () => {
       const capped = await bootTestApp({
-        YAP_HOOK_ALLOW_HOSTS: "127.0.0.1",
-        YAP_HOOK_TIMEOUT_MS: "700",
+        YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1",
+        YAP_HTTP_TIMEOUT_MS: "700",
         YAP_RUN_WAIT_CAP_MS: "50",
       });
       let cappedMcp: McpTestClient | undefined;

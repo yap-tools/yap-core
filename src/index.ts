@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { cmdBackup, cmdRestore } from "./cli/backup.js";
 import { cmdDriver } from "./cli/driver.js";
 import { cmdLogs, cmdServe, cmdStart, cmdStatus, cmdStop } from "./cli/lifecycle.js";
+import { cmdPreflight } from "./cli/preflight.js";
 import { cmdApi, cmdResource, cmdUserCreate } from "./cli/resources.js";
 import { cmdCreate, cmdDaemon, cmdInit, cmdUpgrade } from "./cli/setup.js";
 import { assertLocal, resolveTarget } from "./cli/target.js";
@@ -28,7 +29,10 @@ An instance is a directory; run yap inside it.
 Instance:
   init [--version v|branch] [--port n] [--no-install]   Scaffold here + install the server from GitHub
   create <dir> [--user n] [--version v|branch] [--port n]   mkdir + init + start + user create, in one go
-  upgrade [version|branch] [--no-restart] [--skip-backup]   Reinstall this instance's server, restart if running
+  upgrade [version|branch] [--no-restart] [--skip-backup]   Check the target against this instance's data, then
+                                      reinstall the server and restart if running; stops first if it can't start
+  upgrade [version|branch] --check    Only the check: install nothing, exit 1 if the target would refuse to start
+  preflight                           Check the server's pending migrations against this data (read-only; exit 1 if refused)
 
 Data:
   backup [--out <path>]               Write a portable backup (to the sink, or a file)
@@ -83,6 +87,10 @@ try {
     case "upgrade":
       assertLocal(target, command);
       await cmdUpgrade(dir, rest);
+      break;
+    case "preflight":
+      assertLocal(target, command);
+      await cmdPreflight(dir, rest);
       break;
     case "backup":
       assertLocal(target, command);

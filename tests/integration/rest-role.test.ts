@@ -172,6 +172,9 @@ describeEachAdapter("REST role reporting", (adapter) => {
 
       expectKeyScopeDenial(await api.patch(`/v1/spaces/${workId}`, { name: "renamed" }));
       expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/grants`, { userId: bobId, capabilities: ["read_items"], effect: "allow" }));
+      // By email too, and before the address is looked up: unknown or not, the same denial.
+      expectKeyScopeDenial(await api.post(`/v1/bundles/${sharedBundleId}/grants`, { email: "nobody@example.com", capabilities: ["read_items"], effect: "allow" }));
+      expectKeyScopeDenial(await api.get(`/v1/bundles/${sharedBundleId}/grants`));
       const space = await api.post("/v1/spaces", { name: "no" });
       expect(space.status).toBe(403);
       expect(space.body.error.details.decidedBy).toBe("key_scope");

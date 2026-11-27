@@ -84,7 +84,7 @@ guarantees is not a sandbox but a set of explicit crossings, and this driver sta
 
 - **Egress.** It declares `egress: true` and reaches the network only through `ctx.egress.connect()`, which
   resolves the host itself and refuses private, link-local, and loopback addresses unless the operator
-  allowlisted them (`YAP_HOOK_ALLOW_HOSTS`). That check happens at *run* time, on the address actually
+  allowlisted them (`YAP_EGRESS_ALLOW_HOSTS`). That check happens at *run* time, on the address actually
   connected to. There is no authoring-time pre-check for SMTP the way there is for `http`, because Yap's
   pre-flight guard vouches for http(s) URLs only — an internal relay is therefore accepted at authoring time
   and refused when the run dials it.

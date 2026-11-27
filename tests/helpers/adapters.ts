@@ -4,9 +4,14 @@
  * is set (CI provides a service container). This is what enforces the
  * portability promise mechanically.
  */
-import { sql } from "drizzle-orm";
-import { describe } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { sql } from "drizzle-orm";
+import { afterAll, describe } from "vitest";
+
+import type { PgDbConfig, SqliteDbConfig } from "../../src/config.js";
 import { createDb, type Db } from "../../src/db/index.js";
 
 export interface Adapter {
@@ -15,6 +20,12 @@ export interface Adapter {
   makeDb(): Promise<Db>;
   /** Returns an unmigrated (schema-less) database. Caller must close() it. */
   makeFreshDb(): Promise<Db>;
+  /**
+   * An unmigrated database plus the config that reaches it, for code that
+   * opens its own connection (preflight). SQLite gets a file in a temp
+   * directory, removed after the suite. Caller must close() the db.
+   */
+  makeFreshDbWithConfig(): Promise<{ db: Db; config: SqliteDbConfig | PgDbConfig }>;
 }
 
 const PG_URL = process.env.YAP_TEST_PG_URL;
@@ -81,6 +92,15 @@ async function makeFreshPgDb(url: string): Promise<Db> {
   return db;
 }
 
+const sqliteDirs: string[] = [];
+
+async function makeFreshSqliteFile(): Promise<{ db: Db; config: SqliteDbConfig }> {
+  const dir = mkdtempSync(join(tmpdir(), "yap-db-"));
+  sqliteDirs.push(dir);
+  const config: SqliteDbConfig = { dialect: "sqlite", path: join(dir, "yap.db") };
+  return { db: await createDb(config), config };
+}
+
 /** The drizzle clients' raw-SQL entry points (test-only structural view). */
 type RawClient = {
   run?(q: unknown): unknown;
@@ -104,10 +124,26 @@ export async function rawAll<T = Record<string, unknown>>(db: Db, query: string)
 
 export function describeEachAdapter(name: string, fn: (adapter: Adapter) => void): void {
   describe(`${name} [sqlite]`, () => {
-    fn({ dialect: "sqlite", makeDb: makeSqliteDb, makeFreshDb: makeFreshSqliteDb });
+    afterAll(() => {
+      for (const dir of sqliteDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    });
+    fn({
+      dialect: "sqlite",
+      makeDb: makeSqliteDb,
+      makeFreshDb: makeFreshSqliteDb,
+      makeFreshDbWithConfig: makeFreshSqliteFile,
+    });
   });
   const pgDescribe = PG_URL ? describe : describe.skip;
   pgDescribe(`${name} [pg]`, () => {
-    fn({ dialect: "pg", makeDb: () => makePgDb(PG_URL!), makeFreshDb: () => makeFreshPgDb(PG_URL!) });
+    fn({
+      dialect: "pg",
+      makeDb: () => makePgDb(PG_URL!),
+      makeFreshDb: () => makeFreshPgDb(PG_URL!),
+      makeFreshDbWithConfig: async () => ({
+        db: await makeFreshPgDb(PG_URL!),
+        config: { dialect: "pg", url: PG_URL! } satisfies PgDbConfig,
+      }),
+    });
   });
 }

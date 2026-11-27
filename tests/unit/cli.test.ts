@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 
 import { readCredentials, writeCredentials } from "../../src/cli/credentials.js";
+import { createDb } from "../../src/db/index.js";
 import { initInstance } from "../../src/cli/init.js";
 import { launchdPlist, systemdUnit } from "../../src/cli/service.js";
 import { table } from "../../src/cli/table.js";
@@ -24,6 +25,7 @@ import {
   classifyVersion,
   installedGitCommit,
   installSpec,
+  pinnedSpec,
   readSource,
   vendoredServerEntry,
   vendoredServerVersion,
@@ -306,5 +308,82 @@ describe("yap daemon / yap service alias", () => {
     expect(lines.slice(1).join("\n")).toBe(daemon.stderr);
     expect(service.stdout).toBe(daemon.stdout);
     expect(service.code).toBe(daemon.code);
+  });
+});
+
+describe("yap preflight", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+
+  /** An instance whose database is migrated through 0018 and holds these users. */
+  async function instanceAt18(users: { id: string; email: string | null }[]): Promise<string> {
+    const dir = tempDir();
+    initInstance(dir);
+    const db = await createDb({ dialect: "sqlite", path: join(dir, "data", "yap.db") });
+    await db.migrateTo(18);
+    await db.insertRows("users", users.map((u) => ({ ...u, name: u.id, created_at: now })));
+    await db.close();
+    return dir;
+  }
+
+  it("exits 1 with the 0019 message when users share an email, and leaves the file as it was", async () => {
+    const dir = await instanceAt18([
+      { id: "u1", email: "same@example.com" },
+      { id: "u2", email: "same@example.com" },
+    ]);
+    const before = readFileSync(join(dir, "data", "yap.db"));
+    const r = await yap(["preflight"], dir);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("migration 0019_unique_user_email cannot be applied");
+    expect(r.stderr).toContain("same@example.com (users u1, u2)");
+    expect(r.stderr).toContain("this version would refuse to start");
+    expect(readFileSync(join(dir, "data", "yap.db")).equals(before)).toBe(true);
+  });
+
+  it("exits 0 when the pending migrations can go ahead", async () => {
+    const dir = await instanceAt18([{ id: "u1", email: "same@example.com" }, { id: "u2", email: null }]);
+    const r = await yap(["preflight"], dir);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/preflight passed: \d+ pending migration\(s\), none refused/);
+  });
+
+  it("exits 0 on an instance with no database yet, without creating one", async () => {
+    const dir = tempDir();
+    initInstance(dir);
+    const r = await yap(["preflight"], dir);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("no existing database to check");
+    expect(existsSync(join(dir, "data", "yap.db"))).toBe(false);
+  });
+
+  it("exits 1 when this version would refuse the configuration", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, ".env"), "YAP_SYSADMIN_KEY=too-short\n");
+    const r = await yap(["preflight"], dir);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("this version would not start with this configuration: YAP_SYSADMIN_KEY");
+  });
+});
+
+describe("pinnedSpec", () => {
+  it("pins a release to the tag of the version that was installed", () => {
+    const prefix = tempDir();
+    mkdirSync(join(prefix, "node_modules", "yap-core"), { recursive: true });
+    writeFileSync(join(prefix, "node_modules", "yap-core", "package.json"), JSON.stringify({ version: "0.9.3" }));
+    expect(pinnedSpec(prefix, { kind: "release" })).toBe(installSpec({ kind: "release", version: "v0.9.3" }));
+  });
+
+  it("pins a git ref to the commit it resolved to", () => {
+    const prefix = tempDir();
+    const sha = "a".repeat(40);
+    writeFileSync(
+      join(prefix, "package-lock.json"),
+      JSON.stringify({ packages: { "node_modules/yap-core": { resolved: `git+ssh://git@github.com/yap-tools/yap-core.git#${sha}` } } }),
+    );
+    expect(pinnedSpec(prefix, { kind: "git", ref: "main" })).toBe(installSpec({ kind: "git", ref: sha }));
+  });
+
+  it("is undefined when it cannot tell", () => {
+    expect(pinnedSpec(tempDir(), { kind: "release" })).toBeUndefined();
+    expect(pinnedSpec(tempDir(), { kind: "git", ref: "main" })).toBeUndefined();
   });
 });

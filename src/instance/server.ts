@@ -77,33 +77,71 @@ export function writeSource(dir: string, source: Source): void {
   }
 }
 
+/** The full commit a git-sourced yap-core under `prefix` was built from, per npm's lockfile. */
+function lockedGitCommit(prefix: string): string | undefined {
+  try {
+    const lock = JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8")) as {
+      packages?: Record<string, { resolved?: string }>;
+    };
+    const resolved = lock.packages?.[`node_modules/${SERVER_PACKAGE}`]?.resolved;
+    return resolved?.match(/#([0-9a-f]{40})$/)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Best-effort, cosmetic: the commit a git-sourced server was built from, short
  * form, read from the lockfile npm writes. Undefined when unknown — never gate
  * behavior on it.
  */
 export function installedGitCommit(dir: string): string | undefined {
-  try {
-    const lock = JSON.parse(readFileSync(join(dir, "package-lock.json"), "utf8")) as {
-      packages?: Record<string, { resolved?: string }>;
-    };
-    const resolved = lock.packages?.[`node_modules/${SERVER_PACKAGE}`]?.resolved;
-    const sha = resolved?.match(/#([0-9a-f]{40})$/)?.[1];
-    return sha?.slice(0, 7);
-  } catch {
-    return undefined;
-  }
+  return lockedGitCommit(dir)?.slice(0, 7);
 }
 
-export async function installServer(dir: string, source: Source): Promise<void> {
+/**
+ * The install spec that reproduces what was installed under `prefix`: the
+ * commit a git ref resolved to, or the release tag of the version it
+ * downloaded (tags equal package versions, see RELEASING.md). `yap upgrade`
+ * installs this after checking the staged copy, so a branch that moved or a
+ * release published in between cannot slip in unchecked. Undefined when it
+ * cannot tell; the caller then falls back to the source's own spec.
+ */
+export function pinnedSpec(prefix: string, source: Source): string | undefined {
+  if (source.kind === "git") {
+    const sha = lockedGitCommit(prefix);
+    return sha ? installSpec({ kind: "git", ref: sha }) : undefined;
+  }
+  const version = serverVersionIn(prefix);
+  return version ? installSpec({ kind: "release", version: `v${version}` }) : undefined;
+}
+
+export interface InstallOptions {
+  /**
+   * Install into this directory instead of the instance: a staging copy for
+   * `yap upgrade` to check before it touches the instance's own server. The
+   * instance's node_modules and saved source are left alone.
+   */
+  prefix?: string;
+  /** npm spec to install instead of the source's own (see pinnedSpec); the source is still what gets saved. */
+  spec?: string;
+}
+
+export async function installServer(dir: string, source: Source, opts: InstallOptions = {}): Promise<void> {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const args = ["install", "--no-fund", "--no-audit", "--loglevel=error"];
   // A git ref is a moving target; bypass npm's cached branch resolution so an
   // upgrade always builds the current tip rather than a stale clone.
-  if (source.kind === "git") args.push("--prefer-online");
-  args.push(installSpec(source));
+  // A pinned spec (an exact commit) cannot move, so it may come from the cache.
+  if (source.kind === "git" && !opts.spec) args.push("--prefer-online");
+  if (opts.prefix) {
+    mkdirSync(opts.prefix, { recursive: true });
+    // The lockfile is what pinnedSpec reads the resolved commit from.
+    args.push("--prefix", opts.prefix, "--package-lock=true");
+  }
+  args.push(opts.spec ?? installSpec(source));
   await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(npm, args, { cwd: dir, stdio: "inherit" });
+    const child = spawn(npm, args, { cwd: opts.prefix ?? dir, stdio: "inherit" });
     child.on("error", (err) => reject(new CliError(`could not run npm: ${err.message}`)));
     child.on("exit", (code) => {
       if (code === 0) return resolvePromise();
@@ -118,20 +156,38 @@ export async function installServer(dir: string, source: Source): Promise<void> 
   });
   // Persist the source only after a successful install: a git ref so a bare
   // `yap upgrade` re-pulls it, or clear it to return to the release channel.
-  writeSource(dir, source);
+  if (!opts.prefix) writeSource(dir, source);
+}
+
+/** The server entry inside a directory npm installed yap-core into. */
+export function serverEntryIn(prefix: string): string {
+  return join(prefix, "node_modules", SERVER_PACKAGE, "dist", "index.js");
+}
+
+/** The version of the yap-core package installed under a directory, if any. */
+export function serverVersionIn(prefix: string): string | undefined {
+  const pkgPath = join(prefix, "node_modules", SERVER_PACKAGE, "package.json");
+  if (!existsSync(pkgPath)) return undefined;
+  return (JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string }).version;
+}
+
+/** Whether the build behind a server entry ships a module (a path under its dist/). */
+function entryShips(entry: string, module: string): boolean {
+  return existsSync(join(dirname(entry), module));
+}
+
+/** Whether a server entry ships `yap preflight`; builds from before it do not. */
+export function entrySupportsPreflight(entry: string): boolean {
+  return entryShips(entry, "db/preflight.js");
 }
 
 /** The vendored server's entry point, when one is installed. */
 export function vendoredServerEntry(dir: string): string | undefined {
-  const entry = join(dir, "node_modules", SERVER_PACKAGE, "dist", "index.js");
+  const entry = serverEntryIn(dir);
   return existsSync(entry) ? entry : undefined;
 }
 
-export function vendoredServerVersion(dir: string): string | undefined {
-  const pkgPath = join(dir, "node_modules", SERVER_PACKAGE, "package.json");
-  if (!existsSync(pkgPath)) return undefined;
-  return (JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string }).version;
-}
+export const vendoredServerVersion = serverVersionIn;
 
 /** The server entry `start`/`serve` should execute for this instance. */
 export function serverEntry(dir: string): string {
@@ -145,7 +201,7 @@ export function serverEntry(dir: string): string {
 /** Whether the installed server ships backup/restore (added in 0.5.0). */
 export function serverSupportsBackup(dir: string): boolean {
   const vendored = vendoredServerEntry(dir);
-  return vendored !== undefined && existsSync(join(dirname(vendored), "backup", "run.js"));
+  return vendored !== undefined && entryShips(vendored, "backup/run.js");
 }
 
 export type DelegateResult =
@@ -174,7 +230,23 @@ export async function execInServer(dir: string, args: string[]): Promise<Delegat
   if (!vendored) return { status: "absent" };
   const self = process.argv[1];
   if (self && sameFile(vendored, self)) return { status: "self" };
-  const child = spawn(process.execPath, [vendored, ...args], { cwd: dir, stdio: "inherit" });
-  const code = await new Promise<number>((res) => child.on("exit", (c) => res(c ?? 1)));
-  return { status: "ran", code };
+  return { status: "ran", code: await execEntry(vendored, dir, args) };
+}
+
+/**
+ * Runs a server entry (any installed yap-core's dist/index.js) as a child
+ * process from the instance directory, stdio inherited, and returns its exit
+ * code. `env` is added to this process's environment.
+ */
+export async function execEntry(
+  entry: string,
+  dir: string,
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<number> {
+  const child = spawn(process.execPath, [entry, ...args], { cwd: dir, stdio: "inherit", env: { ...process.env, ...env } });
+  return new Promise<number>((res, rej) => {
+    child.on("error", rej);
+    child.on("exit", (c) => res(c ?? 1));
+  });
 }

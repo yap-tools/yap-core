@@ -13,7 +13,7 @@
  * callers (the legacy hook fire path) pass a wait longer than the action's own
  * budget so they always get back a terminal run.
  *
- * Three secrecy rules hold the security model from hooks.ts in place:
+ * Three secrecy rules hold the services security model in place:
  *
  * - The service config is decrypted only inside execution, only in memory, and
  *   never reaches a returned record. For a split service that means its

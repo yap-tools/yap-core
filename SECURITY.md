@@ -24,8 +24,12 @@ reasonable window to ship a fix before disclosing publicly.
   deployments; the server warns, but does not refuse, plain http.
 - Service egress (the built-in `http` driver, and any driver that declares
   `egress: true`) denies private/link-local destinations by default and pins
-  DNS at connect time; `YAP_HOOK_ALLOW_HOSTS` deliberately punches holes in
-  that — use it sparingly.
+  DNS at connect time; `YAP_EGRESS_ALLOW_HOSTS` deliberately punches holes in
+  that — use it sparingly. Entries are exact host names or IP addresses
+  (wildcards and CIDR ranges are refused at startup). An allowlisted name is
+  still resolved and dialled at the address it resolves to, but every address
+  it resolves to is allowed, private and metadata addresses included: list
+  only names you control.
 - **The egress guard's threat model, stated plainly.** It defends against one
   thing: a *hostile parameter* reaching the network through an *honest*
   driver — an agent-supplied value steering a well-behaved `http` service at

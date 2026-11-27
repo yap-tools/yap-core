@@ -3,7 +3,7 @@
  * directory: its .env (operator configuration and keys), data/ (database and
  * blobs), drivers/ (installed service drivers), vendored server
  * (node_modules/yap-core), and CLI state (.yap/:
- * pidfile, logs, saved credential, saved server source) live together, and `yap` operates on
+ * pidfile, logs, saved credential, saved server source, upgrade staging) live together, and `yap` operates on
  * whichever instance directory it runs from. Every path below resolves
  * relative to the instance directory so the whole instance stays relocatable.
  */
@@ -46,4 +46,12 @@ export function credentialsPath(dir: string): string {
 /** The instance's server source, present only when it tracks a git ref rather than releases. */
 export function sourcePath(dir: string): string {
   return join(stateDir(dir), "source.json");
+}
+
+/**
+ * Where `yap upgrade` installs the target version to check it before
+ * touching the instance's own server. Emptied after every upgrade.
+ */
+export function stagingDir(dir: string): string {
+  return join(stateDir(dir), "staging");
 }

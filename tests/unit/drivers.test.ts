@@ -18,7 +18,7 @@ const baseEnv = {
 function testConfig(allowHosts?: string[]): YapConfig {
   return loadConfig({
     ...baseEnv,
-    ...(allowHosts ? { YAP_HOOK_ALLOW_HOSTS: allowHosts.join(",") } : {}),
+    ...(allowHosts ? { YAP_EGRESS_ALLOW_HOSTS: allowHosts.join(",") } : {}),
   });
 }
 

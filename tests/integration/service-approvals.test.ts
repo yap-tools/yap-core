@@ -97,7 +97,7 @@ describeEachAdapter("service approvals", (adapter) => {
     });
     await new Promise<void>((resolve) => target.listen(targetPort, "127.0.0.1", resolve));
 
-    app = await bootTestApp({ YAP_HOOK_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
+    app = await bootTestApp({ YAP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }, await adapter.makeDb());
     const sysadmin = apiClient(app.baseUrl, TEST_SYSADMIN_KEY);
     const a = await sysadmin.post("/v1/users", { name: "Alice" });
     aliceKey = a.body.initialKey.key;

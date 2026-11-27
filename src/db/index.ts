@@ -27,6 +27,7 @@ import { migrate as migratePg } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 
 import type { PgDbConfig, SqliteDbConfig } from "../config.js";
+import { checkPendingMigrations, type RawQuery } from "./migrationGuards.js";
 import * as sqliteSchema from "./schema-sqlite.js";
 import * as pgSchema from "./schema-pg.js";
 
@@ -47,8 +48,10 @@ export interface Db {
    * Postgres awaits each query on a connection of its own.
    */
   transaction<T>(fn: (tx: DbClient) => Generator<unknown, T, any>): Promise<T>;
+  /** Apply every pending migration. Throws MigrationRefused, applying
+   * nothing, when a pending one cannot go ahead on this data (migrationGuards.ts). */
   migrate(): Promise<void>;
-  /** Apply migrations only up to (and including) journal index `index`. */
+  /** Apply migrations only up to (and including) journal index `index`, with the same guards. */
   migrateTo(index: number): Promise<void>;
   /** Number of journal entries shipped with this build. */
   journalLength(): number;
@@ -75,6 +78,14 @@ interface JournalEntry {
 function journalEntries(dialect: "sqlite" | "pg"): JournalEntry[] {
   const path = resolve(repoRoot, "drizzle", dialect, "meta", "_journal.json");
   return (JSON.parse(readFileSync(path, "utf8")) as { entries: JournalEntry[] }).entries;
+}
+
+/** Where the migrator records applied migrations, per dialect (one row each). */
+export const MIGRATIONS_TABLE = { sqlite: "__drizzle_migrations", pg: "drizzle.__drizzle_migrations" } as const;
+
+/** Number of migrations this build ships for a dialect (its journal's length). */
+export function shippedMigrationCount(dialect: "sqlite" | "pg"): number {
+  return journalEntries(dialect).length;
 }
 
 /** The migration tag at a journal index (for backup manifests). */
@@ -141,6 +152,42 @@ function withForeignKeysOff(sqlite: BetterSqlite3.Database, run: () => void): vo
   }
 }
 
+/**
+ * Puts the migration guards (migrationGuards.ts) in front of a dialect's
+ * migrate and migrateTo, so neither applies anything a guard refuses.
+ */
+function guarded(db: Db & { rawQuery: RawQuery }): Db {
+  const { rawQuery, migrate, migrateTo, ...rest } = db;
+  return {
+    ...rest,
+    migrate: async () => {
+      await checkPendingMigrations(await db.appliedMigrations(), db.journalLength() - 1, rawQuery);
+      await migrate();
+    },
+    migrateTo: async (index) => {
+      await checkPendingMigrations(await db.appliedMigrations(), index, rawQuery);
+      await migrateTo(index);
+    },
+  };
+}
+
+/**
+ * Whether err is a unique index refusing a write: Postgres names the index,
+ * SQLite the column (`table.column`). Drizzle wraps the driver's error, so its
+ * causes are looked at too.
+ */
+export function isUniqueViolation(err: unknown, target: { index: string; column: string }): boolean {
+  type DriverError = { code?: unknown; constraint?: unknown; message?: unknown; cause?: unknown };
+  let e = err as DriverError | undefined;
+  for (let depth = 0; e && depth < 3; depth++, e = e.cause as DriverError | undefined) {
+    if (e.code === "23505" && e.constraint === target.index) return true;
+    if (e.code === "SQLITE_CONSTRAINT_UNIQUE" && typeof e.message === "string" && e.message.includes(target.column)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db> {
   if (config.dialect === "sqlite") {
     if (config.path !== ":memory:") {
@@ -160,7 +207,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
           .all() as { name: string }[]
       ).map((r) => r.name);
 
-    return {
+    return guarded({
       dialect: "sqlite",
       client,
       tables: sqliteSchema,
@@ -187,7 +234,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       journalLength: () => journalEntries("sqlite").length,
       appliedMigrations: async () => {
         try {
-          const row = sqlite.prepare("SELECT COUNT(*) AS n FROM __drizzle_migrations").get() as { n: number };
+          const row = sqlite.prepare(`SELECT COUNT(*) AS n FROM ${MIGRATIONS_TABLE.sqlite}`).get() as { n: number };
           return row.n;
         } catch {
           return 0; // bookkeeping table absent — fresh database
@@ -228,7 +275,8 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       close: async () => {
         sqlite.close();
       },
-    };
+      rawQuery: async (q) => sqlite.prepare(q).all() as Record<string, unknown>[],
+    });
   }
 
   const pool = new pg.Pool({ connectionString: config.url });
@@ -239,7 +287,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
       (r: { name: string }) => r.name,
     );
 
-  return {
+  return guarded({
     dialect: "pg",
     client: client as unknown as DbClient,
     tables: pgSchema as unknown as Tables,
@@ -264,7 +312,7 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     journalLength: () => journalEntries("pg").length,
     appliedMigrations: async () => {
       try {
-        const res = await pool.query("SELECT COUNT(*)::int AS n FROM drizzle.__drizzle_migrations");
+        const res = await pool.query(`SELECT COUNT(*)::int AS n FROM ${MIGRATIONS_TABLE.pg}`);
         return (res.rows[0] as { n: number }).n;
       } catch {
         return 0; // bookkeeping table absent — fresh database
@@ -315,5 +363,6 @@ export async function createDb(config: SqliteDbConfig | PgDbConfig): Promise<Db>
     close: async () => {
       await pool.end();
     },
-  };
+    rawQuery: async (q) => (await pool.query(q)).rows as Record<string, unknown>[],
+  });
 }

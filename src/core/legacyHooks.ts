@@ -132,7 +132,7 @@ export async function fireLegacyHook(
   bundleId?: string,
 ): Promise<unknown> {
   const target = await requireLegacyHook(env.db, userId, ref, "run_services", bundleId);
-  const waitMs = env.config.hookTimeoutMs + 500;
+  const waitMs = env.config.httpTimeoutMs + 500;
   const run = await runService(env, userId, target.bundleId, { service: ref, params, waitMs, source: "hook" });
   if (run.status === "succeeded") return run.result;
   // The run's error is already agent-safe (the driver sanitizes it), so it is

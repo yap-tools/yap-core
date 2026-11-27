@@ -45,8 +45,8 @@ import { createHash, randomBytes } from "node:crypto";
 
 import type { OidcProviderConfig, YapConfig } from "../config.js";
 import { decryptSecret, encryptSecret, generateSecret, hashKey } from "../crypto.js";
-import type { Db } from "../db/index.js";
-import { createUser, revokeKeyBackedGrants } from "./users.js";
+import { isUniqueViolation, type Db } from "../db/index.js";
+import { createUser, findUserByEmail, revokeKeyBackedGrants, USERS_EMAIL_INDEX } from "./users.js";
 import { newId, nowIso } from "./util.js";
 
 /** The pages a provider login can be for. */
@@ -447,6 +447,9 @@ async function linkedUser(db: Db, issuer: string, subject: string): Promise<{ id
 const NO_ACCOUNT =
   "There is no Yap account for this login. Ask the operator of this Yap for an invitation, then log in again.";
 
+const EMAIL_IN_USE =
+  "This email address already belongs to a Yap account that logs in another way. Log in the way you did before, or ask the operator.";
+
 async function resolvePerson(
   db: Db,
   config: YapConfig,
@@ -471,6 +474,8 @@ async function resolvePerson(
         notExists(db.client.select({ id: userIdentities.id }).from(userIdentities).where(eq(userIdentities.userId, users.id))),
       ),
     );
+  // Email is unique, so at most one user can match; the branch below stays as
+  // a guard should that ever stop holding.
   if (invites.length > 1) {
     throw new OidcLoginError("Several Yap accounts are waiting for this email address. Ask the operator to sort it out.");
   }
@@ -481,8 +486,17 @@ async function resolvePerson(
   }
 
   if (!config.oidc.signup || !signupAllows(config.oidc.allow, email, login.domainVouched)) throw new OidcLoginError(NO_ACCOUNT);
-  // Created without its email, which is set only once the identity is linked:
-  // until then the new user must not look like an invite to a concurrent login.
+  // Email is unique, so sign-up cannot make a second account with an address
+  // another user has (one who logs in another way, since no invite matched),
+  // unless a concurrent first login of this same person just made it.
+  if (await findUserByEmail(db, email)) {
+    const winner = await linkedUser(db, issuer, subject);
+    if (winner) return winner;
+    throw new OidcLoginError(EMAIL_IN_USE);
+  }
+  // Created without identity or email, so no other login can find it; both
+  // are then published in one transaction, so a login never sees a linked
+  // user that this sign-up could still take back.
   const created = await createUser(
     db,
     config,
@@ -490,15 +504,20 @@ async function resolvePerson(
     { initialKey: false },
   );
   try {
-    await db.client.insert(userIdentities).values({ id: newId(), userId: created.user.id, issuer, subject, createdAt: nowIso() });
+    await db.transaction(function* (tx) {
+      yield tx.insert(userIdentities).values({ id: newId(), userId: created.user.id, issuer, subject, createdAt: nowIso() });
+      yield tx.update(users).set({ email }).where(eq(users.id, created.user.id));
+    });
   } catch (err) {
-    // A concurrent first login of the same person won the identity: theirs stands, this user goes.
+    // Nothing was published, so this user goes. A concurrent first login of
+    // the same person won the identity: theirs stands. Or another user took
+    // the address meanwhile.
     await db.client.delete(users).where(eq(users.id, created.user.id));
     const winner = await linkedUser(db, issuer, subject);
     if (winner) return winner;
+    if (isUniqueViolation(err, USERS_EMAIL_INDEX)) throw new OidcLoginError(EMAIL_IN_USE);
     throw err;
   }
-  await db.client.update(users).set({ email }).where(eq(users.id, created.user.id));
   return { id: created.user.id, name: created.user.name };
 }
 

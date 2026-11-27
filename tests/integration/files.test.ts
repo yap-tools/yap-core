@@ -8,7 +8,7 @@ import { request } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { sweepOrphans } from "../../src/core/files.js";
-import { UPLOAD_ERROR_JS, UPLOAD_FINALIZE_JS } from "../../src/widgets/registry.js";
+import { FORMAT_BYTES_JS, UPLOAD_ERROR_JS, UPLOAD_FINALIZE_JS } from "../../src/widgets/registry.js";
 import { describeEachAdapter } from "../helpers/adapters.js";
 import { apiClient, type ApiClient } from "../helpers/api.js";
 import { bootTestApp, TEST_SYSADMIN_KEY, type TestApp } from "../helpers/app.js";
@@ -475,7 +475,7 @@ describeEachAdapter("files", (adapter) => {
  * coupling that message-text matching left untested.
  */
 describe("upload-dropzone error classification (server contract ↔ widget)", () => {
-  const explainUploadFailure = new Function(UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
+  const explainUploadFailure = new Function(FORMAT_BYTES_JS + UPLOAD_ERROR_JS + " return explainUploadFailure;")() as (
     stage: string,
     status: number,
     contentType: string,

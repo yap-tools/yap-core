@@ -195,6 +195,88 @@ describeEachAdapter("spaces & grants", (adapter) => {
     });
   });
 
+  describe("grantees by person: name and email on rows, grant by email", () => {
+    let spaceId: string;
+    let carolId: string;
+    let danaId: string;
+
+    beforeAll(async () => {
+      spaceId = (await alice.post("/v1/spaces", { name: "People" })).body.id;
+      carolId = (await sysadmin.post("/v1/users", { name: "Carol", email: "carol@example.com" })).body.user.id;
+      // An invite: an email, no login yet.
+      danaId = (await sysadmin.post("/v1/users", { name: "Dana", email: "dana@example.com" })).body.user.id;
+    });
+
+    it("every row names its grantee: userName and userEmail beside userId", async () => {
+      await alice.post(`/v1/spaces/${spaceId}/grants`, { userId: bobId, capabilities: ["read_items"], effect: "allow" });
+      await alice.post(`/v1/spaces/${spaceId}/grants`, { userId: carolId, capabilities: ["read_items"], effect: "allow" });
+      const rows = (await alice.get(`/v1/spaces/${spaceId}/grants`)).body.data;
+      expect(rows.find((g: any) => g.userId === bobId)).toMatchObject({ userName: "Bob", userEmail: null });
+      expect(rows.find((g: any) => g.userId === carolId)).toMatchObject({ userName: "Carol", userEmail: "carol@example.com" });
+      // The creator's seeded rows carry Alice, who has no email.
+      expect(rows.filter((g: any) => g.userId === aliceId).every((g: any) => g.userName === "Alice" && g.userEmail === null)).toBe(true);
+    });
+
+    it("grants by email, matched whatever its case and surrounding space", async () => {
+      const res = await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        email: "  Carol@Example.COM ",
+        capabilities: ["edit_items"],
+        effect: "allow",
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(res.body.data).toEqual([
+        expect.objectContaining({ userId: carolId, userName: "Carol", userEmail: "carol@example.com", capability: "edit_items" }),
+      ]);
+      const rows = (await alice.get(`/v1/spaces/${spaceId}/grants`)).body.data;
+      expect(rows.some((g: any) => g.userId === carolId && g.capability === "edit_items")).toBe(true);
+    });
+
+    it("grants by email to a user who has not logged in yet (an invite)", async () => {
+      const res = await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        email: "dana@example.com",
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.data[0]).toMatchObject({ userId: danaId, userName: "Dana" });
+    });
+
+    it("an unknown email is a 404 and creates nobody", async () => {
+      const before = (await sysadmin.get("/v1/users?limit=200")).body.data.length;
+      const res = await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        email: "nobody@example.com",
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      expect(res.status).toBe(404);
+      expect(res.body.error.message).toBe("no user with that email");
+      expect((await sysadmin.get("/v1/users?limit=200")).body.data.length).toBe(before);
+    });
+
+    it("refuses both userId and email, neither, and a malformed email", async () => {
+      const both = await alice.post(`/v1/spaces/${spaceId}/grants`, {
+        userId: carolId,
+        email: "carol@example.com",
+        capabilities: ["read_items"],
+        effect: "allow",
+      });
+      expect(both.status).toBe(400);
+      expect(both.body.error.message).toMatch(/not both/);
+      const neither = await alice.post(`/v1/spaces/${spaceId}/grants`, { capabilities: ["read_items"], effect: "allow" });
+      expect(neither.status).toBe(400);
+      expect(neither.body.error.message).toMatch(/grantee is required/);
+      const malformed = await alice.post(`/v1/spaces/${spaceId}/grants`, { email: "carol", capabilities: ["read_items"], effect: "allow" });
+      expect(malformed.status).toBe(400);
+    });
+
+    it("checks manage_roles before looking the email up (no address oracle)", async () => {
+      for (const email of ["carol@example.com", "nobody@example.com"]) {
+        const res = await bob.post(`/v1/spaces/${spaceId}/grants`, { email, capabilities: ["read_items"], effect: "allow" });
+        expect(res.status, email).toBe(403);
+      }
+    });
+  });
+
   describe("pagination", () => {
     it("paginates space listings with opaque cursors", async () => {
       const mine = apiClient(app.baseUrl, (await sysadmin.post("/v1/users", { name: "Pager" })).body.initialKey.key);

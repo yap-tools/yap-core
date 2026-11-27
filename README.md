@@ -150,7 +150,46 @@ Three ways to run an instance, by how much you need it to survive:
 (macOS) pointing at the instance directory and prints the activation
 commands — the OS owns supervision; the CLI deliberately is not a process
 manager. `yap upgrade [version]` reinstalls the vendored server and restarts
-a running instance.
+a running instance (see *Upgrading* below).
+
+### Upgrading
+
+`yap upgrade [version]` checks the new version against the instance's data
+before it installs anything, so an upgrade cannot leave an instance that
+refuses to start:
+
+1. It installs the target into a staging directory (`.yap/staging`), leaving
+   the installed server, and the process running it, as they are.
+2. It runs the staged version's `yap preflight` against the live database.
+   Preflight opens the database read-only and runs the checks of every
+   migration that version would apply (see *Backups* for what they guard
+   against). A running server keeps serving meanwhile.
+3. If a check fails, the upgrade stops: it prints what to change and on which
+   rows, installs nothing, takes no backup and does not restart. The old
+   version is still installed and running. Make the change, then run
+   `yap upgrade` again.
+4. Otherwise it backs up with the installed server, installs the exact build
+   it checked, and restarts an instance started with `yap start`.
+
+`yap upgrade [version] --check` does steps 1 and 2 only: it reports, exits 1
+when the target would refuse to start, and changes nothing. The staging copy
+is removed after every run. A target from before preflight has nothing to
+run in step 2; the upgrade says so and goes on.
+
+`yap preflight` on its own checks the server installed in the instance
+against its data, and exits 0 or 1. Run from a different build of yap-core
+(`node <path>/dist/index.js preflight` in the instance directory), it checks
+that build.
+
+The check is a snapshot: data written after it can still trip a check. The
+server runs the same checks again right before it migrates at startup and
+refuses to start, changing nothing, if one fails.
+
+Under `yap daemon install` (systemd or launchd), and on any host where the
+code is installed some other way, `yap upgrade` does not restart the server,
+and a server that refuses to start is restarted over and over by the
+supervisor. Run `yap upgrade --check` (or, after installing the new version
+by hand, `yap preflight`) before you restart it.
 
 **Tracking `main` (dev builds).** The `--version` argument (on `init`,
 `create`, and `upgrade`) also accepts a branch name or commit instead of a
@@ -196,8 +235,8 @@ local dev.
 | `YAP_KEY_LOGIN` | `true` | `false` switches access-key login off for the whole instance: pages offer only the providers, no user key can be made, and user keys are refused on `/v1` and `/mcp`. Needs a provider, or startup fails ([docs/key-login.md](docs/key-login.md)) |
 | `YAP_SIDELOAD_ENABLED` | `true` | `false` turns off sideloading (the server fetching a caller-supplied URL into a bundle) for the whole instance |
 | `YAP_SIDELOAD_TIMEOUT_MS` | 60000 | Wall-clock budget for one sideload: DNS, every redirect and the body |
-| `YAP_HOOK_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries); keeps its pre-services name for operator compatibility |
-| `YAP_HOOK_ALLOW_HOSTS` | *(empty)* | SSRF-guard allowlist for intentional internal service targets; keeps its pre-services name — it IS the knob |
+| `YAP_HTTP_TIMEOUT_MS` | 30000 | The http driver's per-call timeout (no automatic retries) |
+| `YAP_EGRESS_ALLOW_HOSTS` | *(empty)* | Comma list of exact host names and IP addresses that may reach private addresses through any driver's egress (the SSRF guard's exceptions). No wildcards or CIDR ranges: an entry with `*` or `/` stops startup. An allowed name stands for every address it resolves to, private and metadata addresses included, so list only names you control. The older names `YAP_HOOK_TIMEOUT_MS` and `YAP_HOOK_ALLOW_HOSTS` are still read when the new one is unset, with a warning at startup |
 | `YAP_RUN_WAIT_CAP_MS` | 25000 | Ceiling on a caller's `wait_ms`: how long `run_service`/`POST /v1/services/:id/run` may block before returning a still-running run |
 | `YAP_RUN_TIMEOUT_CAP_MS` | *(unset = uncapped)* | Operator ceiling on any driver action's own `timeoutMs` |
 | `YAP_RUN_RETENTION_DAYS` | 7 | Terminal runs (`succeeded`/`failed`) older than this are pruned |
@@ -224,9 +263,18 @@ They are taken automatically at the moments data is at risk:
 - **Before schema migrations** — at startup, when the server detects pending
   migrations on an existing database, it writes a backup first. If that
   backup fails, the server refuses to start rather than migrate data it
-  could not save (`YAP_BACKUP_BEFORE_MIGRATE=false` opts out).
+  could not save (`YAP_BACKUP_BEFORE_MIGRATE=false` opts out). A migration
+  that cannot take the data as it stands is checked first and applies
+  nothing: the server refuses to start and logs what to change. So far one
+  does: `0019_unique_user_email` stops when users share an email address and
+  names them; give all but one of each a different email or none on the
+  previous version (`PATCH /v1/users/:id {"email": null}`), then upgrade again.
+  `yap upgrade` runs the same checks before it installs a new version (see
+  *Upgrading*), so they normally stop an upgrade instead of a start.
 - **Before upgrades** — `yap upgrade` backs up via the currently-installed
-  server before swapping code (`--skip-backup` opts out).
+  server before swapping code (`--skip-backup` opts out), once the new
+  version has passed its preflight against the data (see *Upgrading*); an
+  upgrade that stops at preflight takes no backup.
 - **On a schedule** — set `YAP_BACKUP_SCHEDULE="0 3 * * *"` and optionally
   `YAP_BACKUP_KEEP=7`; the server runs the schedule in-process, no cron job
   needed.
@@ -276,7 +324,9 @@ metadata and descending only into the relevant branch:
   `create_service`, `update_service`, `delete_service`, `secret_request` and
   `approval_request`.
   Management (gated by the matching capability): `update_space` /
-  `delete_space`, `list_grants` / `grant_role` / `revoke_grant`,
+  `delete_space`, `list_grants` / `grant_role` / `revoke_grant` (rows name
+  the grantee with `userName` and `userEmail`; `grant_role` takes `user_id`
+  or `email`),
   `update_bundle` / `delete_bundle`, `create_item_type` / `update_item_type` /
   `delete_item_type`, `add_property` / `update_property` / `delete_property`.
 - **`list_drivers`** → the installed service drivers, their actions, and each
@@ -549,7 +599,7 @@ be the instance's externally reachable origin (https except on loopback).
   it finalized in one synchronous call. It is a plain GET of an http(s) URL —
   the caller cannot supply credentials or headers — sent through the same
   guarded egress as service drivers, so private and link-local destinations
-  are refused (`YAP_HOOK_ALLOW_HOSTS` to allowlist) and each of at most five
+  are refused (`YAP_EGRESS_ALLOW_HOSTS` to allowlist) and each of at most five
   redirects is checked again. The size cap and MIME allowlist apply, one time
   budget covers the whole download (`YAP_SIDELOAD_TIMEOUT_MS`), a failed
   sideload leaves nothing behind, and the source URL is not stored. The name
@@ -625,7 +675,7 @@ be the instance's externally reachable origin (https except on loopback).
   The built-in **`http` driver** — what every hook was, and still the default
   when a service names no driver — fires an outbound HTTP request with the
   declared parameters substituted in. Private/link-local destinations are
-  denied by default (`YAP_HOOK_ALLOW_HOSTS` to allowlist), checked at
+  denied by default (`YAP_EGRESS_ALLOW_HOSTS` to allowlist), checked at
   authoring time, again at run time, and pinned at connect time so the
   request connects only to the validated address (closing DNS-rebinding).
   JSON bodies use a structured `body_json` whose substituted values are
@@ -719,7 +769,7 @@ be the instance's externally reachable origin (https except on loopback).
   land on a run record), result or error, and its bundle I/O trail — file/item reads and item/file writes recorded as metadata only — pruned
   after `YAP_RUN_RETENTION_DAYS` (default 7) once terminal. Each action
   carries its own time budget, and only the built-in `http` driver's is
-  operator-tunable (`YAP_HOOK_TIMEOUT_MS`); the `mail` driver and any
+  operator-tunable (`YAP_HTTP_TIMEOUT_MS`); the `mail` driver and any
   external driver declare their own budgets, which an operator can bound
   downward — never upward — with `YAP_RUN_TIMEOUT_CAP_MS`. Every run also
   records who started it and how: `userId`, `source` (`mcp`, `rest`, `hook`
@@ -811,7 +861,13 @@ be the instance's externally reachable origin (https except on loopback).
   the upload dropzone's "Paste image" button read the clipboard. Ctrl/Cmd-V
   needs no permission: the dropzone takes focus when it safely can (its
   document already has focus, or the pointer first enters it), and says so
-  when the clipboard is blocked rather than declined. The media card takes
+  when the clipboard is blocked rather than declined. When the clipboard has
+  items but none is an `image/*` type (a photo copied from iOS Photos, say),
+  both paste routes say it can't be pasted as an image and point to Choose
+  file, with a muted "Clipboard had: …" line listing up to five of the MIME
+  types the device offered; an empty clipboard keeps the plain "No image"
+  message. An upload the server refuses for its type is named
+  ("This image type isn't accepted here (image/heic)…"). The media card takes
   `show_file`'s result as its data, flat (`show_widget(widget="media-card",
   params=<result>)`); a `{widget, data}` or `{data}` wrapper around it is
   unwrapped, so passing the whole `_meta` envelope still renders. Images,
